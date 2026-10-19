@@ -20,7 +20,6 @@ EBOOT*
 /analysis/
 /src/recomp/
 /src/spu_gen/
-/src/gen/
 
 # --- Build output and local tooling ---
 /build*/

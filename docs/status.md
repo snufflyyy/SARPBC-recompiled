@@ -11,7 +11,7 @@ work session. Newest log entry first. Use absolute dates.
 | 1 | Extract PKG to `vfs/` (`tools/extract.sh`) | done 2026-10-18 |
 | 2 | Decrypt EBOOT.BIN + SPUJOBS.SPRX (`tools/decrypt.sh`) | done 2026-10-18 |
 | 3 | Load + triage ELF, record imports/SPU/NP facts | done 2026-10-18 (see game-profile.md) |
-| 4 | Project skeleton from the template, first lift + build on Linux | next |
+| 4 | Project skeleton from the template, first lift + build on Linux | skeleton + lift done 2026-10-18; build waiting on system packages |
 | 5 | Boot to first file opens / first HLE gaps | — |
 | 6 | Loading screen draws (`LOADSCREEN` FPO/VPO) | — |
 | 7 | Intro movies / main menu | — |
@@ -24,16 +24,18 @@ work session. Newest log entry first. Use absolute dates.
   from the Drakengard 3 fork (`soyjxck/ps3recomp`) as patches when needed. See
   `patches/ps3recomp/README.md`.
 - **2026-10-18 — decryption via RPCS3 CLI**, isolated config, scripted in `tools/decrypt.sh`.
+- **2026-10-18 — platforms: Linux primary with Vulkan; Windows later with D3D12.** CMake
+  turns `PS3RECOMP_RSX_VULKAN` on for Linux; `src/main.cpp` selects Vulkan → D3D12 →
+  Metal → null. Linux-only conveniences need a Windows branch.
 
 ## Next steps
 
-1. Copy `external/ps3recomp/templates/project/` into the repo (`CMakeLists.txt`,
-   `src/main.cpp`, `src/stubs.cpp`, `config.toml`); name the target `sarpbc`.
-2. Write `tools/relift.sh` (loader → lifter with `--hle-stubs --chunks` → `gen_hle_nids`).
-3. First build on Linux: runtime alone (`ps3recomp_host --draw` with Vulkan), then the
-   port; switch `main.cpp` to the Vulkan backend.
-4. First run with `PS3_HDD0_ROOT=vfs/dev_hdd0 PS3_FSLOG=1`; record what breaks.
-5. Lift the 15 embedded SPU ELFs (`build_spu_workloads.py --input`); work out how to get
+1. User installs build deps: `sudo dnf install SDL2-devel vulkan-headers glslang-devel`.
+2. Build the runtime alone first (`ps3recomp_host --draw` with Vulkan), then
+   `cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++`
+   and `cmake --build build`. Watch RAM (256 TUs of ~100k lines) and disk (~20 GB free).
+3. First run with `PS3_FSLOG=1 tools/run.sh`; record what breaks.
+4. Lift the 15 embedded SPU ELFs (`build_spu_workloads.py --input`); work out how to get
    the Edge Geometry job images out of `SPUJOBS.prx`.
 
 ## Open questions
@@ -45,6 +47,19 @@ work session. Newest log entry first. Use absolute dates.
 - Does the upstream POSIX boot scaffold get a UE3-sized title to `main` on Linux?
 
 ## Log
+
+### 2026-10-18 (session 3)
+- Copied ps3recomp `templates/project` (@ `838800e`) to `CMakeLists.txt`, `src/main.cpp`,
+  `src/stubs.cpp`, `config.toml`. Changes: project `sarpbc`, Release default,
+  `PS3RECOMP_RSX_VULKAN` on for Linux, paths for `external/ps3recomp`, `src/recomp`,
+  `src/spu_gen`; `main.cpp` picks Vulkan on Linux and `setup_vfs()` maps the HDD title.
+- `tools/relift.sh` + `tools/run.sh` written. First lift: 2 min 50 s, 60,152 functions
+  lifted (OPD 47,602 + 12,275 split by prologue scan) + 4,245 mid-function tail-entry
+  wrappers = 64,397 emitted; 351 jump tables (3,080 cases); 274 import stubs →
+  `ps3_hle_call`; NID table 1,195 handlers / 93 modules. Output 1.6 GB, 27.2M lines in
+  256 chunks of ~100k lines. No unhandled instructions; 6,815 `/* TODO: .word */`
+  (data words inside code ranges).
+- Build blocked: SDL2, Vulkan headers and glslang dev packages are not installed.
 
 ### 2026-10-18 (session 2)
 - `git init` (branch `main`), `.gitignore` excluding all game data and generated output,

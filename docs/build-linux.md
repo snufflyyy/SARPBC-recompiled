@@ -4,7 +4,20 @@ Host: Fedora (kernel 7.x), zsh. Available at the time of writing: `clang` (in
 `~/.local/bin`), `gcc` via ccache, `cmake`, `ninja`, `python3`, `git`, `gh`. RPCS3 is
 **not** installed (needed by the user for decryption only).
 
+Linux is the primary platform and Vulkan the renderer. Windows (D3D12, clang-cl) is a
+later target: the template's Windows paths are kept intact, so don't remove them.
+
+Machine notes (2026-10-18): AMD Radeon RX 7700/7800 XT (Navi 32) with Mesa RADV
+installed; 16 threads; 31 GB RAM; **only ~21 GB free on /home**. The lift and build
+outputs are large, so check `df -h` before a clean build.
+
 ## Dependencies
+
+One command for Fedora 44:
+
+```bash
+sudo dnf install SDL2-devel vulkan-headers glslang-devel   # SDL2-devel = sdl2-compat-devel
+```
 
 | Need | Fedora package / note |
 |---|---|
@@ -19,20 +32,21 @@ Host: Fedora (kernel 7.x), zsh. Available at the time of writing: `clang` (in
 ## Configure / build
 
 ```bash
-git submodule update --init external/ps3recomp      # once the repo exists
-cmake -S . -B build -G Ninja \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-      -DPS3RECOMP_DIR=$PWD/external/ps3recomp \
-      -DPS3RECOMP_RSX_VULKAN=ON
-cmake --build build
+git submodule update --init external/ps3recomp
+cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+cmake --build build          # -> build/sarpbc
+tools/run.sh                 # build/sarpbc game/EBOOT.elf vfs, window + guest shaders on
 ```
 
-- Release by default: a debug build of lifted code runs at roughly a third of the speed
-  (observed in sibling ports). Use `RelWithDebInfo` when you need a debugger.
-- The project CMake is copied from `$PS3RECOMP/templates/project/CMakeLists.txt`. It
-  links `ps3recomp_runtime`, compiles the per-game PPU scaffold (`runtime/ppu/`), and
-  globs `src/recomp/*.cpp` — reconfigure after every relift.
+- Our `CMakeLists.txt` defaults to `Release` and turns `PS3RECOMP_RSX_VULKAN` on for
+  Linux, and points at `external/ps3recomp`, `src/recomp`, `src/spu_gen`. A debug
+  build of lifted code runs at roughly a third of the speed; use `RelWithDebInfo` for
+  a debugger.
+- It is the template's `CMakeLists.txt` (ps3recomp `templates/project` @ `838800e`) with
+  those changes; diff against the template on a pin bump. It links `ps3recomp_runtime`,
+  compiles the per-game PPU scaffold (`runtime/ppu/`), and globs `src/recomp/*.cpp` —
+  reconfigure after every relift.
+- `clang` here is `~/.local/bin/clang` (ROCm clang 20); `/usr/bin/gcc` is GCC 16.
 - Lifted TUs are huge. Keep `--chunks` high enough that no single file takes minutes, and
   watch RAM with `-j$(nproc)`; lower parallelism if the linker or compiler OOMs.
 - Verify the upstream runtime on its own first:
@@ -41,10 +55,10 @@ cmake --build build
 
 ## Graphics backend selection
 
-The template's `main.cpp` picks the backend **at build time**: D3D12 on Windows, Metal on
-Apple, the headless null backend elsewhere. On Linux we must switch `main.cpp` to the
-Vulkan backend when `PS3RECOMP_RSX_VULKAN` is on (look at how `ps3recomp_host` does it).
-Runtime switches (from upstream `BUILDING.md`):
+`src/main.cpp` picks the backend **at build time**: Vulkan when `PS3RECOMP_RSX_VULKAN`
+is defined (Linux), else D3D12 on Windows, Metal on Apple, the headless null backend
+elsewhere. Without glslang the Vulkan backend still builds but stays fixed-function
+(no guest shaders). Runtime switches (from upstream `BUILDING.md`):
 
 | Variable | Effect |
 |---|---|

@@ -11,10 +11,11 @@ you are touching instead of re-scanning the tree or the game files.
 
 ## Current state (keep this line true)
 
-**Phase 3: analysed, not yet lifted.** Git repo + ps3recomp submodule set up; PKG
-extracted to `vfs/`; EBOOT and SPUJOBS decrypted to `game/`; `ppu_loader` output in
-`analysis/`. No port code or lift yet. Live status and next steps:
-[docs/status.md](docs/status.md).
+**Phase 4: lifted, not yet built.** Project skeleton from the ps3recomp template is in
+place (`CMakeLists.txt`, `src/main.cpp`, `src/stubs.cpp`); `tools/relift.sh` lifted the
+EBOOT to `src/recomp/` (64,397 functions, 256 chunks). The first build is waiting on
+system packages (SDL2-devel, vulkan-headers, glslang-devel). No SPU lift yet. Live
+status and next steps: [docs/status.md](docs/status.md).
 
 ## Key facts
 
@@ -26,7 +27,7 @@ extracted to `vfs/`; EBOOT and SPUJOBS decrypted to `game/`; `ppu_loader` output
 | Engine | Unreal Engine 3, package version 539 (`0x21B`), game module `TAGame` |
 | Executable | NPDRM SELF → `game/EBOOT.elf`: stripped PPC64, 47,602 functions, 274 imports from 20 libraries |
 | SPU code | 15 SPU ELFs in the EBOOT (Edge zlib, PhysX, MultiStream DSP) + Edge Geometry jobs in `game/SPUJOBS.prx` |
-| Host | Linux (Fedora), clang + CMake + Ninja; Vulkan is the render backend |
+| Platforms | **Linux is primary** (Fedora, clang + CMake + Ninja), rendering through **Vulkan**. Windows comes later on ps3recomp's D3D12 backend — keep code portable (`#ifdef _WIN32` for POSIX-only calls) |
 | Toolkit | `external/ps3recomp` = upstream `sp00nznet/ps3recomp` v0.15.0 (`39a3629`), pinned. Features from the Drakengard 3 fork are brought over as patches ("middle path", see `patches/ps3recomp/README.md`) |
 | Closest reference | Drakengard 3 ([soyjxck/dod3-recomp](https://github.com/soyjxck/dod3-recomp)), a playable UE3 port on ps3recomp |
 
@@ -40,7 +41,7 @@ extracted to `vfs/`; EBOOT and SPUJOBS decrypted to `game/`; `ppu_loader` output
    submodule. Changes to it, including features ported from the Drakengard 3 fork, live
    as patches in `patches/ps3recomp/` (see its README) and are offered upstream. Shared
    runtime code must stay title-agnostic (upstream ratchets this with `tools/title_hacks.py`).
-3. **Generated code is never hand-edited.** `src/recomp/`, `src/spu_gen/`, `src/gen/` are
+3. **Generated code is never hand-edited.** `src/recomp/` and `src/spu_gen/` are
    rebuilt by `tools/relift.sh`. Game-specific behaviour goes in `src/overrides/` or
    `src/stubs.cpp`, keyed by guest address or NID.
 4. **Record what you learn.** A new fact about the binary (an address, a subsystem, a
@@ -65,7 +66,7 @@ tools/rpcs3/                 RPCS3 AppImage + isolated config, used only by decr
 .venv/                       Python venv for ps3recomp tools — git-ignored
 src/main.cpp src/stubs.cpp   from the ps3recomp project template
 src/overrides/               per-address / per-NID game fixes
-src/recomp/ src/spu_gen/ src/gen/   GENERATED — git-ignored
+src/recomp/ src/spu_gen/     GENERATED (lift, NID table, SPU) — git-ignored
 tools/                       extract.sh, relift.sh, run.sh, helper scripts
 CMakeLists.txt  config.toml
 ```
@@ -76,10 +77,10 @@ CMakeLists.txt  config.toml
 git submodule update --init   # external/ps3recomp, then apply patches/ps3recomp/*.patch
 tools/extract.sh      # PKG -> vfs/dev_hdd0/game/NPUB30035/   (ps3recomp tools/pkg_extract.py)
 tools/decrypt.sh      # RAP + RPCS3 --decrypt (headless) -> game/EBOOT.elf, game/SPUJOBS.prx
-tools/relift.sh       # (not written yet) ppu_loader -> ppu_lifter --hle-stubs -> gen_hle_nids (+ SPU)
-cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-      -DPS3RECOMP_RSX_VULKAN=ON && cmake --build build
-tools/run.sh          # PS3_HDD0_ROOT=vfs/dev_hdd0 ./build/sarpbc game/EBOOT.elf
+tools/relift.sh       # ppu_loader -> ppu_lifter --hle-stubs --chunks 256 -> gen_hle_nids (~3 min)
+cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+cmake --build build   # Release + Vulkan are the defaults on Linux -> build/sarpbc
+tools/run.sh          # build/sarpbc game/EBOOT.elf vfs (main.cpp maps /dev_hdd0 itself)
 ```
 Details and every flag: [docs/pipeline.md](docs/pipeline.md).
 

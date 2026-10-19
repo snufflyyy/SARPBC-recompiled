@@ -8,7 +8,7 @@ Each stage, its inputs/outputs, and the gotchas specific to this title. Scripts 
 .pkg ─(1)─► vfs/dev_hdd0/game/NPUB30035/...  (plain data + still-encrypted SELFs)
 .rap ─(2)─► game/EBOOT.elf, game/SPUJOBS.prx  (decrypted)
      ─(3)─► analysis/*.json                   (functions, imports, image, loader)
-     ─(4)─► src/recomp/*.cpp, src/gen/ppu_hle_nids.cpp
+     ─(4)─► src/recomp/*.cpp (incl. ppu_hle_nids.cpp)
      ─(5)─► src/spu_gen/**, src/spu_workloads.c
      ─(6)─► build/sarpbc
 ```
@@ -86,7 +86,7 @@ python $PS3RECOMP/tools/ppu_lifter.py game/EBOOT.elf \
     --hle-stubs analysis/EBOOT.imports.json \
     --chunks 64 --jobs $(nproc) \
     --output src/recomp/
-python $PS3RECOMP/tools/gen_hle_nids.py --all --out src/gen/ppu_hle_nids.cpp
+python $PS3RECOMP/tools/gen_hle_nids.py --all --out src/recomp/ppu_hle_nids.cpp   # CMake uses it when present
 ```
 
 - `--hle-stubs` is mandatory; without it, or without `ppu_hle_nids.cpp` compiled in, the
@@ -118,13 +118,14 @@ SPU interpreter can stand in (`SPU_FALLBACK.md` upstream).
 See [build-linux.md](build-linux.md). Run:
 
 ```bash
-PS3_HDD0_ROOT=$PWD/vfs/dev_hdd0 PS3RECOMP_VK_WINDOW=1 PS3RECOMP_VK_GUEST_PROGRAMS=1 \
-    ./build/sarpbc game/EBOOT.elf
+tools/run.sh      # = build/sarpbc game/EBOOT.elf vfs, with Vulkan window + guest shaders
 ```
 
-The executable takes the ELF and an optional VFS root. The game is an HDD title, so its
-data must resolve under `/dev_hdd0/game/NPUB30035/` — `PS3_HDD0_ROOT` names the host
-directory that contains `game/`. Confirm the boot path the runtime reports matches.
+`build/sarpbc <EBOOT.elf> [vfs root]`. The game is an HDD title, so `setup_vfs()` in
+`src/main.cpp` points the runtime's three path translators at
+`<vfs>/dev_hdd0/game/NPUB30035/` by defaulting `PS3_VFS_ROOT`, `PS3_HDD0_ROOT`,
+`PS3_USRDIR_BASE`, and sets the guest's argv[0] (`PS3_BOOT_PATH`) to
+`/dev_hdd0/game/NPUB30035/USRDIR/EBOOT.BIN`. Any of them set in the environment wins.
 
 ## Regenerating (`tools/relift.sh`)
 
