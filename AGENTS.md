@@ -13,7 +13,7 @@ you are touching instead of re-scanning the tree or the game files.
 
 **Phase 7 done: 01.09 reaches the main menu (2026-10-19); now SPU performance, then a project audit.**
 The PPU lift, all 15 SPU images, the 2 SPUJOBS jobs and the MultiStream overlay build on 01.02 and
-01.09, with 36 ps3recomp patches. The game runs at ~0.4 fps because PhysX starts one host thread per
+01.09, with 37 ps3recomp patches. The game runs at ~0.4 fps because PhysX starts one host thread per
 SPURS task, the tasks never exit, and they all spin on one global lock-line lock (~1500% CPU).
 Next is the SPURS worker pool (T033) and other easy SPU wins. Agents the user starts (Claude Code,
 pi, Antigravity) take tasks from the board by priority ([docs/workflow.md](docs/workflow.md));

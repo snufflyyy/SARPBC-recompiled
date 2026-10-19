@@ -81,10 +81,21 @@ REC=$(( SECS - 3 ))
 python3 "$ROOT/tools/spu_profile.py" snap "$GPID" "$WORK/proc0.json"
 if [ "$PERF" = 1 ]; then
     perf record -F 499 --call-graph=fp -p "$GPID" -o "$WORK/perf.data" -- sleep "$REC" \
-        > "$WORK/perf_record.log" 2>&1 || { echo "spu_profile: perf record failed:" >&2; tail -5 "$WORK/perf_record.log" >&2; PERF=0; }
-else
-    sleep "$REC"
+        > "$WORK/perf_record.log" 2>&1 || {
+            echo "spu_profile: perf record failed:" >&2
+            tail -5 "$WORK/perf_record.log" >&2
+            PERF=0 WHY="perf record failed (see $WORK/perf_record.log)"
+        }
 fi
+# A container can deny perf_event_open even with paranoid <= 2. A failed
+# recorder can return immediately or partway through the window. In either
+# case keep the /proc snapshots REC seconds apart, not just startup milliseconds
+# (and do not add a full second window after a partial recording).
+python3 - "$WORK/proc0.json" "$REC" <<'PY'
+import json, sys, time
+start = json.load(open(sys.argv[1]))["t"]
+time.sleep(max(0.0, float(sys.argv[2]) - (time.time() - start)))
+PY
 python3 "$ROOT/tools/spu_profile.py" snap "$GPID" "$WORK/proc1.json"
 wait "$BPID" || true
 
