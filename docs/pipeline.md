@@ -144,6 +144,13 @@ executable bytes fall outside any detected function (padding), even though nothi
 unsupported. `src/spu_gen/inventory.json` lists each image's status and reason. CMake picks
 the images up from `src/spu_gen/*/spu_recomp.c` (reconfigure after a relift).
 
+Then `tools/make_spu_overlays.py --spu src/spu_gen --ps3recomp external/ps3recomp` (T007)
+rebuilds MultiStream's DSP plugin block (i3dl2 at +0, para_eq at +0x2800, 0x2E90 bytes),
+lifts it at LS 0x37000 into `src/spu_gen/spu_ovl_msdsp_37000/` and registers it by its first
+16 bytes (patch 0023's `spu_overlay_register_sig_region`). Without it the mixer branches into
+unlifted LS 0x37018 and MultiStream's event flag (`0x01372000` on 01.09) never gets set. It
+must run after `build_spu_workloads.py`, which deletes `src/spu_gen`.
+
 ## Regenerating (`tools/relift.sh`)
 
 One idempotent script runs steps 3–5 so any agent can rebuild generated code after a
