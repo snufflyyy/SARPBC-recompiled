@@ -55,7 +55,34 @@ work. Update the **Status** line of a section when you change it.
 - Rocket-car controls want analog sticks and triggers (L2/R2 likely throttle/brake) —
   verify SDL trigger mapping to the analog pressure values the game reads.
 - `PAD_SCRIPT` lets automated runs press buttons at given frames.
-- Status: not started.
+- **What the game reads (01.09, from the lift):** `func_000D101C` calls cellPadGetData into
+  a stack buffer at r1+0x80. Sticks are `(v - 127) * 1/127` (constant at `0x000D0FF4`),
+  so the centre is 127/128. L2/R2 are the press-mode words button[18]/[19] (guest
+  +0xA8/+0xAA) times 1/255 (`0x000D0FF8`): analog throttle and brake. SIXAXIS words
+  (+0xAC..+0xB2) are read only under per-object flags. When `len == 0` it keeps the last
+  values, and on an error with `len != 0` it calls ClearBuf. `func_000D1AF4` calls
+  GetInfo2 and then `SetPortSetting(port, 2)` only if the port is connected and
+  advertises PRESS_MODE. Rumble (`func_000D35D8` -> SetActDirect) sets the small motor
+  to 0/1, switched on and off per frame for intensity, and the large motor to 0-255.
+  `cellKbRead`/`cellMouseGetDataList` have **no callers**, and cellKbInit/cellMouseInit
+  are not imported, so keyboard play must go through the virtual pad.
+- **ps3recomp patches:** `T008-1-dod3-cellpad-sdl2-port.patch` contains Drakengard 3's
+  13 libs/input commits (soyjxck, MIT, authors kept): an SDL pad thread, pads by instance
+  id, rumble held, `cellPad_set_host_input`, host kind, PAD_NO_HOST.
+  `T008-2-cellpad-racing-fixes.patch` adds our fixes: a half-pulled trigger no longer
+  reads as 255 in press mode, the small motor is on/off (0xFFFF), an empty SDL port's
+  sticks are 128 (was 0 = held up-left), `PAD_TRIGGERS="l2,r2[,from,until]"`, and
+  `PAD_TRACE=1` (logs what reached the guest buffer). Test:
+  `CC=clang python3 external/ps3recomp/libs/input/tests/test_cellpad_sdl.py` (SDL virtual
+  gamepad, 36 checks).
+- **Desk pads:** the SDL thread reads pads even without window focus, so a pad on the desk
+  feeds headless runs. Use `PAD_NO_HOST=1` for hands-off runs.
+- **Esc** closes the Vulkan window (`rsx_vulkan_backend_pump_messages`) and is not
+  available as a binding unless it is filtered.
+- `src/overrides/input_config.cpp`: UPPER-CASE keys in config.toml `[input]` become
+  environment variables (the environment wins). The keyboard -> pad binding override
+  (a port of dod3 `src/input/kbm.cpp` with an SDL key source) is **not written yet**.
+- Status: in progress (T008), paused. See the task's HANDOFF note.
 
 ## SPU / SPURS
 
