@@ -34,7 +34,7 @@ agent picks its own task from the board, works in its own worktree, and merges i
    worktree, just keep going: the branch is level with main after each merge.
 4. Build and run, from the worktree:
    ```bash
-   tools/task.sh lock cpu cmake --build build-0109 -j16
+   ./build.sh            # = re-patch if needed + tools/task.sh lock cpu cmake --build build-0109
    tools/task.sh lock boot env BUILD_DIR=build-0109 tools/boot_check.sh 60 --version 0109   # [--gdb]
    ```
    Paste the first line of `analysis/boot_report.txt` into the task log. Run the game only with

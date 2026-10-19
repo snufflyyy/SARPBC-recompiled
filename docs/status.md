@@ -127,6 +127,11 @@ the board: `tools/task.sh list` (protocol: [workflow.md](workflow.md)). Highest 
 - The repo is on GitHub: `origin` = https://github.com/snufflyyy/SARPBC-recompiled (history checked
   first: no game data, binaries or keys). The task board moved from `tasks/` to `docs/tasks/`.
   `merge_to_main.sh` now pushes `main` to `origin` after each merge; agent branches stay local.
+- Root `./build.sh` / `./run.sh` (01.09 default, `--version 0102`). Verified: both versions build
+  and link, a no-op 01.09 build takes ~1 s, a submodule reset to the bare pin is detected and
+  re-patched, and `./run.sh` boots 01.09 headless (20 s smoke run). A first draft ran
+  `git submodule update`, which detached the submodule at the pin and broke the link: see
+  pipeline.md "Build and run".
 - Checked before cleanup: all 24 worktree branches have 0 commits beyond `main`, and every
   ps3recomp commit in them is in the 36-patch stack (T003's overlay lift landed rebased, as 0008).
   T028 closed (menus reached; follow-up is T037), and its main-menu capture was copied to

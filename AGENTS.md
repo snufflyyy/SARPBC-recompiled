@@ -69,6 +69,7 @@ pi, Antigravity) take tasks from the board by priority ([docs/workflow.md](docs/
 
 ```
 AGENTS.md  CLAUDE.md GEMINI.md   agent entry points (CLAUDE.md and GEMINI.md just import this file)
+build.sh  run.sh             build / play in one command (01.09 default, --version 0102)
 docs/                        technical docs, one topic per file (index below)
 Supersonic Acrobatic ... (USA)/   original .pkg + .rap — read-only, git-ignored
 external/ps3recomp/          git submodule, pinned; override with $PS3RECOMP
@@ -89,6 +90,10 @@ CMakeLists.txt  config.toml
 ```
 
 ## Pipeline in one screen
+
+Day to day, once the game files are in place: **`./build.sh`** then **`./run.sh`** (01.09; add
+`--version 0102` for the base game). `build.sh` re-applies the patch stack only when it changed,
+configures if needed, and builds under the `cpu` lock. From scratch:
 
 ```bash
 tools/apply_patches.sh # submodule at the pin + patches/ps3recomp/*.patch (branch sarpbc-patches)

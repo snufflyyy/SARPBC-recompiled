@@ -122,7 +122,20 @@ SPU interpreter can stand in (`SPU_FALLBACK.md` upstream).
 
 ## 6. Build and run
 
-See [build-linux.md](build-linux.md). Run:
+See [build-linux.md](build-linux.md). The short way, from the repo root:
+
+```bash
+./build.sh [--version 0102] [--clean]   # default 01.09 -> versions/0109/build (build-0109/ in a worktree)
+./run.sh   [--version 0102] [--build] [-- game args]
+```
+
+`build.sh` re-applies `patches/ps3recomp/` only when the patches or the pin changed, or the
+submodule was moved off the commit it last patched. It keeps a stamp (`<hash of pin+patches>
+<HEAD>`) in the submodule's git dir. Re-applying rewrites the runtime headers, and every lifted
+file includes them, so an unneeded re-apply costs a full recompile (~1 min of ccache hits, more on
+a cold cache). It never runs `git submodule update` on an existing checkout: that detaches the
+submodule at the bare pin, and the next build fails to link against the unpatched runtime (seen
+2026-10-19). `run.sh` picks the build, game and vfs dirs for the version and calls:
 
 ```bash
 tools/run.sh      # = build/sarpbc game/EBOOT.elf vfs, with Vulkan window + guest shaders
