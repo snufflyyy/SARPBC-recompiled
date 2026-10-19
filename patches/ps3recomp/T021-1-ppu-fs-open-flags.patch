@@ -1,0 +1,62 @@
+From 9a14752b09bd1c7cfe52ae67cd50e76d0dfedbea Mon Sep 17 00:00:00 2001
+From: soyjxck <soyjxck@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 00:04:43 -0500
+Subject: [PATCH 1/2] ppu_fs: the Cell SDK's open flag values (O_CREAT 0x40,
+ O_TRUNC 0x200)
+
+runtime/ppu/ppu_fs.cpp had the Cell open flags wrong: O_CREAT as 0x200 (the
+real O_TRUNC) and O_TRUNC as 0x400 (the real O_APPEND). A title's
+WRONLY|CREAT (0x41) opened without create and failed with ENOENT, so
+Drakengard 3's game-data install died on its first file and the title quit
+with BROKEN_EXIT_GAMEDATA. With the SDK values (0x40, 0x80 EXCL, 0x200,
+0x400) the install runs to completion.
+
+For SARPBC (cellFsOpen goes through ppu_fs.cpp) the old values also meant
+WRONLY|CREAT|TRUNC (0x241) created a file but never truncated it, and
+O_APPEND truncated: a shorter rewrite of a save or config file kept the old
+tail.
+
+Ported from soyjxck/ps3recomp 6371138 ("Cell open flags, WASAPI format
+conversion, first-guard wait, Windows priorities, async builds"), the
+runtime/ppu/ppu_fs.cpp part only; the rest of that commit is audio, SPURS
+and draw-engine work. MIT, original author kept.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ runtime/ppu/ppu_fs.cpp | 13 ++++++++++---
+ 1 file changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
+index 7f1ffc9..e7d88f3 100644
+--- a/runtime/ppu/ppu_fs.cpp
++++ b/runtime/ppu/ppu_fs.cpp
+@@ -90,9 +90,15 @@ extern "C" const char* ppu_vfs_root = ".";
+ #define CELL_FS_O_RDONLY     0
+ #define CELL_FS_O_WRONLY     1
+ #define CELL_FS_O_RDWR       2
+-#define CELL_FS_O_CREAT      0x0200
+-#define CELL_FS_O_TRUNC      0x0400
+-#define CELL_FS_O_APPEND     0x0100
++/* The Cell SDK's values (cell/cell_fs.h; libs/filesystem/cellFs.h agrees):
++ * O_CREAT 0x40, O_EXCL 0x80, O_TRUNC 0x200, O_APPEND 0x400. This file had CREAT
++ * as 0x200 and TRUNC as 0x400, so a title's WRONLY|CREAT (0x41) opened without
++ * O_CREAT and failed with ENOENT: Drakengard 3's game-data install died on its
++ * first file and the title quit with BROKEN_EXIT_GAMEDATA. */
++#define CELL_FS_O_CREAT      0x0040
++#define CELL_FS_O_EXCL       0x0080
++#define CELL_FS_O_TRUNC      0x0200
++#define CELL_FS_O_APPEND     0x0400
+ #define CELL_FS_SEEK_SET     0
+ #define CELL_FS_SEEK_CUR     1
+ #define CELL_FS_SEEK_END     2
+@@ -221,6 +227,7 @@ static void cellFsOpen(ppu_context* ctx)
+     int oflags = (acc == CELL_FS_O_RDWR)   ? O_RDWR
+                : (acc == CELL_FS_O_WRONLY) ? O_WRONLY : O_RDONLY;
+     if (flags & CELL_FS_O_CREAT)  oflags |= O_CREAT;
++    if (flags & CELL_FS_O_EXCL)   oflags |= O_EXCL;
+     if (flags & CELL_FS_O_TRUNC)  oflags |= O_TRUNC;
+     if (flags & CELL_FS_O_APPEND) oflags |= O_APPEND;
+ 
+-- 
+2.55.0
+
