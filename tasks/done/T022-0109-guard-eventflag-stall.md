@@ -1,7 +1,7 @@
 # T022: 01.09 boot frontier — job guard 0x0133AA80 and event flag 0x01372000
 
-Status: open
-Owner: -
+Status: done
+Owner: coordinator
 Touches: src/overrides/ (new files), patches/ps3recomp/T022-*.patch (libs/spurs/** job guard/job chain only), docs/debugging.md, docs/unreal-engine-3.md
 Reads: docs/dod3-reuse.md, docs/subsystems.md, tasks/done/T019*, T007's HANDOFF note
 
@@ -23,3 +23,5 @@ The boot gets measurably further (boot_check summary before and after), with cau
 - 2026-10-19 09:41 agent-gcm: FYI from T024: with GCM_INTR_THREAD=1 + GCM_PARK_LOG=1, patch T024-3 on branch worktree-agent-a7b0200633f5a06f1, flip-handler parks are patched in ~5 ms and ShaderPatching chain 0x012B6F00 parks are NOPed in 12-21 ms, through io 0xD3C64. The FIFO then stops at the park at io 0xD494C, ea 0x400D494C: the chain ran 227 jobs after it was set and did not patch it, which matches your cause 2. The T023 park at 0x8B144 is the same mechanism, and Edge Geometry writes none of these parks.
 - 2026-10-19 09:41 agent-frontier2: HANDOFF: done = override src/overrides/gcm_inject_base.cpp moves the GCM window to 0x1FF00000 off the game heap at 0x20000000, plus patch T022-spurs-job-chain-rewalk-resume-guard.patch which queues a re-walk for a Run during a walk, resumes at the END slot, and parks a chain on a closed guard after 200 ms with restart on notify. Docs in debugging.md and unreal-engine-3.md. State = merged main at 9473f28, 42 patches apply. The committed changes alone do not move the boot_check summary, because cellGcmSys still resyncs past FIFO parks and drops the fence label write. Last committed-only run: STALLED since 5.6s, last open GUIDCACHE.XXX at 3.6s, flips 5, with SPU_INTERP_UNLIFTED=1. With a local GCM experiment that never resyncs away from a self-JUMP park, plus writer-preferring SRWLOCK: PROGRESSING, last open TEXTURES.TFC at 6.1s, zlib 3279, 7 lit 3 distinct, flips 106, legal and ESRB screen drawn. The experiment diff is in the session scratchpad at agent-frontier2/exp_all.diff and is described in debugging.md. Next = new GCM task for the park resync, new runtime task for the Linux SRWLOCK writer starvation in mfc_for, PhysX task for the unlifted LS 0x20180 and the HALT-ASSERT at 0x24884 with the GETLLAR spin. Branch = worktree-agent-ac9b9a30ee5812ac0
 - 2026-10-19 09:41 agent-frontier2: RELEASED: paused; see HANDOFF
+- 2026-10-19 10:01 coordinator: claimed
+- 2026-10-19 10:01 coordinator: DONE: Merged (gcm_inject_base override + patch 0024). Its remaining leads split into T024 (park resync), T027 (rwlock), T025 (PhysX LS 0x20180) and T028 (ESRB to menus).
