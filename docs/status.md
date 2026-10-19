@@ -3,6 +3,25 @@
 Living document. Update the phase table, "Next steps" and the log at the end of each
 work session. Newest log entry first. Use absolute dates.
 
+## Resume here (paused 2026-10-19 for usage)
+
+**State:** `main` builds both versions with **15 ps3recomp patches** (`tools/apply_patches.sh`).
+01.09 boots past the loading screen, package loading and PhysX init (SPURS queues work), then
+hangs on job guard `0x0133AA80` / event flag `0x01372000` (MultiStream). No agents are running.
+
+**Unmerged WIP branches** (git worktrees under `.claude/worktrees/`; their HANDOFF notes are on the tasks):
+- `worktree-agent-ab345549dd2d5074c`: **T008** controls (dod3 cellPad port + racing fixes, SDL test
+  passes; `src/overrides/input_config.cpp` was never compiled, so build it before merging).
+- T007 audio: see its task's HANDOFF note for the branch (wrapping up when the session paused).
+
+**Open tasks, by priority:** T022 (01.09 frontier), T007 (audio, resume from HANDOFF), T008
+(controls, resume from HANDOFF), T023 (fork fixes), T020 (remaining: unresolved-NID reporting,
+hle-coverage.md), T017 (saves), T021 (rest of the dod3 inventory), T012, T009, T018, T005,
+T010, T011, T013, T014. T015 multiplayer stays **blocked** (user permission needed).
+
+**To restart:** see docs/agents-workflow.md "Pausing and resuming"; spawn agents with
+docs/agent-brief.md. Before building `main`: `tools/apply_patches.sh`, then reconfigure CMake.
+
 ## Phases
 
 | # | Phase | State |
