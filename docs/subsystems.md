@@ -265,12 +265,38 @@ controls screen.
   start of their data segment). Patch `T025-spu-seed-ctors-dtors` seeds every
   `.ctors/.dtors/.init_array/.fini_array` word, and for stripped images finds lists by their
   `-1 ... 0` framing. A relift of 01.09 with it: 15/15 registered, complete, every ctor/dtor
-  entry lifted (checked against functions.json). **Not yet verified at run time** (needs the
-  shared 01.09 `spu_gen` relifted, or `-DSPU_DIR=<copy>`).
-- **SPU speed baseline (T025, 01.09, before any change):** `SPURS_EF_STATS=1` flag
-  `0x01372000` ~75 waits/s (mean 11 ms), `SPU_DMA_RANGE=58000000-58200000` PUT ~410 KB/s
-  (27% of real time). `AUDIO_RATE=1` reports ~197.9 blocks/s with the dummy driver: that is
-  the port's consumption, not the mixer's output, so use the two lines above to measure SPU speed.
+  entry lifted (checked against functions.json). Merged as patch 0028; **verified at run time**
+  on main 171c84d (01.09 relifted, no `SPU_INTERP_UNLIFTED`): 0 "unlifted" lines in a 60 s
+  boot_check. Unit test: `tools/test_spu_find_functions_ctors.py` (patch
+  `T025-spu-ctor-dtor-seed-test`). PhysX still logs `HALT-ASSERT heqi pc=0x24884
+  img=363824547` (~50 per 60 s boot), a separate problem.
+- **SPU speed on x86 (T025, 2026-10-19).** Measure with `SPURS_EF_STATS=1
+  SPU_DMA_RANGE=58000000-58200000` (flag `0x01372000` waits/s = mixer cycles; PUT B/s into the
+  cellAudio port, real time = 1.536 MB/s). `AUDIO_RATE=1` with the dummy driver measures the
+  port's consumption, not the mixer. **Run it under `tools/task.sh lock boot`**, and still
+  expect noise: other agents' builds put the host at load 40-130, and the same binary moved
+  between 75 and 9 waits/s on different days/loads. Two changes:
+  - `spu_shufb` already had an SSE4.1 path, and the runtime library builds with `-msse4.1`,
+    but the lifted SPU TUs are compiled by our CMakeLists and got no ISA flag, so their
+    (out-of-line) `spu_shufb` was the byte loop. CMakeLists now adds
+    `-march=${SARPBC_SPU_X86_ARCH}` (default `x86-64-v2`, `-msse4.2` under clang-cl, probed,
+    x86 only, empty disables) to `SPU_SOURCES` only; the PPU lift is untouched (no rebuild).
+  - `spu_fa/fs/fm/fma/fms/fnms` got an SSE2 fast path (patch `T025-spu-sse2-float-helpers`, a
+    port of upstream's NEON one; SSE2 is baseline x86-64, no flag needed).
+    `runtime/spu/tests/test_spu_float_sse.c` checks it bit for bit against the exact path
+    (clang and gcc, -O2 / x86-64-v2 / x86-64-v3); fma+fm pair 12 ns vs 33 ns scalar.
+  - A/B on 01.09, same lift, 60 s boot_check under the boot lock, mixer PUT averaged over the
+    run (Ryzen 7 5700X, 1-min load in brackets):
+
+    | build | waits/s | PUT | of real time |
+    |---|---|---|---|
+    | before (main 171c84d) | 40.2 / 39.4 | 231 / 226 KB/s | 15.0% / 14.7% (load 46) |
+    | + x86-64-v2 on SPU TUs (shufb) | 121.1 / 61.7 | 694 / 355 KB/s | 45.2% (load 39) / 23.1% (load 134) |
+    | + SSE2 float helpers | 141.3 | 810 KB/s | 52.7% (load 45) |
+
+    So about 3.5x at comparable load; the mixer is still at ~half of real time. Missing: a
+    second "full" run and a perf profile of the full build (next hotspots). Boot summaries did
+    not change (STALLED, last open TEXTURES.TFC@6.1s, pkgs 13, zlib 3279, unresolved 0).
 - **`_cellSpursLFQueuePushBody` (NID `0x8A85674D`) has no HLE upstream.** The override
   handles only 32-byte (Edge zlib) queues and refuses others loudly.
   Request layout: in/out EA, in/out size, counter EA|inflate bit, flag EA, flag bits,
