@@ -62,6 +62,7 @@ order we expect to need them (details in `docs/reference-ports.md`):
 | `0030-ppu-guest-call-stacks.patch` | T026: `ppu_guest_call`/`_ct` run each callback on a per-(host thread, nesting depth) stack carved from the top of the PPU stack region (256 KB + guard page, pooled; `PPU_CB_STACK_SIZE`), not the shared 0xCFFE0000 that also sat in RSX local memory. Test `test_ppu_guest_call_stacks.py` | to offer |
 | `0031-spu-ctor-dtor-seed-test.patch` | T025: unit test for `collect_ctor_dtor_targets` (0028) | with 0028 |
 | `0032-spu-sse2-float-helpers.patch` | T025: SSE2 port of the NEON `fa/fs/fm/fma/fms/fnms` fast path in `spu_helpers.h`, bit-exact (`test_spu_float_sse.c`); fma+fm 12 ns vs 33 ns | to offer |
+| `0033-spu-mfc-cache-lockline-ttas.patch` | T030: `mfc_for` looks up the engine only for MFC_Cmd/WrTagUpdate/WrListStallAck, cached in `spu_context` (`mfc_cache`, `mfc_cache_gen`, invalidated by a registry generation); POSIX `spu_lockline_lock` is TTAS + `_mm_pause` + `sched_yield`/256 like MSVC. 01.09 flips 100 -> 514 in 90 s (one run) | to offer |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `git -C external/ps3recomp format-patch -1 -o ../../patches/ps3recomp/ --start-number N`.

@@ -413,6 +413,55 @@ controls screen.
   never set — see [debugging.md](debugging.md).
 - Status: in progress (T002 done: SPUJOBS loads; job binaries lifted and registered).
 
+### SPU busy-waits and host CPU (T030, 2026-10-19, paused)
+
+- **What spins.** PhysX tasks (image `363824547` = `spu_5af85a31…`, fingerprint
+  `39119073A3F69512`, task entry EA `0x01130600`) get `arg = 0x0133B880` from `CreateTask`.
+  That 128-byte line is a task-side sync object of taskset `0x01335080` (word 25 of the line).
+  Word 1 is a lock word: the task's acquire at LS `0x32B44` (lr `0x2577C`) does
+  GETLLAR, stores `~w1` (negative = held) and PUTLLCs; its release at LS `0x32FA4`
+  (lr `0x257B4`) stores `-w1` (positive, sequence +1). Word 0 counts up between the two.
+  Words 2-5: `0x10`, `0x80`, buffer EA `0x0133B900`. Error returns `0x804109xx` are
+  `CELL_SPURS_TASK_ERROR_*`, so this is a libspurs task-side primitive. The writers are the
+  other PhysX tasks (their release); nothing on the PPU. Evidence: `SPU_ATOM_EA=0133B880
+  SPU_ATOM_FULL=2` trace, and the lift at `0x32B44`/`0x32D2C` (GETLLAR `0xD0`, PUTLLC `0xB4`).
+  A second family (image `7bde2a3f`, entry `0x011E3300`, arg `0x0133AF00`) does the same at
+  LS `0x6ACC`.
+- **Why it eats the host.** `CreateTask` keeps creating these tasks (ids past 1000 in 90 s)
+  and every task gets its own host thread, so 140-220 threads run at once (real SPURS runs at
+  most 6). All of them serialize on the single process-wide lock-line spinlock
+  (`spu_lockline_lock`, runtime/spu/spu_coherency.c). gdb at 90 s: 142 threads in
+  `spu_lockline_lock < spu_wrch < spu_func_00032B44`, 21 in `…00006ACC`. T029's profiler
+  (60 s): `spu_lockline_lock` 83% of samples, rwlock 6.8%, `mfc_for` 4.1%, lifted SPU code 0.8%.
+- **`HALT-ASSERT heqi pc=0x24884`** (~92 per 90 s) is in the same image but on a different
+  path: T028 found it guards a `memalign(128, 2n+2)` result at LS `0x34258` (16-byte alignment).
+  Not caused by the lock-line spin; whether it causes more task re-creation is open.
+- **Patch T030-spu-mfc-cache-lockline-ttas** (1) `mfc_for` looks up the engine only for
+  `MFC_Cmd`, `WrTagUpdate`, `WrListStallAck` (staging writes and all MFC reads are context
+  state). The lookup is served from `spu_context.mfc_cache`, which a registry generation
+  validates (every free bumps it) plus an owner check (struct copies). (2) The POSIX lock-line
+  lock is now test-and-test-and-set with `_mm_pause` and `sched_yield` every 256 spins, like the
+  MSVC path. Semantics unchanged; the registry and coherence tests pass
+  (`tools/test_spu_context_registries.py`: 558/634/195/51 passed).
+- **Numbers** (01.09, 90 s, `GCM_INTR_THREAD=1 GCM_PARK_GRACE_MS=600000`, boot lock, `--gdb`,
+  `/proc/<pid>/stat` sampled every 2 s; host load from other agents 40-220):
+
+  | | host CPU 10 s-end | threads | flips | frame dumps (distinct) | last image change |
+  |---|---|---|---|---|---|
+  | before (8ad1fb8) | 1563% | 202 | 100 | 7 (3) | 41.2 s |
+  | after (patch) | 1568% | 218 | 514 | 20 (15) | 24.7 s |
+
+  CPU does not drop, because the threads still spin, now in `sched_yield` (gdb: 144 of them).
+  But useful work gets the cores: 5x the flips and 15 distinct frames. One run each, on a
+  loaded host, so treat it as a strong hint, not a measurement.
+- **Next.** (a) Bound the host threads: run SPURS tasks on at most N (6) host workers instead
+  of one thread per task. This is the real fix and touches spu_workload.c/libs/spurs (T028's
+  area). (b) Park a reservation spinner: a GETLLAR on a line the context still holds unchanged
+  should back off and then wait on `ch_wait_cv` with a ~1 ms timeout. Every writer already calls
+  `spu_coh_notify_write` → `spu_ch_wake`. (c) `spu_coh_reserve`/`notify_write` walk every
+  registered context under the lock (O(n) with 200 contexts). Index them by line.
+  (d) Contention-aware PUTLLC retry backoff.
+
 ## Video (Bink)
 
 - BinkPS3 is statically linked game code; the three `BINKPS3_*.BIN` files are its RSX
