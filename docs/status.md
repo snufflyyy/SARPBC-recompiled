@@ -7,7 +7,7 @@ work session. Newest log entry first. Use absolute dates.
 
 **Priority (user, 2026-10-19): get 01.09 into the menus.** Every slot works on the boot stall; features wait.
 
-**State:** `main` builds both versions with **22 ps3recomp patches** (`tools/apply_patches.sh`).
+**State:** `main` builds both versions with **23 ps3recomp patches** (`tools/apply_patches.sh`).
 01.09 boots past the loading screen, package loading and PhysX init (SPURS queues work), then
 hangs on job guard `0x0133AA80` / event flag `0x01372000` (MultiStream).
 
@@ -21,8 +21,14 @@ GetData (~4.0 s on 01.09), not from launch.
 sys_fs overlay, SPURS task error codes); boot unchanged (stall at 21.6 s). New lead: GCM FIFO
 parks on a jump-to-self at io 0x8B144 (T024).
 
-**Running (all on the boot stall):** T022 (job guard 0x0133AA80, agent-frontier2), T007 narrowed to
-the DSP lift that unblocks flag 0x01372000 (agent-audio), T024 (GCM FIFO, agent-gcm).
+**Merged 2026-10-19:** T007: MultiStream DSP block lifted at LS 0x37000 (`tools/make_spu_overlays.py`,
+patch 0023): flag 0x01372000 no longer blocks, `SPU_INTERP_UNLIFTED` not needed. Boot now:
+`STALLED since 22.2s | last open GUIDCACHE.XXX@7.2s | pkgs 13`. Sound still silent (nothing plays
+before the stall); the mixer runs at 27% of real time (T025). Remaining audio work: T007 HANDOFF.
+
+**Running (all on the boot stall):** T022 (job guard 0x0133AA80, agent-frontier2), T024 (GCM FIFO
+jump-to-self at io 0x8B144, agent-gcm), T025 (PhysX unlifted LS 0x20180 + SPU x86 speed,
+agent-spuperf).
 
 **Open tasks, by priority (after the menus):** T020 (remaining: unresolved-NID reporting,
 hle-coverage.md), T017 (saves), T021 (rest of the dod3 inventory), T012, T009, T018, T005,
