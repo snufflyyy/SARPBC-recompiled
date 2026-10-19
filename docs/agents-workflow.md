@@ -24,18 +24,19 @@ coordinator (the main session) creates tasks, spawns agents, reviews and merges.
    them, write a note (`tools/task.sh note <ID> <you> "need X in file Y because Z"`) and
    either work around it or stop and report. The coordinator resolves overlaps.
 4. Build under the CPU lock: `tools/task.sh lock cpu cmake --build build -j16`.
-5. Run the game with a timeout, **never** `pkill sarpbc` / `pkill -f`. Other agents' game
+5. Boot under the boot lock: `tools/task.sh lock boot env BUILD_DIR=build-0109 tools/boot_check.sh 60 --version 0109`. One game at a time, because parallel boots overload the host (load ~160 on 16 cores, 2026-10-19) and make timing-sensitive stalls and perf numbers meaningless.
+6. Run the game with a timeout, **never** `pkill sarpbc` / `pkill -f`. Other agents' game
    instances have the same name:
    `timeout -k 5 -s TERM 60 tools/run.sh > analysis/run.log 2>&1`.
    To attach gdb, use the PID your own `timeout` started (e.g. `pgrep -P <timeout pid>`).
-6. Log progress as you go: `tools/task.sh note <ID> <you> "..."` (findings, dead ends,
+7. Log progress as you go: `tools/task.sh note <ID> <you> "..."` (findings, dead ends,
    numbers). Losing context mid-task loses everything that isn't written down.
-7. **Document as you work** (AGENTS.md rule 4). Put facts about the game or toolkit
+8. **Document as you work** (AGENTS.md rule 4). Put facts about the game or toolkit
    in the matching `docs/*.md` file in your worktree, in the same commit as the code that
    relies on them. Don't leave it for the end.
-8. Commit on your worktree branch with clear messages (end them with the attribution line
+9. Commit on your worktree branch with clear messages (end them with the attribution line
    from the system prompt). Do not push and do not merge into `main`; the coordinator does.
-9. Finish with `tools/task.sh done <ID> <you> "<one-paragraph summary>"` and say in your
+10. Finish with `tools/task.sh done <ID> <you> "<one-paragraph summary>"` and say in your
    final report: branch name, commits, what changed, what is verified (with the command
    and output), and what is left open.
 

@@ -33,7 +33,7 @@ from your worktree:
 cmake -S . -B build-0109 -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
   -DRECOMP_DIR=<main>/versions/0109/src/recomp -DSPU_DIR=<main>/versions/0109/src/spu_gen
 tools/task.sh lock cpu cmake --build build-0109 -j16
-BUILD_DIR=build-0109 tools/boot_check.sh 60 --version 0109     # [--gdb]
+tools/task.sh lock boot env BUILD_DIR=build-0109 tools/boot_check.sh 60 --version 0109   # [--gdb]
 ```
 Paste the first line of `analysis/boot_report.txt` into your task notes.
 
@@ -49,7 +49,7 @@ fork, or "Ported from <repo> <sha/path>, MIT" in the commit message and file hea
 - Never commit game data, firmware, keys, or anything derived from them. **Never download Sony
   firmware.** Never connect to RPCN or any community server (multiplayer is blocked, see T015).
 - Never write into the shared symlinked dirs or the main checkout's `versions/`.
-- Builds run under `tools/task.sh lock cpu ...`. Run the game only with a timeout or boot_check.
+- Builds run under `tools/task.sh lock cpu ...`. Run the game only with a timeout or boot_check. Boots whose numbers you compare run under `tools/task.sh lock boot ...` (one game at a time: five parallel boots put a 16-core host at load ~160 and skew timing-sensitive stalls).
   **Never** `pkill sarpbc`, `pkill -f` or `killall`: other agents' games have the same name.
 - Scratch files go in a subdirectory of the session scratchpad named after you.
 - ps3recomp changes: commit in your worktree's `external/ps3recomp` (branch sarpbc-patches), then
