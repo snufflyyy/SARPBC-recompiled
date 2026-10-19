@@ -40,12 +40,76 @@ work. Update the **Status** line of a section when you change it.
 - **Confirmed: MultiStream** (statically linked `cellMS*`, incl. MP3 stream functions)
   on SPU, with DSP effects as embedded SPU ELFs (`mstream_dsp_i3dl2/filter/para_eq`),
   outputting through cellAudio (10 imports). `cellMusicUtility` = custom soundtrack.
-- Same stack as Drakengard 3: their native MP3 decoder stand-in and DSP hooks
-  (`src/apu/`) are the reference if MultiStream asks for a firmware decoder.
+- **01.09 boot, 2026-10-19 (T007):** `cellAudio` Init / PortOpen(8 ch, 8 blocks, buffer
+  `0x58000000`, read index `0x58100000`) / PortStart all succeed. The MultiStream mixer is
+  **SPU image 0** (sha `e33837bb...`, fp `C1759183E2FF7448`, task ELF at EA `0x010AF300`),
+  started as taskset `0x01370680` task 0. Its "MultiStream Update Thread" (entry OPD
+  `0x01225628`) waits on SPURS event flag `0x01372000` bit 1, which the mixer sets.
+- **Blocker 1: the DSP plugin block (FIXED 2026-10-19, `tools/make_spu_overlays.py`).** The
+  mixer copies the DSP plugins' text into one heap block, GETs it to **LS 0x37000** and calls
+  into it (0x37018, 0x37010, 0x37C20, then 0x39818/0x39810/0x39B50; return addresses
+  0x03930/0x03AE0/0x04130). Nothing was lifted there, so the task ended with "branched into
+  unlifted LS 0x37018" and flag `0x01372000` never got set (`EventFlagWait BLOCKED ...
+  flagEA=0x01372000`). Layout, from `SPU_DUMP_OVL=<dir>,0x37000` on 01.09: one 0x2E90-byte
+  block, **`mstream_dsp_i3dl2.pic` text at +0x0000 (0x27C0 bytes) and
+  `mstream_dsp_para_eq.pic` at +0x2800 (0x690)**, byte for byte the ELFs' executable PT_LOADs
+  (va 0x80 = block +0; no relocation applied). `mstream_dsp_filter.pic` is not loaded. dod3's
+  2013 MultiStream packs three plugins at 0x0/0x2000/0x2900, so the table is per title.
+  `tools/make_spu_overlays.py --spu <SPU_DIR>` (ported from dod3, MIT; `tools/relift.sh`
+  runs it after `build_spu_workloads.py`) finds the plugins among the lifted images by their
+  SPUNAME string, rebuilds the block, wraps it at 0x37000, lifts it as
+  `<SPU_DIR>/spu_ovl_msdsp_37000/` (94 functions; seeds: entries, +0x10 of each plugin, the
+  instruction after each `bi $r0`), and appends a constructor that registers it under image
+  id `0x4D534401` with `spu_overlay_register_sig_region(first 16 bytes, 0x2E90)`; CMake's
+  `*/spu_recomp.c` glob picks it up with no other change. Verified on 01.09 without
+  `SPU_INTERP_UNLIFTED`: no "unlifted LS 0x37..." and no BLOCKED on `0x01372000`; perf shows
+  the `spu_ovl_msdsp_37000_*` functions running. **01.02:** its plugins are different builds
+  (i3dl2 0x2800, para_eq 0x680 bytes), so the tool lays para_eq at +0x2800 there too, but
+  that layout is a guess (no 01.02 dump yet; check with `SPU_DUMP_OVL`).
+- **Open: the mixer is too slow for real time.** One mixer cycle = one wait on `0x01372000`;
+  each full cycle PUTs one 8 KB block (8 ch x 256 x float) into the cellAudio port
+  (`SPU_DMA_RANGE=58000000-58200000`, PUT from SPU pc 0x095D0). Real time is 187.5 blocks/s
+  = 1.536 MB/s. Measured (01.09, Ryzen 7 5700X, `SPURS_EF_STATS=1`): **75 cycles/s, 410 KB/s
+  (27% of real time)**; built with `-DCMAKE_C_FLAGS=-msse4.1`: 120 cycles/s, 660 KB/s (43%).
+  `perf` (default build): 37% of all samples in the out-of-line `spu_shufb` byte loop (the
+  pshufb path needs `__SSE4_1__`, which our default x86-64 build does not define), ~17% in
+  the scalar SPU float helpers (`spu_fa`/`spu_fs`/`spu__fma_any`; upstream vectorises them
+  for NEON only), 28% in the lifted i3dl2/para_eq code (0x37614, 0x37198, 0x39A18, 0x37B20),
+  16% in the mixer itself. The i3dl2 hot loop (0x37478-0x37974) is optimised SPU code (comb/
+  allpass delay taps), not dod3's -O0 biquads, so dod3's `msdsp_hooks.c` addresses do not
+  apply. Cheapest wins, both generic: build the SPU sources with SSE4.1 (or
+  `-march=x86-64-v2`), and an SSE2/AVX version of the NEON float fast path in
+  `runtime/spu/spu_helpers.h`. Until then real audio would stutter.
+- **Blocker 2: `flashMP3.pic` (FIXED, untested end to end).** The PPU (01.09 `func_0082E690`)
+  reads `/dev_flash/sys/external/flashMP3.pic` into a buffer and `func_00835588` parses its
+  SPU ELF section table into a descriptor {+0 file EA, +4 body EA, +8 lowest sh_addr,
+  +C size, +10 e_entry}. Without it: "Multistream: mp3 failed to load MP3 codec".
+  `src/overrides/audio_mp3.cpp` (ported from dod3 `mp3_native.c`, MIT) writes a stand-in
+  ELF of our own to `<exe dir>/dev_flash/` at start-up and sets `PS3_DEV_FLASH` (unless the
+  user set it), registers a native `decodeFrame` at **LS 0x1A910** (body at 0x1A900, as in
+  dod3; the mixer's descriptor sits at LS 0x1A880 and it calls decodeFrame at SPU 0x6E2C
+  through the word at LS 0x3C4B0) and decodes with dod3's decoder
+  (`audio_mp3dec.cpp`). Verified: the file opens and the error is gone. **Not verified:**
+  no MP3 stream starts before the boot stalls at "Loading...", so decodeFrame has not been
+  called yet. `SARPBC_MP3_TRACE=<n>` logs the first n calls, `SARPBC_MP3_NATIVE=0` turns it off.
+- **cellAudio on Linux (patch `T007-audio-pacing-devflash-sig-region`):** the POSIX mixing
+  loop now paces to the SDL queue (it used fixed 2/5 ms sleeps), and
+  `AUDIO_RATE=1` / `AUDIO_PEAK=1` / `AUDIO_WAV=<file>` work on Linux. With PipeWire
+  (`SDL_AUDIODRIVER=pulseaudio`): `[audio-rate] 187.5 blocks/s (real time 187.5), silent
+  100.0%, dropped 0 frames/s, underruns 0`: the port runs at real time on a real device,
+  but every block is silent (nothing reaches the port yet).
+  The same patch moves the `/dev_flash` default off a Windows path
+  (`$XDG_DATA_HOME/ps3recomp/dev_flash`) and adds `spu_overlay_register_sig_region()`.
+- Still seen: `[mfc] REJECTED malformed transfer ... pc=0x0B1C8 lsa=0x30B60 size=0` from
+  the mixer, a size-0 GET (a no-op on hardware too; probably an empty stream list).
 - ps3recomp: cellAudio over SDL2 on Linux (`SDL_AUDIODRIVER=dummy` for silent runs,
   `PS3_NO_AUDIO` to disable).
 - `cellMic` (15 imports) for voice chat — stub "no mic attached" first.
-- Status: not started.
+- Status (2026-10-19, T007): the port runs on a real device (pulseaudio, 0 underruns); the
+  mixer runs lifted (DSP block at 0x37000) and PUTs every block it finishes into the port,
+  but slower than real time (above); MP3 stand-in in place. Every block so far is silent
+  (`AUDIO_PEAK=1`: peak 0.0000): the 01.09 boot stalls at "Loading..." before any sound
+  plays, so nothing audible can be checked yet.
 
 ## Input
 
