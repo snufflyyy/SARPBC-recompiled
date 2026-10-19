@@ -76,6 +76,9 @@ export PS3RECOMP_VK_WINDOW=${PS3RECOMP_VK_WINDOW:-0}
 export PS3RECOMP_VK_GUEST_PROGRAMS=${PS3RECOMP_VK_GUEST_PROGRAMS:-1}   # as tools/run.sh
 export SDL_AUDIODRIVER=${SDL_AUDIODRIVER:-dummy}
 export PS3_FSLOG=${PS3_FSLOG:-1}
+# Without it src/overrides/edgezlib.cpp logs only requests #0-3 and the total only at
+# a clean exit, so a stall with zlib traffic still flowing would look dead.
+export SARPBC_ZLIB_TRACE=${SARPBC_ZLIB_TRACE:-1}
 export PS3RECOMP_VK_DUMP=${PS3RECOMP_VK_DUMP:-$CAP/frame.ppm}
 export PS3RECOMP_VK_DUMP_EVERY=${PS3RECOMP_VK_DUMP_EVERY:-$EVERY}
 
@@ -167,7 +170,8 @@ rm -f "$PS3RECOMP_VK_DUMP"
     echo "timeout_fired=$TFIRED"
     echo "dump_every=$PS3RECOMP_VK_DUMP_EVERY"
     echo "frames_dir=$CAP"
-    echo "env=PS3RECOMP_VK_WINDOW=$PS3RECOMP_VK_WINDOW SDL_AUDIODRIVER=$SDL_AUDIODRIVER PS3_FSLOG=$PS3_FSLOG PS3RECOMP_VK_DUMP_EVERY=$PS3RECOMP_VK_DUMP_EVERY"
+    echo "env=PS3RECOMP_VK_WINDOW=$PS3RECOMP_VK_WINDOW SDL_AUDIODRIVER=$SDL_AUDIODRIVER PS3_FSLOG=$PS3_FSLOG SARPBC_ZLIB_TRACE=$SARPBC_ZLIB_TRACE PS3RECOMP_VK_DUMP_EVERY=$PS3RECOMP_VK_DUMP_EVERY"
+    echo "gdb=$GDB"
 } > "$RUN/meta.txt"
 
 python3 "$ROOT/tools/boot_report.py" report "$LOG" --run-dir "$RUN" --out "$RUN/report.txt" > /dev/null

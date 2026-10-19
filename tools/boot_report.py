@@ -30,9 +30,14 @@ NOISE = (r"^\s+(r[0-9]|rawstk|ARG)|timer_usleep\(30 us\)|opendir|CLEAR_SURFACE|S
          r"|SetPrepareFlip|GET_REPORT|label write|usercmd|sys_memory\] allocate|LWM-|DRAW_ARRAYS"
          r"|port_send|\[WAIT\] event_queue_receive\(.*timeout=0\)|^\s*$")
 NOISE_RE = re.compile(NOISE)
+# Shown in the report but not counted as progress: runtime housekeeping that
+# recurs while the game is stuck (the GCM ring recycle comes every ~25 s).
+NOT_PROGRESS_RE = re.compile(r"recycled the title's own ring|^\[spu_workload\] task .* sleeping|"
+                             r"^\[null-write\] further stores")
 
 RE_OPEN = re.compile(r"^\[fs\] open '([^']+)' -> (fd \d+|.*)")
-RE_ZLIB = re.compile(r"^\[edgezlib\] #(\d+)")
+RE_ZLIB = re.compile(r"^\[edgezlib\] #(\d+) (?:inflate|copy)")
+RE_ZLIB_TOTAL = re.compile(r"^\[edgezlib\] (\d+) requests \(")   # printed at a clean exit
 RE_TCREATE = re.compile(r'^\[SYS\] sys_ppu_thread_create tid=(\d+) name="([^"]*)" entry=(0x[0-9A-Fa-f]+)')
 RE_TEND = re.compile(r"^\[THREAD (\d+)\] entry RETURNED")
 RE_THOST = re.compile(r"^\[THREAD (\d+)\] host thread started, entry=(0x[0-9A-Fa-f]+) hosttid=(\d+)")
@@ -46,6 +51,7 @@ RE_NORM = re.compile(r"0x[0-9A-Fa-f]+|\d+")
 
 # Lines worth seeing even once; the report shows the first of each and a count.
 ALERTS = OrderedDict([
+    ("fatal", r"\bFATAL\b|aborting run"),
     ("unresolved-call", r"unresolved indirect call"),
     ("open-fail", r"^\[fs\] open FAIL"),
     ("unimplemented", r"Unimplemented NID"),
@@ -56,6 +62,7 @@ ALERTS = OrderedDict([
     ("physx-error", r"^PhysX: Error"),
     ("assert", r"(?i)assert|appErrorf|fatal error|Critical:"),
     ("spu-miss", r"dispatch MISS"),
+    ("zlib-fail", r"^\[edgezlib\] .*(did not inflate|unsupported)"),
     ("vk-error", r"^\[RSX vulkan\].*(fail|error)"),
     ("blocked", r"EventFlagWait BLOCKED"),
     ("host-signal", r"(?i)caught signal|SIGSEGV|SIGBUS|SIGILL|segmentation fault"),
@@ -79,7 +86,7 @@ def ppm_stats(data):
     if magic != b"P6" or maxval != b"255" or len(px) != w * h * 3:
         return None   # caught mid-write: try again next tick
     step = 3 * 97
-    sampled = len(px) // step
+    sampled = len(range(0, len(px), step))
     lit = sum(1 for i in range(0, len(px), step) if px[i:i + 3] != b"\0\0\0")
     return w, h, sampled, lit, hashlib.md5(px).hexdigest()[:12]
 
@@ -239,17 +246,20 @@ def fmt_t(t):
 
 
 def gdb_summary(path, lwp_names, maxthreads=40):
-    """One line per host thread: its guest name (from the log's hosttid=) and
-    the innermost guest frames, plus the innermost host frame if no guest one
-    is on top."""
+    """One line per thread running guest code: its guest name (from the log's
+    hosttid=), the innermost guest frames and the host frame it sits in. Host
+    threads with no guest frame are folded into one line."""
     if not path or not os.path.exists(path):
         return []
-    out, cur, frames, host = [], None, [], None
+    out, other, cur, frames, host = [], Counter(), None, [], None
 
     def flush():
-        if cur:
-            g = " < ".join(frames[:4]) if frames else "(no guest frame)"
-            out.append(f"  {cur:<34} {g}" + (f"   [{host}]" if host else ""))
+        if not cur:
+            return
+        if frames:
+            out.append(f"  {cur:<34} {' < '.join(frames[:5])}" + (f"   [{host}]" if host else ""))
+        else:
+            other[cur.split(" ", 2)[2]] += 1
 
     for ln in open(path, errors="replace"):
         m = re.match(r'^Thread \d+ \(Thread 0x[0-9a-f]+ \(LWP (\d+)\) "([^"]*)"\)', ln)
@@ -257,15 +267,21 @@ def gdb_summary(path, lwp_names, maxthreads=40):
             flush()
             cur, frames, host = f"LWP {m.group(1)} {lwp_names.get(int(m.group(1)), m.group(2))}", [], None
             continue
-        m = re.match(r"^#\d+\s+(?:0x[0-9a-f]+ in )?(\S+)", ln)
+        m = re.match(r"^#\d+\s+(?:0x[0-9a-f]+ in )?([^\s(]+)", ln)
         if m and cur:
             fn = m.group(1)
             if fn.startswith("func_"):
                 frames.append(fn)
-            elif host is None and not frames:
-                host = fn
+            elif host is None and not frames and " from /" not in ln:
+                host = fn   # innermost frame in our binary: the HLE/syscall it waits in
     flush()
-    return out[:maxthreads]
+    out = out[:maxthreads]
+    if other:
+        out.append(f"  + {sum(other.values())} host threads with no guest frame: "
+                   + ", ".join(f"{n} x{c}" if c > 1 else n for n, c in other.most_common()))
+    if not out:
+        out.append("  (gdb printed no threads; see gdb.txt)")
+    return out
 
 
 def cmd_report(a):
@@ -275,13 +291,20 @@ def cmd_report(a):
     frames = []
     if rd and os.path.exists(os.path.join(rd, "frames.jsonl")):
         frames = [json.loads(ln) for ln in open(os.path.join(rd, "frames.jsonl")) if ln.strip()]
-    imports = load_imports(a.imports)
+    imp = a.imports
+    if not imp:   # a staged version (versions/V/build) has its own versions/V/analysis
+        own = meta.get("build_dir") and os.path.join(os.path.dirname(meta["build_dir"]), "analysis",
+                                                     "imports_named.json")
+        imp = own if own and os.path.exists(own) else os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "analysis", "imports_named.json")
+    imports = load_imports(imp)
 
     raw = open(a.log, "rb").read().decode("utf-8", "replace").split("\n")
     if raw and raw[-1] == "":
         raw.pop()
 
     opens, pkgs, zlib, threads, unres, unres_calls = [], OrderedDict(), [], [], OrderedDict(), OrderedDict()
+    zlib_total = 0
     missing = OrderedDict()
     lwp_names = {}
     alerts = OrderedDict()
@@ -305,6 +328,9 @@ def cmd_report(a):
         m = RE_ZLIB.match(ln)
         if m:
             zlib.append((i, int(m.group(1))))
+        m = RE_ZLIB_TOTAL.match(ln)
+        if m:
+            zlib_total = max(zlib_total, int(m.group(1)))
         m = RE_TCREATE.match(ln)
         if m:
             threads.append({"tid": int(m.group(1)), "name": m.group(2), "entry": m.group(3), "i": i, "end": None})
@@ -337,7 +363,8 @@ def cmd_report(a):
         norm = RE_NORM.sub("#", ln.strip())
         if norm not in seen_norm:
             seen_norm.add(norm)
-            new_lines.append((i, ln))
+            if not NOT_PROGRESS_RE.search(ln):
+                new_lines.append((i, ln))
         if norm in tail:
             c = tail.pop(norm)[0]
             tail[norm] = [c + 1, i, ln]
@@ -426,7 +453,8 @@ def cmd_report(a):
     if lo:
         parts.append(f"last open {short(lo[1])}{fmt_t(t(lo[0]))}")
     parts.append(f"pkgs {len(pkgs)}" + (f" ({','.join(list(pkgs)[-1:])} last)" if pkgs else ""))
-    parts.append(f"zlib {len(zlib)}")
+    nzlib = max(zlib_total, zlib[-1][1] + 1 if zlib else 0)
+    parts.append(f"zlib {nzlib}")
     if frames or meta:
         parts.append(f"dumps {len(frames)} lit {len(lit_frames)} distinct {distinct}")
     parts.append(f"flips {flips}")
@@ -486,7 +514,9 @@ def cmd_report(a):
         w(f"   {len(opens)} opens of {len({o[1] for o in opens})} distinct files")
     else:
         w("-- no file opened (is PS3_FSLOG / [fs] logging on?)")
-    w(f"-- Edge zlib: {len(zlib)} requests" + (f", last #{zlib[-1][1]} {fmt_t(t(zlib[-1][0]))}" if zlib else ""))
+    w(f"-- Edge zlib: {nzlib} requests" + (f", last logged #{zlib[-1][1]} {fmt_t(t(zlib[-1][0]))}" if zlib else "")
+      + ("" if meta.get("env", "").find("SARPBC_ZLIB_TRACE=1") >= 0 or zlib_total
+         else "  (only #0-3 are logged without SARPBC_ZLIB_TRACE=1)"))
     if missing:
         w(f"-- missing files: {len(missing)} distinct (last 8)")
         for path, (i, c, how) in list(missing.items())[-8:]:
@@ -535,6 +565,9 @@ def cmd_report(a):
     if meta.get("pid"):
         lwp_names.setdefault(int(meta["pid"]), "tid 1 main")
     gs = gdb_summary(rd and os.path.join(rd, "gdb.txt"), lwp_names)
+    if meta.get("gdb") == "1" and not gs:
+        w("")
+        w("-- guest stacks: --gdb skipped, the game had already ended")
     if gs:
         w("")
         w("-- guest stacks at the end (gdb; innermost first)")
@@ -567,8 +600,8 @@ def main():
     r.add_argument("--summary", action="store_true", help="print only the one-line summary")
     r.add_argument("--window", type=float, default=10.0, help="final window for the progress check (s)")
     r.add_argument("--last", type=int, default=20, help="how many distinct tail lines to show")
-    r.add_argument("--imports", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                                     "..", "analysis", "imports_named.json"))
+    r.add_argument("--imports", help="NID names (default: <build_dir>/../analysis/imports_named.json "
+                                     "if present, else this checkout's analysis/imports_named.json)")
     wa = sub.add_parser("watch", help="sample a running game (used by boot_check.sh)")
     wa.add_argument("--log", required=True)
     wa.add_argument("--pid", type=int, required=True)
