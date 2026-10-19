@@ -21,3 +21,4 @@ The patch and test are committed, the verification numbers are in the task log, 
 docs/pipeline.md is updated.
 
 ## Log
+- 2026-10-18 23:19 coordinator: tools/relift.sh changed in main (847776d+): GAME_DIR/OUT_DIR env vars and automatic CODE_END from the section headers. 01.09 has no TOC-stub runs (split finds 0), so test the loader fix on 01.02 (game/) and check that it is a no-op on versions/0109/game.

@@ -39,3 +39,4 @@ __pycache__/
 /.locks/
 /.worktrees/
 /updates/
+/versions/

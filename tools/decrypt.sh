@@ -7,12 +7,15 @@
 # The AppImage is downloaded on first use (latest RPCS3/rpcs3-binaries-linux release).
 #
 #   tools/extract.sh && tools/decrypt.sh
+#   VFS_DIR=versions/0109/vfs GAME_DIR=versions/0109/game tools/decrypt.sh   # another version
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 R=$ROOT/tools/rpcs3
 CFG=$R/config
-USRDIR=$ROOT/vfs/dev_hdd0/game/NPUB30035/USRDIR
+VFS_DIR=$(realpath -m "${VFS_DIR:-$ROOT/vfs}")
+GAME_DIR=$(realpath -m "${GAME_DIR:-$ROOT/game}")
+USRDIR=$VFS_DIR/dev_hdd0/game/NPUB30035/USRDIR
 RAP=$(ls "$ROOT"/Supersonic*/*.rap)
 
 [ -f "$USRDIR/EBOOT.BIN" ] || { echo "no $USRDIR/EBOOT.BIN -- run tools/extract.sh first"; exit 1; }
@@ -39,7 +42,7 @@ for f in EBOOT.BIN SPUJOBS.SPRX; do
         "$R/squashfs-root/AppRun" --decrypt "$WORK/$f" </dev/null
 done
 
-mkdir -p "$ROOT/game"
-mv "$WORK/EBOOT.elf" "$ROOT/game/EBOOT.elf"
-mv "$WORK/SPUJOBS.prx" "$ROOT/game/SPUJOBS.prx"
-sha256sum "$ROOT/game/EBOOT.elf" "$ROOT/game/SPUJOBS.prx"
+mkdir -p "$GAME_DIR"
+mv "$WORK/EBOOT.elf" "$GAME_DIR/EBOOT.elf"
+mv "$WORK/SPUJOBS.prx" "$GAME_DIR/SPUJOBS.prx"
+sha256sum "$GAME_DIR/EBOOT.elf" "$GAME_DIR/SPUJOBS.prx"

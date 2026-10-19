@@ -24,6 +24,12 @@ work session. Newest log entry first. Use absolute dates.
   from the Drakengard 3 fork (`soyjxck/ps3recomp`) as patches when needed. See
   `patches/ps3recomp/README.md`.
 - **2026-10-18 — decryption via RPCS3 CLI**, isolated config, scripted in `tools/decrypt.sh`.
+- **2026-10-18 — target version: official update 01.09** (3 extra arenas, replays,
+  fixes; Sony CDN, verified). Staged in `versions/0109/` while the first agent wave
+  finishes on 01.02, then swapped in. HLE/NID-level fixes carry over; anything
+  address-specific is redone. See game-profile.md "Versions and updates".
+- **2026-10-18 — offline play first; multiplayer last and blocked** until the user has
+  permission from the community server operators (T015).
 - **2026-10-18 — platforms: Linux primary with Vulkan; Windows later with D3D12.** CMake
   turns `PS3RECOMP_RSX_VULKAN` on for Linux; `src/main.cpp` selects Vulkan → D3D12 →
   Metal → null. Linux-only conveniences need a Windows branch.

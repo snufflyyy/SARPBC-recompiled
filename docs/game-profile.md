@@ -165,3 +165,33 @@ was shut down on 2023-01-24). An update installs over the base under the same
 Known issues the community reports under RPCS3 with the online mod (worth checking in
 our port): scoring on Galleon crashes ("fails to allocate memory"), saving replays crashes,
 and the frame rate is uncapped in the engine.
+
+### 01.09 at a glance (staged in `versions/0109/`, 2026-10-18)
+
+| | 01.02 | 01.09 |
+|---|---|---|
+| EBOOT.elf sha256 | `8a76237b…` | `85d698f5…` |
+| Code (exec segment) | 27.8 MB | 18.3 MB |
+| OPD functions / lifted | 47,602 / 64,397 | 22,154 / 41,431 (13,601 split by prologue, 5,387 tail-entry wrappers) |
+| Lifted source | 7.57M lines, 442 MB | 5.79M lines, 387 MB |
+| Code end (`.lib.stub`) | `0x194FD80` | `0xF8F718` |
+| Entry OPD / TOC | `0x1BE8EC0` / `0x1C6EA28` | `0x12018A8` → `0xADB68` / `0x123C6D0` |
+| TOC-switch stub runs | 2 (4,242 stubs) | 0 |
+| Imports | 274 / 20 libs, 17 unnamed | 288 / 21 libs, 20 unnamed |
+| SPU images registered | 14/15 | 12/15 |
+
+Import changes in 01.09: **+cellGame** (BootCheck, DataCheck, ContentPermit,
+CreateGameData, GetParamString, GetSizeKB, ContentErrorDialog), **+cellPngDec** (7),
+**+cellSaveData** via cellSysutil (FixedSave2, ListLoad2), **+cellVoice** (10, replacing
+**cellMic**), +cellAudioOut device queries, more cellGcm flip/FIFO calls
+(_cellGcmSetFlipCommand(WithWaitLabel), Get/ResetFlipStatus, SetDefaultFifoSize),
+cellSpursInitializeWithAttribute, sys_ppu_thread_once, _sys_spu_printf_initialize/finalize,
+sceNpBasicSetPresence / AddPlayersHistoryAsync, sceNpDrmExecuteGamePurchase. Removed:
+cellMsgDialogProgressBarInc / Close (the call behind the 01.02 trophy race), cellHddGameCheck,
+several cellAudio port calls, cellSyncLFQueueGetDirection.
+
+SPU in 01.09: all PhysX images are byte-identical to 01.02 (image `5af85a31…` is still
+refused for overlapping PT_LOADs). The MultiStream DSP images changed. Image 0
+(`e33837bb…`, 95,636 B) and Edge zlib (`d08b1ad8…`, 38,100 B) changed and fail with
+"unsupported instructions emitted by lifter" (T016). SPUJOBS.prx is a new 53 KB module
+(`189316bc…`).

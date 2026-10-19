@@ -26,3 +26,4 @@ per cause. Report the new frontier.
 
 ## Log
 - 2026-10-18 23:12 agent-frontier: claimed
+- 2026-10-18 23:18 agent-frontier: Cause 1 found: ps3recomp sys_memory is a bump allocator that never reuses freed ranges; UE3 frees/reallocs 64KB pages (323 frees in 60s) and walks off the 0x40000000-0x50000000 window -> ENOMEM -> OOM wide-string written to NULL by func_005F8E38, then 'IO Failure detected'. Fix (range table, first fit) in ps3recomp sys_memory.c: boot now opens DLC dir, flashMP3.pic, DEMOS, GUIDCACHE.XXX, MAINMENU.XXX. Also: edgezlib only prints first 4 requests (n<4); '4 requests' was a log limit.
