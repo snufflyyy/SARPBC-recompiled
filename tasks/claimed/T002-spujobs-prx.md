@@ -1,7 +1,7 @@
 # T002: Load SPUJOBS.SPRX (sys_prx_load_module / sys_prx_start_module are unresolved)
 
-Status: open
-Owner: -
+Status: claimed
+Owner: agent-prx
 Touches: src/overrides/prx_*.cpp (new), docs/subsystems.md (SPU section), docs/game-profile.md (SPU code section), tools/ (new scripts only)
 Reads: game/SPUJOBS.prx, external/ps3recomp/tools/lift_prx.py, prx_exports.py, runtime/ppu/ppu_sysprx.cpp
 
@@ -22,3 +22,5 @@ images so cellSpurs job chains can dispatch them (SPU_DUMP_MISS, find_spu_functi
 plan for them. Documented in docs/subsystems.md.
 
 ## Log
+- 2026-10-18 23:12 agent-prx: claimed
+- 2026-10-18 23:20 agent-prx: Findings: SPUJOBS.prx (01.02 and 01.09) is a data-only PRX: no imports, exports only module_start/stop/info (NIDs BC9A0086/AB779874/D7F43016). module_start (12 insns, identical in both) copies 4 TOC words into argp: {seg0+0x100 Edge Geometry job binary, size, seg0+tail job binary, 0x108}. 01.02: job1 size 0xFC00, job2 @seg0+0xFD80; 01.09: job1 size 0xBD80, job2 @seg0+0xBE80 (same 0x108 size). Relocs only ADDR32 (type 1), 16 entries. Game calls load(path,0,0) at lr 0x6E4A88 and start(id,4,argp=sp+0x98,modres=sp+0x70,0,0) at lr 0x6E4B08, then stores argp[0..3] into 4 globals (TOC-0x41F4/-0x41F0/-0x4164/-0x4160) and creates the ShaderPatching job chain. Plan: generic sys_prx_load/start/stop/unload in toolkit (file-driven loader + relocations + module table; decrypted copy looked up next to the loaded EBOOT.elf or PS3_PRX_DIR; module_start via lifted fn if registered, else a strict leaf-function evaluator), plus a tools/ script that extracts+lifts the job binaries listed by module_start.

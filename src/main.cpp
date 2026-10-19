@@ -77,6 +77,11 @@ void     ps3_load_prx_modules(void);
 /* src/overrides/: firmware functions the runtime lacks, done for this title. */
 void     sarpbc_register_edgezlib(void);
 
+/* libs/system/cellGame.c: title id and game type (CATEGORY HG -> HDD) from the
+ * install's PARAM.SFO. Without it cellGame answers "disc game BLES00000", and
+ * 01.09 builds every data path from that. */
+void     cellGame_init_from_paramsfo(const char* sfo_path);
+
 extern const char* ppu_vfs_root;              /* host dir the PS3 mount points map into */
 
 /* The status the guest handed to sys_process_exit. A title that exits that way
@@ -305,6 +310,10 @@ static bool setup_vfs(const char* vfs_arg)
     setenv("PS3_USRDIR_BASE", game, 0);
     setenv("PS3_BOOT_PATH", BOOT_PATH, 0);
     setenv("PS3_TITLE", "Supersonic Acrobatic Rocket-Powered Battle-Cars", 0);
+
+    char sfo[1400];
+    snprintf(sfo, sizeof sfo, "%s/PARAM.SFO", game);
+    cellGame_init_from_paramsfo(sfo);
 
     snprintf(s_vfs_root, sizeof s_vfs_root, "%s", getenv("PS3_VFS_ROOT"));
     ppu_vfs_root = s_vfs_root;
