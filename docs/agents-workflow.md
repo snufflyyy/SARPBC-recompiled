@@ -74,7 +74,7 @@ the HANDOFF note.
 - Create tasks with `tools/task.sh new <slug> <title>` and fill in **Touches** (exclusive
   write scope) and **Reads**. No two open or claimed tasks may share a Touches path.
 - Spawn at most as many agents as the user allows (currently 5), each with `isolation: worktree`, and tell each its task ID.
-- **Model per task** (user, 2026-10-19; also in AGENTS.md). Sonnet 5.5 is the only smaller model allowed, never Haiku, and that includes Explore searches. A task file may carry a `Model:` line. `sonnet` means spawn
+- **Model per task** (user, 2026-10-19; also in AGENTS.md). Sonnet 5.5 for real work; Haiku 5.5 only for read-only searches (Explore-style lookups), never for edits or judgement calls. A task file may carry a `Model:` line. `sonnet` means spawn
   with `model: "sonnet"` (Sonnet 5.5). Use it for well-scoped, easily verified work: tooling
   scripts (T029), mechanical ports and compile fixes, tests for known behaviour, and the read-only
   sweeps of an audit. Leave it out (Opus) for frontier debugging (GCM/SPURS stalls), SPU or runtime
