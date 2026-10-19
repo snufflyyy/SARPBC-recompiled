@@ -1,0 +1,314 @@
+From 60078d0d5110fa86a376893f8ad4b4ca35946d1f Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Mon, 19 Oct 2026 00:06:24 -0500
+Subject: [PATCH] audio: pace the POSIX cellAudio mixer to the device; sane
+ /dev_flash default; signature overlay regions
+
+- cellAudio: one mixing loop for every platform. The POSIX loop slept a
+  fixed 2/5 ms per block and so did not run at 187.5 blocks/s; it now
+  paces on the SDL queue (or the monotonic clock with no device), as the
+  Windows loop did. AUDIO_PEAK/AUDIO_WAV/AUDIO_RATE work on POSIX too;
+  AUDIO_RATE also reports device underruns. The SDL backend logs the
+  driver and format it opened.
+- ppu_fs: /dev_flash defaulted to a Windows developer path everywhere;
+  off Windows the default is now $XDG_DATA_HOME/ps3recomp/dev_flash
+  (else ~/.local/share/ps3recomp/dev_flash).
+- spu_overlay_register_sig_region(): a code body matched by content
+  signature that becomes a resident_code span instead of replacing
+  resident_ovl (which a SPURS taskset context uses for its policy
+  module). Used for a native stand-in of MultiStream's flashMP3.pic.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/audio/cellAudio.c     | 161 ++++++++++++++++++++++---------------
+ runtime/ppu/ppu_fs.cpp     |  23 +++++-
+ runtime/spu/spu_channels.c |  16 ++++
+ 3 files changed, 134 insertions(+), 66 deletions(-)
+
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+index b51fb7c..f73c99e 100644
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -143,6 +143,7 @@ static u64            s_audio_start_us = 0;
+ 
+ /* Mixing thread */
+ static unsigned long long g_audio_dropped;   /* frames the device had no room for */
++static unsigned long long g_audio_underruns; /* blocks that found the device queue empty */
+ static volatile int  s_mix_thread_running = 0;
+ static thread_t      s_mix_thread;
+ #ifndef _WIN32
+@@ -187,6 +188,11 @@ static int audio_backend_init(void)
+         return -1;
+     }
+ 
++    /* Which device and format we really got: with SDL_AUDIODRIVER=dummy
++     * nothing is audible, and a log that says so saves a "no sound" hunt. */
++    printf("[cellAudio] SDL audio: driver=%s freq=%d channels=%d samples=%u format=0x%04X\n",
++           SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "?",
++           have.freq, have.channels, (unsigned)have.samples, (unsigned)have.format);
+     SDL_PauseAudioDevice(s_sdl_audio_dev, 0); /* Start playback */
+     return 0;
+ }
+@@ -202,6 +208,11 @@ static void audio_backend_shutdown(void)
+ static void audio_backend_submit(const float* stereo_samples, u32 num_samples)
+ {
+     if (s_sdl_audio_dev) {
++        /* The queue already empty when the next block arrives: the device
++         * played silence in between (an underrun). The first block cannot. */
++        static int s_started;
++        if (s_started && SDL_GetQueuedAudioSize(s_sdl_audio_dev) == 0) g_audio_underruns++;
++        s_started = 1;
+         SDL_QueueAudio(s_sdl_audio_dev, stereo_samples,
+                        num_samples * 2 * sizeof(float));
+     }
+@@ -534,94 +545,114 @@ static void audio_notify_event_queues(void)
+     }
+ }
+ 
++/* Monotonic clock in microseconds, for pacing and the AUDIO_RATE report. */
++static u64 audio_now_us(void)
++{
+ #ifdef _WIN32
+-static unsigned __stdcall audio_mix_thread_func(void* arg)
++    LARGE_INTEGER f, c;
++    QueryPerformanceFrequency(&f); QueryPerformanceCounter(&c);
++    return (u64)(c.QuadPart / f.QuadPart) * 1000000ULL +
++           (u64)(c.QuadPart % f.QuadPart) * 1000000ULL / (u64)f.QuadPart;
++#else
++    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (u64)ts.tv_sec * 1000000ULL + (u64)ts.tv_nsec / 1000ULL;
++#endif
++}
++
++static void audio_sleep_1ms(void)
+ {
+-    (void)arg;
+-    printf("[cellAudio] Mixing thread started\n");
++#ifdef _WIN32
++    Sleep(1);
++#else
++    usleep(1000);
++#endif
++}
++
++/* Diagnostics on the block just mixed (all off unless their variable is set):
++ *   AUDIO_PEAK=1      the mix's peak amplitude, periodically
++ *   AUDIO_WAV=<file>  the final mix as raw f32le stereo 48 kHz
++ *                     (ffmpeg -f f32le -ar 48000 -ac 2 -i <file>)
++ *   AUDIO_RATE=1      every 5 s: blocks mixed against real time, how many were
++ *                     silent, frames the device had no room for, and device
++ *                     underruns (the device ran dry before the next block). */
++static void audio_after_block(void)
++{
++    { static int _ap = -1; if (_ap < 0) _ap = getenv("AUDIO_PEAK") ? 1 : 0;
++      if (_ap) { static unsigned _n = 0; float pk = 0.0f;
++        for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) {
++            float a = s_mix_buffer[i]; if (a < 0) a = -a; if (a > pk) pk = a; }
++        if ((++_n % 200) == 0 || (pk > 0.001f && _n < 40))
++            fprintf(stderr, "[audio-peak] block#%u peak=%.4f\n", _n, pk); } }
++    { static FILE* _wf = (FILE*)-1;
++      if (_wf == (FILE*)-1) { const char* e = getenv("AUDIO_WAV"); _wf = e ? fopen(e, "wb") : NULL; }
++      if (_wf) fwrite(s_mix_buffer, sizeof(float), CELL_AUDIO_BLOCK_SAMPLES * 2, _wf); }
++    { static int on = -1; if (on < 0) on = getenv("AUDIO_RATE") ? 1 : 0;
++      if (on) { static u64 t0; static unsigned n, z; static unsigned long long d0, u0;
++        u64 now = audio_now_us() / 1000ULL; if (!t0) t0 = now; n++;
++        { int nz = 0; for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) if (s_mix_buffer[i] != 0.0f) { nz = 1; break; }
++          if (!nz) z++; }
++        if (now - t0 >= 5000) {
++            fprintf(stderr, "[audio-rate] %.1f blocks/s (real time 187.5), silent %.1f%%, dropped %.0f frames/s, "
++                    "underruns %llu, device buf %u%c",
++                    n * 1000.0 / (double)(now - t0), n ? 100.0 * z / n : 0.0,
++                    (double)(g_audio_dropped - d0) * 1000.0 / (double)(now - t0),
++                    (unsigned long long)(g_audio_underruns - u0),
++#if AUDIO_BACKEND_WASAPI
++                    (unsigned)s_wasapi_buf_frames, 10);
++#else
++                    (unsigned)audio_backend_queued_samples(), 10);
++#endif
++            n = z = 0; d0 = g_audio_dropped; u0 = g_audio_underruns; t0 = now; } } }
++}
+ 
+-    /* Pace to the device clock. The PS3 consumes one block every 5.33 ms;
+-     * the old Sleep(2)/Sleep(5) loop keyed on a queue depth the 1056-frame
+-     * WASAPI buffer can never reach, so it mixed ~225 blocks/s and the device
+-     * dropped the surplus: 20% of the audio thrown away, and a guest mixer
+-     * (GH3's FMOD) that could not keep ahead of the read index played gaps.
+-     * With no device, pace on the performance counter instead. */
+-    LARGE_INTEGER qf, q0; QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&q0);
++/* The mixing loop, the same on every platform.
++ *
++ * Pace to the device clock. The PS3 consumes one block every 5.33 ms. Mixing
++ * faster than the device plays makes the backend drop (WASAPI) or queue
++ * without bound (SDL: the latency grows for the whole session); mixing slower
++ * starves it. The old POSIX loop slept a fixed 2 or 5 ms per block, so on SDL
++ * it ran at whatever rate those sleeps added up to rather than 187.5 blocks/s,
++ * and a guest mixer that writes ahead of the read index (FMOD, MultiStream)
++ * saw the index move at the wrong speed. With no device (init failed), pace
++ * on the monotonic clock instead. */
++static void audio_mix_loop(void)
++{
++    printf("[cellAudio] Mixing thread started\n");
++    u64 t0 = audio_now_us();
+     unsigned long long blocks = 0;
+     while (s_mix_thread_running) {
+         const int room = audio_backend_room();
+         if (room >= 0 && room < CELL_AUDIO_BLOCK_SAMPLES) { audio_backend_wait(); continue; }
+         if (room < 0) {
+-            LARGE_INTEGER now; QueryPerformanceCounter(&now);
+-            const long long due = q0.QuadPart +
+-                (long long)(blocks * CELL_AUDIO_BLOCK_SAMPLES * qf.QuadPart / CELL_AUDIO_SAMPLE_RATE);
+-            if (now.QuadPart < due) { Sleep(1); continue; }
++            const u64 now = audio_now_us();
++            const u64 due = t0 + blocks * CELL_AUDIO_BLOCK_SAMPLES * 1000000ULL / CELL_AUDIO_SAMPLE_RATE;
++            if (now < due) { audio_sleep_1ms(); continue; }
+             /* More than 50 ms behind (device just went away, a debugger
+              * stop): drop the backlog instead of mixing it in a burst. */
+-            if (now.QuadPart - due > qf.QuadPart / 20)
+-                q0.QuadPart = now.QuadPart -
+-                    (long long)(blocks * CELL_AUDIO_BLOCK_SAMPLES * qf.QuadPart / CELL_AUDIO_SAMPLE_RATE);
++            if (now - due > 50000ULL)
++                t0 = now - blocks * CELL_AUDIO_BLOCK_SAMPLES * 1000000ULL / CELL_AUDIO_SAMPLE_RATE;
+         }
+         blocks++;
+-        /* Mix and submit one block */
+         audio_mix_one_block();
+-        /* AUDIO_PEAK=1: report the mixed block's peak amplitude periodically so
+-         * "is any port producing sound" is answerable (LBP Bink movie audio). */
+-        { static int _ap = -1; if (_ap < 0) _ap = getenv("AUDIO_PEAK") ? 1 : 0;
+-          if (_ap) { static unsigned _n = 0; float pk = 0.0f;
+-            for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) {
+-                float a = s_mix_buffer[i]; if (a < 0) a = -a; if (a > pk) pk = a; }
+-            if ((++_n % 200) == 0 || (pk > 0.001f && _n < 40))
+-                fprintf(stderr, "[audio-peak] block#%u peak=%.4f\n", _n, pk); } }
+-        /* AUDIO_WAV=<file>: append the final mix as raw f32le stereo 48 kHz
+-         * (ffmpeg -f f32le -ar 48000 -ac 2 -i <file>). */
+-        { static FILE* _wf = (FILE*)-1;
+-          if (_wf == (FILE*)-1) { const char* e = getenv("AUDIO_WAV"); _wf = e ? fopen(e, "wb") : NULL; }
+-          if (_wf) fwrite(s_mix_buffer, sizeof(float), CELL_AUDIO_BLOCK_SAMPLES * 2, _wf); }
++        audio_after_block();
+         audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
+-        /* AUDIO_RATE=1: blocks mixed vs real time, and frames dropped. */
+-        { static int on = -1; if (on < 0) on = getenv("AUDIO_RATE") ? 1 : 0;
+-          if (on) { static ULONGLONG t0; static unsigned n, z; static unsigned long long d0;
+-            ULONGLONG now = GetTickCount64(); if (!t0) t0 = now; n++;
+-            { int nz = 0; for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) if (s_mix_buffer[i] != 0.0f) { nz = 1; break; }
+-              if (!nz) z++; }
+-            if (now - t0 >= 5000) {
+-                fprintf(stderr, "[audio-rate] %.1f blocks/s (real time 187.5), silent %.1f%%, dropped %.0f frames/s, device buf %u%c",
+-                        n * 1000.0 / (now - t0), n ? 100.0 * z / n : 0.0, (g_audio_dropped - d0) * 1000.0 / (now - t0),
+-                #if AUDIO_BACKEND_WASAPI
+-                        (unsigned)s_wasapi_buf_frames, 10);
+-#else
+-                        0u, 10);
+-#endif
+-                n = z = 0; d0 = g_audio_dropped; t0 = now; } } }
+-
+-        /* Notify event queues */
+         audio_notify_event_queues();
+     }
+-
+     printf("[cellAudio] Mixing thread stopped\n");
++}
++
++#ifdef _WIN32
++static unsigned __stdcall audio_mix_thread_func(void* arg)
++{
++    (void)arg;
++    audio_mix_loop();
+     return 0;
+ }
+ #else
+ static void* audio_mix_thread_func(void* arg)
+ {
+     (void)arg;
+-    printf("[cellAudio] Mixing thread started\n");
+-
+-    while (s_mix_thread_running) {
+-        audio_mix_one_block();
+-        audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
+-        audio_notify_event_queues();
+-
+-        u32 queued = audio_backend_queued_samples();
+-        if (queued > CELL_AUDIO_BLOCK_SAMPLES * 4) {
+-            usleep(5000);
+-        } else {
+-            usleep(2000);
+-        }
+-    }
+-
+-    printf("[cellAudio] Mixing thread stopped\n");
++    audio_mix_loop();
+     return NULL;
+ }
+ #endif
+diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
+index 7f1ffc9..fdd785a 100644
+--- a/runtime/ppu/ppu_fs.cpp
++++ b/runtime/ppu/ppu_fs.cpp
+@@ -138,10 +138,31 @@ static void host_path(char* out, size_t cap, const char* guest)
+      * old behaviour) makes every firmware lookup miss. YDKJ's FMOD asks for
+      * /dev_flash/sys/external/flashMP3.pic and, on a miss, prints "mp3 failed to
+      * load MP3 codec (are you using the correct flash?)" and then crashes.
+-     * Serve it from a real dev_flash tree instead ($PS3_DEV_FLASH, else RPCS3's). */
++     * Serve it from a real dev_flash tree instead ($PS3_DEV_FLASH, else a
++     * per-user default). A title port can also point PS3_DEV_FLASH at a tree
++     * of its own stand-ins (e.g. a native decoder in place of flashMP3.pic).
++     *
++     * The default used to be a Windows path from one developer's machine,
++     * which on Linux resolved to a relative "D:/recomp/..." directory under
++     * the working directory. Now: Windows keeps it; elsewhere
++     * $XDG_DATA_HOME/ps3recomp/dev_flash, else ~/.local/share/ps3recomp/dev_flash. */
+     if (strncmp(guest, "/dev_flash/", 11) == 0) {
+         const char* fw = getenv("PS3_DEV_FLASH");
++#ifdef _WIN32
+         if (!fw || !*fw) fw = "D:/recomp/tools/rpcs3/dev_flash";
++#else
++        static char s_fw_default[1024];
++        if ((!fw || !*fw) && !s_fw_default[0]) {
++            const char* xdg = getenv("XDG_DATA_HOME");
++            const char* home = getenv("HOME");
++            if (xdg && *xdg)
++                snprintf(s_fw_default, sizeof s_fw_default, "%s/ps3recomp/dev_flash", xdg);
++            else
++                snprintf(s_fw_default, sizeof s_fw_default, "%s/.local/share/ps3recomp/dev_flash",
++                         home && *home ? home : ".");
++        }
++        if (!fw || !*fw) fw = s_fw_default;
++#endif
+         snprintf(out, cap, "%s/%s", fw, guest + 11);
+         for (char* p = out; *p; p++) if (*p == '\\') *p = '/';
+         return;
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+index 506da3f..c928292 100644
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -1587,10 +1587,26 @@ void spu_overlay_register_sig(const uint8_t sig[16], int image_id)
+         s_ovl_src[s_ovl_src_count].image_id = image_id;
+         memcpy(s_ovl_src[s_ovl_src_count].sig, sig, 16);
+         s_ovl_src[s_ovl_src_count].has_sig = 1;
++        s_ovl_src[s_ovl_src_count].span = 0;
+         s_ovl_src_count++;
+     }
+ }
+ 
++/* Content signature + span: a code body the title copies to a heap address
++ * of its own choosing (so no source EA identifies it) and that coexists with
++ * the streaming context's other code. It becomes one of the context's
++ * resident_code spans at the LS address the GET landed on, instead of
++ * replacing resident_ovl -- which a SPURS taskset context already uses for
++ * its policy module. MultiStream's MP3 decoder (flashMP3.pic, firmware) and
++ * DSP plugin block are such bodies; a port registers a lift or a native
++ * stand-in of them under its own image id. */
++void spu_overlay_register_sig_region(const uint8_t sig[16], uint32_t span, int image_id)
++{
++    if (!span || span > SPU_LS_SIZE || s_ovl_src_count >= SPU_OVL_SRC_MAX) return;
++    spu_overlay_register_sig(sig, image_id);
++    s_ovl_src[s_ovl_src_count - 1].span = span;
++}
++
+ /* Called from the MFC GET path after the copy: ls points at the JUST-COPIED
+  * bytes. EA match first (exact, cheap), then content signature for sizeable
+  * chunks (overlay bodies are >= 0x500 bytes). */
+-- 
+2.55.0
+

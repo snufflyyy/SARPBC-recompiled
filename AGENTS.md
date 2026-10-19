@@ -11,13 +11,14 @@ you are touching instead of re-scanning the tree or the game files.
 
 ## Current state (keep this line true)
 
-**Phase 6/7: boots on Linux, draws its "Loading..." screen through Vulkan, and loads
-UE3 packages.** The PPU lift (64,397 functions) and 14 of 15 SPU images build into
-`build/sarpbc`. With the Edge zlib override and patch 0001 (trophy), boot reaches the
-package loader (`CORE`, `STARTUP_INT`, `TAGAME`, `ENGINE`, ...) and then stalls somewhere
-not yet diagnosed. Work runs in parallel through the task board
-([docs/agents-workflow.md](docs/agents-workflow.md)). Live status and next steps:
-[docs/status.md](docs/status.md).
+**Phase 7: boots on Linux through Vulkan's "Loading..." screen; target version is 01.09.**
+The PPU lift and all 15 SPU images (plus the 2 SPUJOBS jobs) build on both 01.02 and 01.09,
+with patches 0001-0015 and the Edge zlib override. 01.09 loads its packages, gets through
+PhysX init (cellOvis, SPURS queues) and then stalls: the SPURS job guard `0x0133AA80` stays
+closed (T022), and the MultiStream event flag `0x01372000` blocks because the DSP block at
+LS 0x37000 is not lifted (T007; `SPU_INTERP_UNLIFTED=1` works around it). Work runs in
+parallel through the task board ([docs/agents-workflow.md](docs/agents-workflow.md)). Live
+status and next steps: [docs/status.md](docs/status.md).
 
 ## Key facts
 
