@@ -1,7 +1,7 @@
 # T008: Controls — gamepad and keyboard into cellPad for a car game
 
-Status: open
-Owner: -
+Status: claimed
+Owner: agent-input
 Touches: src/overrides/input_*.cpp (new), patches/ps3recomp/T008-*.patch (libs/input/** only), docs/subsystems.md (Input section only), config.toml ([input] section)
 Reads: external/ps3recomp/libs/input/cellPad*.c, docs/game-profile.md
 
@@ -18,3 +18,4 @@ A documented, verified mapping (log evidence of pressure/analog values reaching 
 game), rumble wired, defaults in config.toml or code, notes in docs/subsystems.md.
 
 ## Log
+- 2026-10-18 23:50 agent-input: claimed

@@ -1,0 +1,412 @@
+From 1eee85b0869a34d7f42242700617fea2557fd834 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Sun, 18 Oct 2026 23:34:53 -0500
+Subject: [PATCH] build_spu_workloads --input: lift SPU overlay images; drop
+ data "functions"
+
+An SPU ELF linked with overlays (libovis) was refused with "overlapping
+PT_LOAD memory ranges": its overlay segments share one local-store range,
+and the image also has more than one executable PT_LOAD (a 16-byte
+.SpuGUID segment, the resident .text, a code overlay). pick_text() only
+ever scanned the first executable segment, which here is the GUID.
+
+- spu_elf records p_paddr. A PT_LOAD whose p_paddr lies outside local store
+  (>= 256 KiB) and differs from p_vaddr is an overlay: the SPU's overlay
+  manager DMAs it in from main memory (cellOvis table + p_paddr) before use.
+- code_ranges(): resident loads still must not overlap. Overlays may overlap
+  each other but not resident loads, and executable segments must stay
+  disjoint, so every lifted address has exactly one instruction stream (a
+  data overlay reusing a code overlay's space, e.g. a scratch buffer, is
+  fine; two code overlays at one address would need separate lifts and are
+  still refused).
+- Several executable segments are detected one at a time
+  (detect_functions(text=, extra_seeds=, fallback_seed=)). Each is seeded with
+  the direct branch targets that other segments' code sections aim into it,
+  since resident code calls straight into an overlay it made resident. A
+  non-entry segment nothing branches into yields no function (the GUID).
+- The lifter gets one local-store image spanning all executable segments,
+  each at its own address. Such an image has no single text segment, so it
+  is registered by its full-ELF fingerprint only (no .text alias).
+- Any detected range whose executable part holds a word that decodes as no
+  instruction is data and is dropped. Code and constants often share one
+  executable section (a one-section code overlay keeps its strings inline;
+  some .text sections carry literal pools), and `ila $rN, <constant>` seeds a
+  "function" there, which used to fail the whole image with "unsupported
+  instructions emitted by lifter". A real function holding such a word could
+  not be lifted anyway, and a direct call into a dropped range still fails
+  the lift ("direct branch/call targets lack ...").
+
+On SARPBC 01.02 the 14 images that already lifted produce byte-identical
+code.bin, functions.json, lift.json and spu_recomp.c/.h; the PhysX overlay
+image (323,840 bytes; 1,463 functions, 495 of them in the code overlay) now
+registers, so all 15 do with complete=True. On the 01.09 update the two
+images refused for literal pools (95,636 and 38,100 bytes) register too
+(1,152 and 625 functions); the other 12 are unchanged.
+
+Tests: test_spu_program_pipeline.py (overlay image lifted with its resident
+text; inline constants in an overlay and in a single .text not lifted; code
+overlays at one address and an overlay over a resident load refused; an
+unreachable extra executable segment yields no function).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ tools/find_spu_functions.py        |  19 ++++-
+ tools/spu_elf.py                   |   6 +-
+ tools/spu_program_pipeline.py      | 109 ++++++++++++++++++++++++-----
+ tools/test_spu_program_pipeline.py |  77 +++++++++++++++++++-
+ 4 files changed, 187 insertions(+), 24 deletions(-)
+
+diff --git a/tools/find_spu_functions.py b/tools/find_spu_functions.py
+index af9b3d5..1287ff5 100644
+--- a/tools/find_spu_functions.py
++++ b/tools/find_spu_functions.py
+@@ -699,7 +699,15 @@ def find_end(start, insns_by_addr, sorted_starts, code_end):
+     return min(next_start, code_end)
+ 
+ 
+-def detect_functions(buf, base_override=None, verbose=True, raw=False):
++def detect_functions(buf, base_override=None, verbose=True, raw=False,
++                     text=None, extra_seeds=(), fallback_seed=True):
++    """`text` = (file_off, vaddr, size) scans that executable segment instead
++    of the first one -- an image with several (an overlay ELF: resident .text
++    plus a code overlay) is detected one segment at a time. `extra_seeds` are
++    entries known from outside the segment (calls into an overlay from the
++    resident code). With fallback_seed=False a segment that yields no seed at
++    all produces no function, instead of a guessed one at its first byte (a
++    16-byte .SpuGUID segment is executable but is not code)."""
+     if raw:
+         # A raw local-store image: a SPURS job binary, which the title loads
+         # from its own data files as a flat code+data blob rather than as an
+@@ -715,7 +723,7 @@ def detect_functions(buf, base_override=None, verbose=True, raw=False):
+         text_off, text_va, text_size = 0, base, len(buf)
+     else:
+         elf = parse_elf(buf)
+-        text_off, text_va, text_size = pick_text(elf["phs"])
++        text_off, text_va, text_size = text if text else pick_text(elf["phs"])
+     code = buf[text_off:text_off + text_size]
+     base = base_override if base_override is not None else text_va
+     insns = disassemble_spu(code, base_addr=base)
+@@ -764,6 +772,11 @@ def detect_functions(buf, base_override=None, verbose=True, raw=False):
+             seed_starts.add(t)
+         else:
+             rejected.add(t)
++    # Calls into this segment from the image's other executable segments (a code
++    # overlay called from .text): real control flow, so they bypass the data filter.
++    for t in extra_seeds:
++        if code_start <= t < code_end and (t & 3) == 0 and t in insns_by_addr:
++            seed_starts.add(t)
+     rejected -= seed_starts
+     if rejected and verbose:
+         print(f"  {len(rejected)} derived seed(s) rejected as data "
+@@ -774,7 +787,7 @@ def detect_functions(buf, base_override=None, verbose=True, raw=False):
+ 
+     # Always cover the entry of the text segment itself (some images have no
+     # entry point but a function at va 0).
+-    if not seed_starts:
++    if not seed_starts and fallback_seed:
+         seed_starts.add(code_start)
+ 
+     sorted_starts = sorted(seed_starts)
+diff --git a/tools/spu_elf.py b/tools/spu_elf.py
+index 5dd1107..d1da6ec 100644
+--- a/tools/spu_elf.py
++++ b/tools/spu_elf.py
+@@ -45,14 +45,16 @@ def validate_spu_elf(buf, offset=0):
+     end = shoff + shes * shnum
+     loads, executable, sections = [], [], []
+     for i in range(phnum):
+-        typ, off, addr, _, filesz, memsz, flags, align = struct.unpack_from(
++        typ, off, addr, paddr, filesz, memsz, flags, align = struct.unpack_from(
+             '>IIIIIIII', buf, offset + phoff + i * phes)
+         end = max(end, extent(off, filesz, 'segment'))
+         if typ == 1:
+             check(filesz <= memsz and addr <= LS_SIZE and memsz <= LS_SIZE - addr,
+                   'PT_LOAD exceeds local store or has filesz > memsz')
+             check(align in (0, 1) or (align & (align - 1)) == 0, 'invalid segment alignment')
+-            ph = dict(off=off, addr=addr, filesz=filesz, memsz=memsz, flags=flags)
++            # paddr != addr marks an overlay: loaded on demand by the SPU's
++            # overlay manager from main memory (cellOvis table + paddr).
++            ph = dict(off=off, addr=addr, paddr=paddr, filesz=filesz, memsz=memsz, flags=flags)
+             loads.append(ph)
+             if flags & 1 and filesz:
+                 check(addr % 4 == 0 and filesz % 4 == 0, 'unaligned executable segment')
+diff --git a/tools/spu_program_pipeline.py b/tools/spu_program_pipeline.py
+index 2b8984d..80e7cc9 100644
+--- a/tools/spu_program_pipeline.py
++++ b/tools/spu_program_pipeline.py
+@@ -12,38 +12,111 @@ import subprocess
+ import sys
+ import tempfile
+ 
+-from spu_elf import fnv1a64, scan_spu_candidates
++from spu_elf import LS_SIZE, fnv1a64, scan_spu_candidates
+ 
+ 
+ def sha256(buf):
+     return hashlib.sha256(buf).hexdigest()
+ 
+ 
++def is_overlay(segment):
++    """An overlay PT_LOAD has a load address (p_paddr) outside local store: the
++    SPU's overlay manager DMAs it in from main memory when needed (libovis
++    builds that image: cellOvis table + p_paddr). Resident segments carry
++    p_paddr == p_vaddr, or 0 from linkers that leave it unset."""
++    paddr = segment.get('paddr', segment['addr'])
++    return paddr != segment['addr'] and paddr >= LS_SIZE
++
++
++def spans_overlap(spans):
++    spans = sorted(spans)
++    return any(b > c for (_, b), (c, _) in zip(spans, spans[1:]))
++
++
+ def code_ranges(info):
+     # The loader applies every PT_LOAD in header order, including zero filling.
+     # Lifting a segment in isolation is unsafe if another load can replace its
+-    # bytes. Treat any overlapping memory layout as unsupported until generation
+-    # explicitly models the final deployed local store. Adjacent/empty loads
++    # bytes, so resident segments must not overlap. Overlays are the exception
++    # by design: they share a local-store range and the overlay manager makes
++    # one of them resident before using it. That stays liftable as long as at
++    # most one of the overlays at any address holds code -- the others are
++    # data (e.g. a scratch buffer reusing the code overlay's space), so each
++    # lifted address has exactly one instruction stream. Adjacent/empty loads
+     # remain valid.
+-    loads = sorted((p['addr'], p['addr'] + p['memsz']) for p in info['loads'] if p['memsz'])
+-    if any(b > c for (_, b), (c, _) in zip(loads, loads[1:])):
++    loads = [p for p in info['loads'] if p['memsz']]
++    resident = [(p['addr'], p['addr'] + p['memsz']) for p in loads if not is_overlay(p)]
++    if spans_overlap(resident):
+         raise ValueError('overlapping PT_LOAD memory ranges (including BSS) are unsupported')
++    for p in loads:
++        if is_overlay(p) and any(p['addr'] < b and a < p['addr'] + p['memsz'] for a, b in resident):
++            raise ValueError('overlay PT_LOAD overlaps a resident PT_LOAD')
+     executable = info['executable']
+-    if len(executable) != 1:
+-        raise ValueError('automated lifting requires exactly one executable PT_LOAD')
+-    segment = executable[0]
+-    start, end = segment['addr'], segment['addr'] + segment['filesz']
++    if not executable:
++        raise ValueError('automated lifting requires an executable PT_LOAD')
++    if spans_overlap([(x['addr'], x['addr'] + x['filesz']) for x in executable]):
++        raise ValueError('overlapping executable PT_LOADs (code overlays at one address) are unsupported')
+     sections = [s for s in info['sections'] if s['flags'] & 4 and s['size']]
+-    ranges = sorted((s['addr'], s['addr'] + s['size']) for s in sections) or [(start, end)]
+-    if any(a < start or b > end for a, b in ranges):
++    ranges = sorted((s['addr'], s['addr'] + s['size']) for s in sections) or \
++        sorted((x['addr'], x['addr'] + x['filesz']) for x in executable)
++    if any(not any(x['addr'] <= a and b <= x['addr'] + x['filesz'] for x in executable) for a, b in ranges):
+         raise ValueError('executable sections outside supported text segment')
+-    if any(b > c for (_, b), (c, _) in zip(ranges, ranges[1:])):
++    if spans_overlap(ranges):
+         raise ValueError('overlapping executable sections are unsupported')
+     if not any(a <= info['entry'] < b for a, b in ranges):
+         raise ValueError('ELF entry is not in an executable file range')
+     return ranges
+ 
+ 
++def detect_program_functions(blob, info, ranges):
++    """Function bounds plus the (code bytes, base) the lifter translates.
++
++    One executable segment: the detector's own view. Several (an overlay
++    image: resident .text plus a code overlay): detect per segment, seeding
++    each with the direct branch targets that other segments' code sections aim
++    into it (the resident code calls straight into the overlay once it has
++    made it resident), and hand the lifter one local-store image spanning
++    every executable segment, each at its own address.
++
++    Either way, a detected range whose executable part holds a word that
++    decodes as no instruction is data, not a function, and is dropped. Code
++    and constants often share one executable section (a one-section code
++    overlay; a .text with its literals linked in), and `ila $rN, <constant>`
++    or a constant that happens to decode as a branch then seeds a "function"
++    in the middle of strings or floats. A real function containing such a
++    word could not be lifted anyway, and a call into a dropped range still
++    fails the lift loudly ("direct branch/call targets lack ...")."""
++    from find_spu_functions import detect_functions, collect_branch_targets
++    from spu_disasm import disassemble_spu
++    executable = info['executable']
++
++    def in_ranges(address):
++        return any(s <= address < e for s, e in ranges)
++    targets, data_words = set(), set()
++    for x in executable:
++        insns = disassemble_spu(blob[x['off']:x['off'] + x['filesz']], base_addr=x['addr'])
++        data_words |= {i.addr for i in insns if i.mnemonic == '.word' and in_ranges(i.addr)}
++        targets |= {t for t in collect_branch_targets([i for i in insns if in_ranges(i.addr)])
++                    if in_ranges(t) and not x['addr'] <= t < x['addr'] + x['filesz']}
++
++    def code_only(found):
++        return [(s, e) for s, e in found if not any(a in data_words for a in range(s, e, 4))]
++    if len(executable) == 1:
++        functions, (offset, base, size) = detect_functions(blob, verbose=False)
++        return code_only(functions), blob[offset:offset + size], base
++    functions = []
++    for x in executable:
++        found, _ = detect_functions(blob, verbose=False, text=(x['off'], x['addr'], x['filesz']),
++                                    extra_seeds=targets,
++                                    fallback_seed=x['addr'] <= info['entry'] < x['addr'] + x['filesz'])
++        functions += code_only(found)
++    lo = min(x['addr'] for x in executable)
++    hi = max(x['addr'] + x['filesz'] for x in executable)
++    image = bytearray(hi - lo)
++    for x in executable:
++        image[x['addr'] - lo:x['addr'] - lo + x['filesz']] = blob[x['off']:x['off'] + x['filesz']]
++    return sorted(functions), bytes(image), lo
++
++
+ def publish(stage, destination):
+     """Replace owned output as a unit, never reuse a previous generated lift."""
+     backup = destination.with_name(destination.name + '.previous')
+@@ -130,6 +203,9 @@ def build_programs(args, registry_writer):
+         ids = {}
+         for digest, program in sorted(unique.items()):
+             info = layouts[digest]
++            # The text alias serves raw SPUs whose PPU streams only the text
++            # segment into LS; an image with several executable segments has
++            # no single such stream, so it is keyed by the full ELF alone.
+             if len(info['executable']) == 1:
+                 x = info['executable'][0]
+                 program['text_fingerprint'] = f"{fnv1a64(blobs[digest][x['off']:x['off'] + x['filesz']]):016X}"
+@@ -148,7 +224,6 @@ def build_programs(args, registry_writer):
+                 raise ValueError('--extra-funcs requires discovered content name=ADDR[,ADDR...]')
+             extra[name] = [int(s.strip(), 0) for s in value.split(',')]
+         imgs, text_fps, image_ids = [], {}, {}
+-        from find_spu_functions import detect_functions
+         from build_spu_workloads import debase_includes
+         for digest, program in sorted(unique.items()):
+             if program['status'] == 'unsupported':
+@@ -160,14 +235,14 @@ def build_programs(args, registry_writer):
+             (outdir / 'image.elf').write_bytes(blob)
+             try:
+                 ranges = code_ranges(info)
+-                functions, (offset, base, size) = detect_functions(blob, verbose=False)
++                functions, code, base = detect_program_functions(blob, info, ranges)
+                 bounds = sorted({(max(s, a), min(e, b)) for s, e in functions for a, b in ranges
+                                  if max(s, a) < min(e, b)})
+                 for address in extra.get(name, []):
+                     if not any(a <= address < b and address % 4 == 0 for a, b in ranges):
+                         raise ValueError('extra function address is outside executable ranges')
+                 program['executable_ranges'] = ranges
+-                (outdir / 'code.bin').write_bytes(blob[offset:offset + size])
++                (outdir / 'code.bin').write_bytes(code)
+                 (outdir / 'functions.json').write_text(json.dumps([dict(start=s, end=e) for s, e in bounds]))
+                 command = [sys.executable, args.lifter, str(outdir / 'code.bin'), '--base', str(base),
+                            '--functions', str(outdir / 'functions.json'), '--symbol-prefix', prefix,
+@@ -204,9 +279,9 @@ def build_programs(args, registry_writer):
+             program['status'] = 'registered'
+             imgs.append((name, prefix, int(program['fingerprint'], 16), info['entry']))
+             image_ids[name] = program['image_id']
+-            text_fps[name] = int(program['text_fingerprint'], 16)
++            text_fps[name] = int(program['text_fingerprint'], 16) if 'text_fingerprint' in program else None
+         # Default runtime capacity is 256 registrations, including text aliases.
+-        if sum(len({fp, text_fps[name]}) for name, _, fp, _ in imgs) > 256:
++        if sum(len({fp, text_fps[name]} - {None}) for name, _, fp, _ in imgs) > 256:
+             report['errors'].append('generated registrations exceed default runtime capacity (256)')
+         if sum(len(p.get('diagnostics', {}).get('functions', [])) for p in report['programs']
+                if p['status'] == 'registered') > 262144:
+diff --git a/tools/test_spu_program_pipeline.py b/tools/test_spu_program_pipeline.py
+index 226f9b8..016a3e9 100644
+--- a/tools/test_spu_program_pipeline.py
++++ b/tools/test_spu_program_pipeline.py
+@@ -39,6 +39,29 @@ def elf(value=7, *, bad_bounds=False, unsupported=False, multi=False, rodata=Fal
+     return bytes(data)
+ 
+ 
++def overlay_elf(*, data_executable=False, over_resident=False):
++    """Resident text at 0x100 that calls a code overlay at 0x200, plus a data
++    overlay sharing 0x200 (p_paddr outside LS marks both as overlays). The
++    code overlay keeps a constant inline, addressed by an `ila`, the way a
++    one-section overlay holds its own strings."""
++    text = struct.pack('>IIII', 0x42010405,            # ila  $r5, 0x208 (the constant)
++                       0x33001F80,                     # brsl $r0, 0x200 (into the overlay)
++                       0x35000000, 0)                  # bi   $r0
++    code = struct.pack('>IIII', 0x42010405, 0x35000000,   # ila $r5, 0x208; bi $r0
++                       0x01000000, 0)                  # constant: no valid instruction
++    data = bytearray(0x130)
++    ident = b'\x7fELF\x01\x02\x01' + b'\x00' * 9
++    data[:52] = struct.pack('>16sHHIIIIIHHHHHH', ident, 2, 23, 1, 0x100, 52, 0, 0, 52, 32, 3, 0, 0, 0)
++    vma = 0x100 if over_resident else 0x200
++    struct.pack_into('>IIIIIIII', data, 52, 1, 0x100, 0x100, 0x100, 16, 16, 5, 16)
++    struct.pack_into('>IIIIIIII', data, 84, 1, 0x110, vma, 0x40000, 16, 16, 7, 16)
++    struct.pack_into('>IIIIIIII', data, 116, 1, 0x120, vma, 0x40010, 16, 16,
++                     5 if data_executable else 6, 16)
++    data[0x100:0x110] = text
++    data[0x110:0x120] = code
++    return bytes(data)
++
++
+ class Pipeline(unittest.TestCase):
+     def setUp(self):
+         self.temp = tempfile.TemporaryDirectory()
+@@ -90,8 +113,7 @@ class Pipeline(unittest.TestCase):
+         self.assertTrue((self.output / 'sources.cmake').exists())
+ 
+     def test_bad_bounds_and_unsupported_are_reported_without_registration(self):
+-        for blob, status in [(elf(bad_bounds=True), 'invalid'), (elf(unsupported=True), 'unsupported'),
+-                             (elf(multi=True), 'unsupported')]:
++        for blob, status in [(elf(bad_bounds=True), 'invalid'), (elf(unsupported=True), 'unsupported')]:
+             with self.subTest(status=status):
+                 result = self.run_pipeline(('input.bin', blob))
+                 self.assertNotEqual(result.returncode, 0)
+@@ -144,6 +166,57 @@ class Pipeline(unittest.TestCase):
+         self.assertFalse(self.manifest()['complete'])
+         self.assertTrue(self.manifest()['errors'])
+ 
++    def test_unreachable_extra_executable_segment_is_not_lifted(self):
++        # A second executable PT_LOAD (e.g. a 16-byte .SpuGUID) is scanned
++        # on its own and yields no function unless something branches into it.
++        result = self.run_pipeline(('input.bin', elf(7, multi=True)))
++        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
++        program = self.manifest()['programs'][0]
++        self.assertEqual(program['status'], 'registered')
++        self.assertEqual(program['diagnostics']['functions'], [[0x100, 0x108]])
++        self.assertNotIn('text_fingerprint', program)
++
++    def test_code_overlay_is_lifted_with_the_resident_text(self):
++        result = self.run_pipeline(('input.bin', overlay_elf()))
++        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
++        program = self.manifest()['programs'][0]
++        self.assertEqual(program['status'], 'registered')
++        # The overlay entry is a function of the same image; the inline
++        # constant (seeded by the `ila`) is not.
++        self.assertEqual(program['diagnostics']['functions'], [[0x100, 0x10C], [0x200, 0x208]])
++        self.assertEqual(program['executable_ranges'], [[0x100, 0x110], [0x200, 0x210]])
++        source = (self.output / program['name'] / 'spu_recomp.c').read_text()
++        self.assertNotIn('TODO spu', source)
++        # The lifter sees one local-store image with each segment in place.
++        code = (self.output / program['name'] / 'code.bin').read_bytes()
++        self.assertEqual(len(code), 0x110)
++        self.assertEqual(code[0x100:0x104], struct.pack('>I', 0x42010405))
++
++    def test_constant_inside_text_is_not_lifted(self):
++        # `ila $r5, <constant>` seeds the constant's address as a possible
++        # continuation; a word there that decodes as no instruction marks the
++        # range as data, so it is dropped instead of failing the whole image.
++        blob = bytearray(elf(7))
++        code = struct.pack('>IIII', 0x42008405, 0x35000000, 0x01000000, 0)  # ila $r5, 0x108
++        blob[0x100:0x108] = code[:8]
++        blob += code[8:]
++        struct.pack_into('>II', blob, 52 + 16, 16, 16)    # p_filesz, p_memsz
++        result = self.run_pipeline(('input.bin', bytes(blob)))
++        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
++        program = self.manifest()['programs'][0]
++        self.assertEqual(program['status'], 'registered')
++        self.assertEqual(program['diagnostics']['functions'], [[0x100, 0x108]])
++
++    def test_unsupported_overlay_layouts(self):
++        for blob, reason in [(overlay_elf(data_executable=True), 'overlapping executable PT_LOADs'),
++                             (overlay_elf(over_resident=True), 'overlay PT_LOAD overlaps a resident')]:
++            with self.subTest(reason=reason):
++                result = self.run_pipeline(('input.bin', blob))
++                self.assertNotEqual(result.returncode, 0)
++                program = self.manifest()['programs'][0]
++                self.assertEqual(program['status'], 'unsupported')
++                self.assertIn(reason, program['reason'])
++
+     def test_extractor_bounds_and_runtime_extent(self):
+         sys.path.insert(0, str(TOOLS))
+         from extract_spu_images import find_spu_images, parse_spu_elf_size
+-- 
+2.55.0
+

@@ -1,7 +1,7 @@
 # T019: SPURS Queue — real PPU side (QueuePopBody/PushBody, attach/detach)
 
-Status: open
-Owner: -
+Status: claimed
+Owner: agent-spursq
 Touches: patches/ps3recomp/T019-*.patch (external/ps3recomp/libs/spurs/** queue code + tests), src/overrides/edgezlib.cpp (only if the LFQueue push becomes general; coordinate), docs/subsystems.md (SPU/SPURS queue bullets)
 Reads: docs/hle-coverage.md, docs/reference-ports.md (dod3 lifted libsre's queue paths), external/ps3recomp/libs/spurs/cellSpurs.c
 
@@ -22,3 +22,4 @@ A test proves PPU↔SPU queue round-trips against the queue layout. In a boot, t
 either run (no "Error writing to SPURS queue") or the precise remaining gap is logged. Patch exported.
 
 ## Log
+- 2026-10-18 23:48 agent-spursq: claimed

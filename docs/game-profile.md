@@ -138,7 +138,7 @@ decoder from console firmware that a port has to replace — check whether we hi
 | 1 | `0x1A05480` | 37,708 | **Edge zlib** (package decompression) |
 | 2, 6, 11 | `0x1A0F000`, `0x1A65780`, `0x1B21D00` | 10–39 KB | **PhysX** SPU tasks (SPURS queue) |
 | 3–5, 8–10 | `0x1A11700`... | 42–163 KB | unknown, likely PhysX/engine tasks |
-| 7 | `0x1A6F000` | 323,840 | uses `CellStackAllocator` (PhysX?) |
+| 7 | `0x1A6F000` | 323,840 | **PhysX `SPU_DynamicsRelease.elf`**, entry `0x200F0`; two overlays at LS `0x3080` (`OverlaySmallIsland` code, LMA `0x40000`; `OverlayLargeIsland` zero scratch, LMA `0x5A480`) loaded via the cellOvis table, see [subsystems.md](subsystems.md#spu--spurs) |
 | 12–14 | `0x1CBC400`... | 2–11 KB | **MultiStream DSP**: `mstream_dsp_i3dl2`, `_filter`, `_para_eq` |
 
 **`SPUJOBS.SPRX`** → `game/SPUJOBS.prx`: a PPU PRX (`e_type 0xFFA4`) with no SPU ELFs
@@ -210,7 +210,7 @@ and the frame rate is uncapped in the engine.
 | Entry OPD / TOC | `0x1BE8EC0` / `0x1C6EA28` | `0x12018A8` → `0xADB68` / `0x123C6D0` |
 | TOC-switch stub runs | 2 (4,242 stubs) | 0 |
 | Imports | 274 / 20 libs, 17 unnamed | 288 / 21 libs, 20 unnamed |
-| SPU images registered | 14/15 | 12/15 |
+| SPU images registered | 15/15 + 2 SPUJOBS jobs (patches 0006-0008) | 15/15 + 2 SPUJOBS jobs (12/15 before 0006) |
 
 Import changes in 01.09: **+cellGame** (BootCheck, DataCheck, ContentPermit,
 CreateGameData, GetParamString, GetSizeKB, ContentErrorDialog), **+cellPngDec** (7),
@@ -227,3 +227,28 @@ refused for overlapping PT_LOADs). The MultiStream DSP images changed. Image 0
 (`e33837bb…`, 95,636 B) and Edge zlib (`d08b1ad8…`, 38,100 B) changed and fail with
 "unsupported instructions emitted by lifter" (T016). SPUJOBS.prx is a new 53 KB module
 (`189316bc…`).
+
+Why those two failed (T016, 2026-10-18): **no SPU opcode was missing.** Every one of the
+213 (`d08b1ad8…`) and 473 (`e33837bb…`) unsupported entries is `.word`, i.e. .rodata lifted
+as code. Both images are **section-stripped** (no section headers, one `R E` PT_LOAD
+at `0x3000`: `0x3000-0xC350` and `0x3000-0x1A3F0`), so the pipeline treats the whole segment
+as code, and the linker put .rodata after .text in it. `find_spu_functions.py`'s
+`ila`-continuation and branch-target seeders took every string/table address loaded by
+`ila` as a function start (printf/assert format strings, float tables, zlib tables).
+Images that keep a section table get the same bogus seeds, but they are clipped to
+`.text`, which is why the other 12 registered.
+
+| Image | Data region (LS) | What is there | Bogus seeds |
+|---|---|---|---|
+| `d08b1ad8…` Edge zlib (fp `0x00E729804474449A`) | `0xB290-0xB8A0`, `0xC1B0-0xC20C` | "EDGE ZLIB ERROR: ...", "edgezlib_inflate", "1.2.3.0-PS3-SPU-...", zlib messages ("invalid distance too far back") and code tables | 36 |
+| `e33837bb…` image 0 (fp `0xC1759183E2FF7448`) | `0x171D0-0x1A1CC` | **MultiStream** mixer strings ("Skipping DSP (slot %d)...", "MP3 Size to do...", "ERROR! Multistream...", "STARVED OF DATA"), float tables at `0x17700-0x19200` | 50 |
+
+Image 0 is therefore MultiStream's main SPU mixer (MP3 decode and DSP slots); the strings
+say so. The fix (patch `T016-*.patch`) keeps a derived seed only if it decodes, is not a
+NUL-padded C string, and a straight-line walk from it reaches a branch/return/stop before
+an undecodable word or the segment end. Result on 01.09: **14/15 registered**, the two
+images lift with 0 unsupported (625 and 1,151 functions); the other 12 lift byte-identical
+to before. Across both versions' 20 distinct images, no seed inside a real `.text` section
+is dropped. A few table addresses that decode cleanly up to a `stop` (zlib tables at
+`0xC0A0`, `0xC0E0`, `0xC240` in `d08b1ad8…`) are still lifted as tiny dead functions;
+harmless.

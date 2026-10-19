@@ -49,6 +49,7 @@ coordinator (the main session) creates tasks, spawns agents, reviews and merges.
 | `AGENTS.md` "Current state", `docs/status.md` | Coordinator only. Agents put status in their task log and their final report |
 | `game/`, `vfs/`, keys, RAP | Read-only. Never commit anything derived from the game (AGENTS.md rule 1) |
 | `tools/rpcs3/` | Coordinator only |
+| The session scratchpad (`/tmp/claude-*/.../scratchpad`) | **Shared by all agents.** Put your files under a subdirectory named after your agent (e.g. `scratchpad/agent-physx/`), never at the top level (one agent's `msg1.txt` overwrote another's) |
 
 ## Coordinator procedure
 
