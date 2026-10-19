@@ -1,4 +1,4 @@
-From 10041cbc54cecd1a4d14d0ecc01b319395cc8f0d Mon Sep 17 00:00:00 2001
+From a5c5ea3f5d528342da6c4491f2b5fe622cdbb129 Mon Sep 17 00:00:00 2001
 From: Braden <snufflyy@proton.me>
 Date: Sun, 18 Oct 2026 23:56:28 -0500
 Subject: [PATCH] cellMsgDialog: implement cellMsgDialogOpenErrorCode
