@@ -1,0 +1,1640 @@
+From 498dbae1a31b5d5e3829e27797d643a76f0b6855 Mon Sep 17 00:00:00 2001
+From: soyjxck <soyjxck@users.noreply.github.com>
+Date: Sun, 4 Oct 2026 20:47:10 +0100
+Subject: [PATCH 01/13] cellPad: keyboard fallback on macOS via the Metal
+ backend's key monitor
+
+The Windows fallback polls GetAsyncKeyState; on macOS a local NSEvent
+monitor installed with the window records key state by virtual keycode,
+so no view has to be first responder and no Input Monitoring permission
+is needed. Keys are released on focus loss. Same map as Windows plus
+Space = cross; off with PAD_NO_KEYBOARD=1; a real SDL2 pad still wins.
+
+Ported to SARPBC-recomp (T008) from soyjxck/ps3recomp a6dc0ffc96a3 (MIT),
+libs/input part only; the original author is kept.
+---
+ libs/input/cellPad.c | 66 ++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 64 insertions(+), 2 deletions(-)
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index f2b4c11..59bc630 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -129,7 +129,11 @@ static u8 pad_xinput_stick_to_u8(short raw, short deadzone)
+  *
+  * Arrows = d-pad, Z/X/A/S = cross/circle/square/triangle, Q/W = L1/R1,
+  * 1/2 = L2/R2, Enter = START, Tab = SELECT. The left stick mirrors the d-pad
+- * so a title that reads the stick instead is playable too. */
++ * so a title that reads the stick instead is playable too.
++ *
++ * macOS has the same fallback (plus Space = cross) when SDL2 found no pad on
++ * port 0, fed by the Metal backend's key monitor rather than a poll of the
++ * system keyboard, so it needs no Input Monitoring permission. */
+ #ifdef _WIN32
+ static int pad_host_window_focused(void)
+ {
+@@ -390,6 +394,64 @@ static void pad_shutdown_backend(void)
+ 
+ #endif /* PAD_BACKEND_SDL2 */
+ 
++#if defined(__APPLE__)
++/* Keys come from the Metal backend's NSEvent monitor (rsx_metal_backend.m),
++ * which only sees events while the game window is key, so typing elsewhere
++ * cannot drive the game. Weak: a host built without that backend still
++ * links, and the fallback simply stays off. */
++extern int rsx_metal_backend_key_down(unsigned keycode) __attribute__((weak));
++extern int rsx_metal_backend_window_focused(void) __attribute__((weak));
++
++static void pad_poll_keyboard(void)
++{
++    static int off = -1;
++    if (off < 0) off = getenv("PAD_NO_KEYBOARD") ? 1 : 0;
++    if (off || !rsx_metal_backend_key_down || !rsx_metal_backend_window_focused)
++        return;
++
++    PadHostState* hs = &s_host_state[0];
++    if (!rsx_metal_backend_window_focused()) {
++        hs->buttons = 0;
++        hs->analog_lx = hs->analog_ly = 128;
++        hs->analog_rx = hs->analog_ry = 128;
++        hs->connected = 1;
++        return;
++    }
++
++    /* macOS virtual keycodes (kVK_* in HIToolbox/Events.h): physical keys,
++     * independent of the keyboard layout. */
++    static const struct { unsigned kc; u16 btn; } map[] = {
++        { 0x7E, CELL_PAD_CTRL_UP },     { 0x7D, CELL_PAD_CTRL_DOWN },
++        { 0x7B, CELL_PAD_CTRL_LEFT },   { 0x7C, CELL_PAD_CTRL_RIGHT },
++        { 0x06, CELL_PAD_CTRL_CROSS },  { 0x31, CELL_PAD_CTRL_CROSS },    /* Z, Space */
++        { 0x07, CELL_PAD_CTRL_CIRCLE },                                   /* X        */
++        { 0x00, CELL_PAD_CTRL_SQUARE }, { 0x01, CELL_PAD_CTRL_TRIANGLE }, /* A, S     */
++        { 0x0C, CELL_PAD_CTRL_L1 },     { 0x0D, CELL_PAD_CTRL_R1 },       /* Q, W     */
++        { 0x12, CELL_PAD_CTRL_L2 },     { 0x13, CELL_PAD_CTRL_R2 },       /* 1, 2     */
++        { 0x24, CELL_PAD_CTRL_START },  { 0x30, CELL_PAD_CTRL_SELECT },   /* Return, Tab */
++    };
++
++    u16 btns = 0;
++    for (unsigned i = 0; i < sizeof map / sizeof map[0]; i++)
++        if (rsx_metal_backend_key_down(map[i].kc)) btns |= map[i].btn;
++
++    hs->buttons   = btns;
++    hs->connected = 1;
++    hs->analog_lx = (u8)((btns & CELL_PAD_CTRL_LEFT) ? 0 :
++                         (btns & CELL_PAD_CTRL_RIGHT) ? 255 : 128);
++    hs->analog_ly = (u8)((btns & CELL_PAD_CTRL_UP) ? 0 :
++                         (btns & CELL_PAD_CTRL_DOWN) ? 255 : 128);
++    hs->analog_rx = hs->analog_ry = 128;
++    hs->trigger_l2 = (u8)((btns & CELL_PAD_CTRL_L2) ? 255 : 0);
++    hs->trigger_r2 = (u8)((btns & CELL_PAD_CTRL_R2) ? 255 : 0);
++
++    { static int said = 0;
++      if (!said && btns) { said = 1;
++          printf("[cellPad] keyboard fallback active on port 0 (no SDL2 pad)\n");
++          fflush(stdout); } }
++}
++#endif /* __APPLE__ */
++
+ /* ---------------------------------------------------------------------------
+  * Poll dispatcher
+  * -----------------------------------------------------------------------*/
+@@ -439,7 +501,7 @@ static void pad_poll_backend(void)
+ #elif PAD_BACKEND_SDL2
+     pad_poll_sdl2();
+ #endif
+-#ifdef _WIN32
++#if defined(_WIN32) || defined(__APPLE__)
+     if (!s_host_state[0].connected) pad_poll_keyboard();
+ #endif
+ }
+-- 
+2.55.0
+
+
+From 0828e6f236dc3acd74005c42a4877ba8429625b1 Mon Sep 17 00:00:00 2001
+From: soyjxck <soyjxck@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 04:30:42 +0100
+Subject: [PATCH 02/13] cellPad: keyboard arrows drive the left stick only;
+ D-pad TFGH, right stick IJKL
+
+The macOS keyboard fallback pressed the D-pad and the left stick together
+for each arrow. Drakengard 3 opens its item menu on D-pad up, so walking
+forward opened the menu. The arrows are now the left stick alone, the
+D-pad moves to T/F/G/H and the right stick (camera) gets I/J/K/L.
+
+Ported to SARPBC-recomp (T008) from soyjxck/ps3recomp 7f3b485467f1 (MIT),
+libs/input part only; the original author is kept.
+---
+ libs/input/cellPad.c | 23 +++++++++++++++--------
+ 1 file changed, 15 insertions(+), 8 deletions(-)
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 59bc630..4e1b950 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -420,9 +420,13 @@ static void pad_poll_keyboard(void)
+ 
+     /* macOS virtual keycodes (kVK_* in HIToolbox/Events.h): physical keys,
+      * independent of the keyboard layout. */
++    /* The arrows are the left stick alone: a title that gives the D-pad its
++     * own job (Drakengard 3's item menu is D-pad up) must not see it pressed
++     * whenever the player walks. The D-pad is T F G H, the right stick (the
++     * camera, usually) I J K L. */
+     static const struct { unsigned kc; u16 btn; } map[] = {
+-        { 0x7E, CELL_PAD_CTRL_UP },     { 0x7D, CELL_PAD_CTRL_DOWN },
+-        { 0x7B, CELL_PAD_CTRL_LEFT },   { 0x7C, CELL_PAD_CTRL_RIGHT },
++        { 0x11, CELL_PAD_CTRL_UP },     { 0x05, CELL_PAD_CTRL_DOWN },     /* T, G     */
++        { 0x03, CELL_PAD_CTRL_LEFT },   { 0x04, CELL_PAD_CTRL_RIGHT },    /* F, H     */
+         { 0x06, CELL_PAD_CTRL_CROSS },  { 0x31, CELL_PAD_CTRL_CROSS },    /* Z, Space */
+         { 0x07, CELL_PAD_CTRL_CIRCLE },                                   /* X        */
+         { 0x00, CELL_PAD_CTRL_SQUARE }, { 0x01, CELL_PAD_CTRL_TRIANGLE }, /* A, S     */
+@@ -437,16 +441,19 @@ static void pad_poll_keyboard(void)
+ 
+     hs->buttons   = btns;
+     hs->connected = 1;
+-    hs->analog_lx = (u8)((btns & CELL_PAD_CTRL_LEFT) ? 0 :
+-                         (btns & CELL_PAD_CTRL_RIGHT) ? 255 : 128);
+-    hs->analog_ly = (u8)((btns & CELL_PAD_CTRL_UP) ? 0 :
+-                         (btns & CELL_PAD_CTRL_DOWN) ? 255 : 128);
+-    hs->analog_rx = hs->analog_ry = 128;
++    #define PAD_KEY(kc) (rsx_metal_backend_key_down(kc) != 0)
++    hs->analog_lx = (u8)(PAD_KEY(0x7B) ? 0 : PAD_KEY(0x7C) ? 255 : 128);   /* Left, Right */
++    hs->analog_ly = (u8)(PAD_KEY(0x7E) ? 0 : PAD_KEY(0x7D) ? 255 : 128);   /* Up, Down    */
++    hs->analog_rx = (u8)(PAD_KEY(0x26) ? 0 : PAD_KEY(0x25) ? 255 : 128);   /* J, L        */
++    hs->analog_ry = (u8)(PAD_KEY(0x22) ? 0 : PAD_KEY(0x28) ? 255 : 128);   /* I, K        */
++    #undef PAD_KEY
++    const int sticks = hs->analog_lx != 128 || hs->analog_ly != 128 ||
++                       hs->analog_rx != 128 || hs->analog_ry != 128;
+     hs->trigger_l2 = (u8)((btns & CELL_PAD_CTRL_L2) ? 255 : 0);
+     hs->trigger_r2 = (u8)((btns & CELL_PAD_CTRL_R2) ? 255 : 0);
+ 
+     { static int said = 0;
+-      if (!said && btns) { said = 1;
++      if (!said && (btns || sticks)) { said = 1;
+           printf("[cellPad] keyboard fallback active on port 0 (no SDL2 pad)\n");
+           fflush(stdout); } }
+ }
+-- 
+2.55.0
+
+
+From b352395280dd027162e83c4099c7dd440299cee2 Mon Sep 17 00:00:00 2001
+From: soyjxck <soyjxck@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 21:55:05 +0100
+Subject: [PATCH 03/13] Cached getenv on hot paths; XInput probes empty slots
+ once a second
+
+The runtime's diagnostics are switched by environment variables read where
+they are used, some of them per FIFO drain, per SPURS job or per event-queue
+receive. On Windows getenv takes the CRT's lock and scans the environment
+block: it showed up as strchr, 7% of Drakengard 3's render thread and 11% of
+the RSX walker. ps3emu/env_cache.h answers from a table keyed on the address
+of the name (a string literal), filled once; a file opts in by defining
+getenv to ps3_env after its includes. Twelve files do. The replay harness
+and the D3D12 engine's frame dump, which read a variable that changes at run
+time, do not.
+
+cellPad: XInputGetState on a slot with nothing plugged in enumerates devices
+(DeviceIoControl, DevObjEnumDeviceInfo). The sweep of empty slots every 4 ms
+was 4-11% of the wait samples of the game's main thread. Empty slots are now
+probed once a second, and slots past XUSER_MAX_COUNT never.
+
+Neither moved the frame rate measurably on its own (49-52 fps in the battle
+benchmark either way); they take the two items off the profile.
+
+Ported to SARPBC-recomp (T008) from soyjxck/ps3recomp 0e967d8dc827 (MIT),
+libs/input part only; the original author is kept.
+---
+ libs/input/cellPad.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 4e1b950..7d4c73c 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -194,13 +194,24 @@ static void pad_poll_keyboard(void)
+ 
+ static void pad_poll_xinput(void)
+ {
++    /* An empty slot is re-probed once a second, not on every sweep. Asking
++     * XInput about a slot with nothing plugged in makes it enumerate devices
++     * (DeviceIoControl, DevObjEnumDeviceInfo): the sweep of empty slots every
++     * 4 ms was 4-11% of the wait samples of Drakengard 3's main thread, the
++     * thread that polls the pad. A controller plugged in mid-game appears
++     * within a second; XInput has four user slots, so the rest never exist. */
++    static ULONGLONG next_probe[PAD_MAX_HOST_PORTS];
++    const ULONGLONG now = GetTickCount64();
+     for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
+         XINPUT_STATE state;
+         memset(&state, 0, sizeof(state));
++        if (i >= XUSER_MAX_COUNT) { s_host_state[i].connected = 0; continue; }
++        if (!s_host_state[i].connected && now < next_probe[i]) continue;
+ 
+         DWORD result = XInputGetState((DWORD)i, &state);
+         if (result != ERROR_SUCCESS) {
+             s_host_state[i].connected = 0;
++            next_probe[i] = now + 1000;
+             continue;
+         }
+ 
+-- 
+2.55.0
+
+
+From fcd1c962379591056e8a50a4fe11e1e048dca68c Mon Sep 17 00:00:00 2001
+From: soyjxck <soyjxck@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 02:37:47 +0100
+Subject: [PATCH 04/13] cellPad: PAD_STICK_FILE hold; poll PAD_FILE at most
+ every 30 ms
+
+- PAD_STICK_FILE=<path>: hold the sticks (PAD_STICK's position, or the left
+  stick forward) while the file exists, so a script can start and stop the
+  hold when it wants. tools/autoplay_win.sh uses it to run ahead through
+  the first chapter, which reaches the scene where scenery breaks up -- a
+  repeatable benchmark for it with no hands on the pad.
+- PAD_FILE was opened on every pad read (twice a frame): 2-3% of the game
+  thread in benchmark runs (ZwCreateFile in the profile). Now every 30 ms.
+
+Ported to SARPBC-recomp (T008) from soyjxck/ps3recomp 64088755f923 (MIT),
+libs/input part only; the original author is kept.
+---
+ libs/input/cellPad.c | 27 ++++++++++++++++++++++++++-
+ 1 file changed, 26 insertions(+), 1 deletion(-)
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 7d4c73c..d348175 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -755,8 +755,13 @@ skip_inject: ;
+       if (s_pf < 0) { const char* e = getenv("PAD_FILE");
+                       s_pf = (e && *e) ? 1 : 0;
+                       if (s_pf) { strncpy(pf_path, e, sizeof pf_path - 1); pf_path[sizeof pf_path - 1] = 0; } }
++      /* The file is polled at most every 30 ms: opening it on every pad read
++       * (twice a frame) was 2-3% of the game thread in benchmark runs. */
++      static unsigned long long s_pf_chk = 0;
++      const unsigned long long pf_now = GetTickCount64();
+       if (s_pf && port_no == 0) {
+-          if (held_n <= 0) {
++          if (held_n <= 0 && pf_now - s_pf_chk >= 30) {
++              s_pf_chk = pf_now;
+               FILE* f = fopen(pf_path, "rb");
+               if (f) {
+                   char buf[64]; buf[0] = 0;
+@@ -797,6 +802,26 @@ skip_inject: ;
+       if (s_st && (double)(GetTickCount64() - s_t0) / 1000.0 >= s_from && (double)(GetTickCount64() - s_t0) / 1000.0 < s_until) { hs->analog_lx = s_v[0]; hs->analog_ly = s_v[1];
+                   hs->analog_rx = s_v[2]; hs->analog_ry = s_v[3];
+                   hs->connected = 1; }
++      /* PAD_STICK_FILE=<path>: hold the sticks while that file exists (at the
++       * PAD_STICK position, or the left stick forward), so a script can start
++       * and stop the hold at the moments it cares about -- tools/autoplay_win.sh
++       * holds forward while the battle HUD is up (AUTOPLAY_FORWARD=1), which
++       * is how the first chapter reaches the scene where scenery breaks up. */
++      { static int s_sf = -1; static char sf_path[512];
++        static unsigned long long s_chk = 0; static int s_on = 0;
++        if (s_sf < 0) { const char* e = getenv("PAD_STICK_FILE");
++          s_sf = (e && *e) ? 1 : 0;
++          if (s_sf) { strncpy(sf_path, e, sizeof sf_path - 1); sf_path[sizeof sf_path - 1] = 0;
++                      if (!s_st) { s_v[0] = 128; s_v[1] = 0; s_v[2] = 128; s_v[3] = 128; } } }
++        if (s_sf && port_no == 0) {
++          const unsigned long long now = GetTickCount64();
++          if (now - s_chk >= 200) { s_chk = now;
++            FILE* f = fopen(sf_path, "rb");
++            const int on = f != NULL;
++            if (f) fclose(f);
++            if (on != s_on) { s_on = on; printf("[cellPad] PAD_STICK_FILE hold %s\n", on ? "on" : "off"); fflush(stdout); } }
++          if (s_on) { hs->analog_lx = s_v[0]; hs->analog_ly = s_v[1];
++                      hs->analog_rx = s_v[2]; hs->analog_ry = s_v[3]; hs->connected = 1; } } }
+       /* PAD_SWEEP=<seconds per step>: walk the sticks through a fixed set of
+        * deflections instead of holding one. Guessing a single stick position and
+        * re-running costs ~5 minutes a try; a sweep answers "can input move the
+-- 
+2.55.0
+
+
+From 896c937bb7db58312f2ce3ca4e94a8c3c71ba88f Mon Sep 17 00:00:00 2001
+From: soyjxck <soyjxck@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 10:03:42 +0100
+Subject: [PATCH 05/13] d3d12: build triangle pipeline states on the build
+ thread, not at first draw
+
+The draw engine builds a pipeline (HLSL compile) on its own thread
+(RSX_ASYNC_SHADERS), but the D3D12 pipeline state object -- the driver's
+compile -- was still made at the pipeline's first draw, on the walker, at
+encode time. With the driver's shader cache warm that is ~0.4 ms apiece
+(235 in a 2-minute run, ~92 ms, all on the walker); for a shader the driver
+has not seen, as in a new area, it is tens of milliseconds, and the frame
+waits. The triangle-class state is now built right after the pipeline, on
+the build thread (points and lines, rare, still on first use; RSX_PSO_PREWARM=0
+restores first-use for all). Same run: 244 built, none on the walker.
+
+Also:
+- RSX_PSO_LOG=1: each pipeline state built, its time and its thread.
+- RSX_HITCH_LOG lines carry the walker's work in the frame: textures
+  uploaded, vertex conversions, pipelines and pipeline states built, draws.
+- cellPad: PAD_STICK_FILE may hold "lx ly rx ry", so a script can steer and
+  turn the camera (dod3-recomp's autoplay combat mode).
+
+Replay regression: 102 frames identical to out/rep_win (rsx_replay rebuilt).
+
+Ported to SARPBC-recomp (T008) from soyjxck/ps3recomp 4c64e875878b (MIT),
+libs/input part only; the original author is kept.
+---
+ libs/input/cellPad.c | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index d348175..4f3a976 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -813,15 +813,24 @@ skip_inject: ;
+           s_sf = (e && *e) ? 1 : 0;
+           if (s_sf) { strncpy(sf_path, e, sizeof sf_path - 1); sf_path[sizeof sf_path - 1] = 0;
+                       if (!s_st) { s_v[0] = 128; s_v[1] = 0; s_v[2] = 128; s_v[3] = 128; } } }
++        /* The file may name the position: "lx ly rx ry" (0-255, 128 centred),
++         * so a script can steer and turn the camera; empty, the default. */
++        static unsigned char f_v[4]; static int f_has = 0;
+         if (s_sf && port_no == 0) {
+           const unsigned long long now = GetTickCount64();
+           if (now - s_chk >= 200) { s_chk = now;
+             FILE* f = fopen(sf_path, "rb");
+             const int on = f != NULL;
+-            if (f) fclose(f);
++            if (f) {
++              char buf[64]; int a, b, c, d;
++              f_has = fgets(buf, sizeof buf, f) && sscanf(buf, "%d %d %d %d", &a, &b, &c, &d) == 4;
++              if (f_has) { f_v[0] = (unsigned char)a; f_v[1] = (unsigned char)b; f_v[2] = (unsigned char)c; f_v[3] = (unsigned char)d; }
++              fclose(f);
++            }
+             if (on != s_on) { s_on = on; printf("[cellPad] PAD_STICK_FILE hold %s\n", on ? "on" : "off"); fflush(stdout); } }
+-          if (s_on) { hs->analog_lx = s_v[0]; hs->analog_ly = s_v[1];
+-                      hs->analog_rx = s_v[2]; hs->analog_ry = s_v[3]; hs->connected = 1; } } }
++          if (s_on) { const unsigned char* v = f_has ? f_v : s_v;
++                      hs->analog_lx = v[0]; hs->analog_ly = v[1];
++                      hs->analog_rx = v[2]; hs->analog_ry = v[3]; hs->connected = 1; } } }
+       /* PAD_SWEEP=<seconds per step>: walk the sticks through a fixed set of
+        * deflections instead of holding one. Guessing a single stick position and
+        * re-running costs ~5 minutes a try; a sweep answers "can input move the
+-- 
+2.55.0
+
+
+From e934587533ff29b59dbe25d80b6f4b1639fe4e18 Mon Sep 17 00:00:00 2001
+From: soyjxck <soyjxck@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 01:36:32 +0100
+Subject: [PATCH 06/13] cellPad: SDL2 on Windows too (PS3RECOMP_PAD_SDL2), pads
+ by instance id
+
+Windows read XInput only, so a DualSense, DualShock 4 or Switch Pro pad
+-- HID devices XInput never enumerates -- was an empty slot unless Steam
+Input or DS4Windows stood in. PS3RECOMP_PAD_SDL2=ON builds the SDL2
+backend on Windows as well (SDL2 from vcpkg; audio stays on WASAPI); the
+keyboard fallback no longer lives inside the XInput block.
+
+The SDL2 backend itself:
+
+- Slots are matched to pads by instance id. By device index, a pad's
+  index shifts down when one before it is unplugged, and
+  SDL_GameControllerOpen on an already-open device returns the same
+  object: slot 0 reopened slot 1's pad after player 1 unplugged, and both
+  ports read it.
+- Hints before the subsystem starts: background events allowed (the pad
+  is read whether or not an SDL window has the focus, as XInput does),
+  buttons by position (the bottom face button is CROSS on a Switch Pro
+  pad too), PS4/PS5 rumble over Bluetooth, and on Windows SDL's own
+  joystick thread, which owns the device-notification window and
+  re-checks the XInput slots: there is no SDL window here and the pad is
+  polled from whichever guest thread asks.
+- Joystick and controller events ignored: the state is polled and nobody
+  drains SDL's queue.
+- A centred stick reads 128, not 127.
+- A log line per pad connected or disconnected.
+
+Tested on Windows (Drakengard 3): Xbox One, Xbox Series X and DualSense
+pads plugged and unplugged mid-game, each taking the port a PS3 would
+give it; the DualSense drives the game from port 0.
+
+Ported to SARPBC-recomp (T008) from soyjxck/ps3recomp 7e52cef1e6f5 (MIT),
+libs/input part only; the original author is kept.
+---
+ libs/input/cellPad.c | 260 ++++++++++++++++++++++++++-----------------
+ 1 file changed, 158 insertions(+), 102 deletions(-)
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 4f3a976..a9fe724 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -4,10 +4,12 @@
+  * Reads real gamepad input from the host and translates to PS3 pad format.
+  *
+  * Backend selection:
+- *   - Windows default: XInput (no extra dependencies)
++ *   - Windows default: XInput (no extra dependencies; Xbox-type pads only)
+  *   - Everywhere else / if PS3RECOMP_PAD_USE_SDL2 is defined: SDL2 GameController
+  *
+- * Define PS3RECOMP_PAD_USE_SDL2 to force SDL2 backend on Windows.
++ * Define PS3RECOMP_PAD_USE_SDL2 (CMake: PS3RECOMP_PAD_SDL2=ON) for SDL2 on
++ * Windows as well: DualShock 4, DualSense, Switch Pro and the other pads
++ * XInput never sees, wired or over Bluetooth.
+  */
+ 
+ #include <time.h>
+@@ -114,84 +116,6 @@ static u8 pad_xinput_stick_to_u8(short raw, short deadzone)
+     return (u8)val;
+ }
+ 
+-/* Keyboard fallback for port 0.
+- *
+- * The only backend here is XInput, so on a machine with no controller plugged
+- * in a title gets a pad that is reported present and never presses anything --
+- * it can be watched but not played. That is what The Simpsons Arcade Game hit:
+- * it reached its attract loop and no input existed to start a game.
+- *
+- * Only fills in for port 0, only when XInput found nothing there, so a real
+- * controller always wins and nothing changes for a port that has one. Keys are
+- * read only while a window of THIS process is in the foreground, so typing in
+- * another application does not drive the game. Set PAD_NO_KEYBOARD=1 to
+- * disable it entirely.
+- *
+- * Arrows = d-pad, Z/X/A/S = cross/circle/square/triangle, Q/W = L1/R1,
+- * 1/2 = L2/R2, Enter = START, Tab = SELECT. The left stick mirrors the d-pad
+- * so a title that reads the stick instead is playable too.
+- *
+- * macOS has the same fallback (plus Space = cross) when SDL2 found no pad on
+- * port 0, fed by the Metal backend's key monitor rather than a poll of the
+- * system keyboard, so it needs no Input Monitoring permission. */
+-#ifdef _WIN32
+-static int pad_host_window_focused(void)
+-{
+-    HWND fg = GetForegroundWindow();
+-    if (!fg) return 0;
+-    DWORD pid = 0;
+-    GetWindowThreadProcessId(fg, &pid);
+-    return pid == GetCurrentProcessId();
+-}
+-
+-static void pad_poll_keyboard(void)
+-{
+-    static int off = -1;
+-    if (off < 0) off = getenv("PAD_NO_KEYBOARD") ? 1 : 0;
+-    if (off) return;
+-
+-    PadHostState* hs = &s_host_state[0];
+-    if (!pad_host_window_focused()) {
+-        /* Release everything on focus loss, or a key held while alt-tabbing
+-         * would stay down forever. */
+-        hs->buttons = 0;
+-        hs->analog_lx = hs->analog_ly = 128;
+-        hs->analog_rx = hs->analog_ry = 128;
+-        hs->connected = 1;
+-        return;
+-    }
+-
+-    static const struct { int vk; u16 btn; } map[] = {
+-        { VK_UP,     CELL_PAD_CTRL_UP },      { VK_DOWN,  CELL_PAD_CTRL_DOWN },
+-        { VK_LEFT,   CELL_PAD_CTRL_LEFT },    { VK_RIGHT, CELL_PAD_CTRL_RIGHT },
+-        { 'Z',       CELL_PAD_CTRL_CROSS },   { 'X',      CELL_PAD_CTRL_CIRCLE },
+-        { 'A',       CELL_PAD_CTRL_SQUARE },  { 'S',      CELL_PAD_CTRL_TRIANGLE },
+-        { 'Q',       CELL_PAD_CTRL_L1 },      { 'W',      CELL_PAD_CTRL_R1 },
+-        { '1',       CELL_PAD_CTRL_L2 },      { '2',      CELL_PAD_CTRL_R2 },
+-        { VK_RETURN, CELL_PAD_CTRL_START },   { VK_TAB,   CELL_PAD_CTRL_SELECT },
+-    };
+-
+-    u16 btns = 0;
+-    for (unsigned i = 0; i < sizeof map / sizeof map[0]; i++)
+-        if (GetAsyncKeyState(map[i].vk) & 0x8000) btns |= map[i].btn;
+-
+-    hs->buttons   = btns;
+-    hs->connected = 1;
+-    hs->analog_lx = (u8)((btns & CELL_PAD_CTRL_LEFT) ? 0 :
+-                         (btns & CELL_PAD_CTRL_RIGHT) ? 255 : 128);
+-    hs->analog_ly = (u8)((btns & CELL_PAD_CTRL_UP) ? 0 :
+-                         (btns & CELL_PAD_CTRL_DOWN) ? 255 : 128);
+-    hs->analog_rx = hs->analog_ry = 128;
+-    hs->trigger_l2 = (u8)((btns & CELL_PAD_CTRL_L2) ? 255 : 0);
+-    hs->trigger_r2 = (u8)((btns & CELL_PAD_CTRL_R2) ? 255 : 0);
+-
+-    { static int said = 0;
+-      if (!said && btns) { said = 1;
+-          printf("[cellPad] keyboard fallback active on port 0 (no XInput device)\n");
+-          fflush(stdout); } }
+-}
+-#endif
+-
+ static void pad_poll_xinput(void)
+ {
+     /* An empty slot is re-probed once a second, not on every sweep. Asking
+@@ -286,8 +210,9 @@ static void pad_shutdown_backend(void)
+ 
+ static u8 pad_sdl_axis_to_u8(int raw)
+ {
+-    /* SDL axis: -32768..32767 -> 0..255 with center at 128 */
+-    int val = ((raw + 32768) * 255) / 65535;
++    /* SDL axis: -32768..32767 -> 0..255, a centred stick exactly 128 (the
++     * rounding of a 65535-wide scale put it at 127). */
++    int val = 128 + raw / 256;
+     if (val < 0) val = 0;
+     if (val > 255) val = 255;
+     return (u8)val;
+@@ -302,25 +227,55 @@ static u8 pad_sdl_trigger_to_u8(int raw)
+     return (u8)val;
+ }
+ 
++/* Put every pad SDL knows and no slot holds into the lowest free slot.
++ *
++ * By instance id, not device index: the index of a pad shifts down when one
++ * before it is unplugged, and SDL_GameControllerOpen on a device that is
++ * already open hands back the same object -- slot 0 would reopen slot 1's pad
++ * after player 1 unplugged, and both ports would then read it. */
++static void pad_sdl_open_new(void)
++{
++    const int num = SDL_NumJoysticks();
++    for (int d = 0; d < num; d++) {
++        if (!SDL_IsGameController(d)) continue;
++        const SDL_JoystickID id = SDL_JoystickGetDeviceInstanceID(d);
++        int slot = -1, open = 0;
++        for (int i = 0; i < PAD_MAX_HOST_PORTS && !open; i++) {
++            SDL_GameController* gc = s_sdl_controllers[i];
++            if (!gc) { if (slot < 0) slot = i; continue; }
++            open = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gc)) == id;
++        }
++        if (open || slot < 0) continue;
++        SDL_GameController* gc = SDL_GameControllerOpen(d);
++        if (!gc) continue;
++        s_sdl_controllers[slot] = gc;
++        const char* name = SDL_GameControllerName(gc);
++        printf("[cellPad] port %d: %s\n", slot, name ? name : "controller");
++        fflush(stdout);
++    }
++}
++
+ static void pad_poll_sdl2(void)
+ {
++    /* Also runs every driver's device detection, so a pad plugged in
++     * mid-game is seen without anyone pumping SDL's event queue. */
+     SDL_GameControllerUpdate();
+ 
+     for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
+-        if (!s_sdl_controllers[i]) {
+-            /* Try to open newly connected controllers */
+-            if (SDL_IsGameController(i)) {
+-                s_sdl_controllers[i] = SDL_GameControllerOpen(i);
+-            }
++        SDL_GameController* gc = s_sdl_controllers[i];
++        if (gc && !SDL_GameControllerGetAttached(gc)) {
++            printf("[cellPad] port %d: disconnected\n", i);
++            fflush(stdout);
++            SDL_GameControllerClose(gc);
++            s_sdl_controllers[i] = NULL;
+         }
++    }
++    pad_sdl_open_new();
+ 
++    for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
+         SDL_GameController* gc = s_sdl_controllers[i];
+-        if (!gc || !SDL_GameControllerGetAttached(gc)) {
++        if (!gc) {
+             s_host_state[i].connected = 0;
+-            if (gc) {
+-                SDL_GameControllerClose(gc);
+-                s_sdl_controllers[i] = NULL;
+-            }
+             continue;
+         }
+ 
+@@ -377,20 +332,43 @@ static void pad_poll_sdl2(void)
+ static void pad_init_backend(void)
+ {
+     if (!s_sdl_inited) {
+-        if (SDL_WasInit(SDL_INIT_GAMECONTROLLER) == 0) {
+-            SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER);
++        /* Hints are read when the subsystem starts, so they go first. */
++        /* The pad is read whether or not a window of ours has the focus,
++         * as the XInput backend does; a port decides for itself what to do
++         * in the background. (Only matters where the window is SDL's.) */
++        SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
++        /* Buttons by position, not by label: the bottom face button is
++         * CROSS on a Switch Pro pad too, which is what a PS3 title's prompts
++         * mean. */
++        SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "0");
++#ifdef SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE
++        /* Extended reports over Bluetooth, which carry the rumble. */
++        SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE, "1");
++#endif
++#ifdef SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE
++        SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, "1");
++#endif
++#ifdef _WIN32
++        /* There is no SDL window here and the pad is polled from whichever
++         * guest thread asks: SDL's own thread owns the device-notification
++         * window and re-checks the XInput slots, so hot-plugging does not
++         * depend on who pumps what. */
++        SDL_SetHint(SDL_HINT_JOYSTICK_THREAD, "1");
++#endif
++        if (SDL_WasInit(SDL_INIT_GAMECONTROLLER) == 0 &&
++            SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
++            printf("[cellPad] SDL_InitSubSystem(GAMECONTROLLER) failed: %s\n", SDL_GetError());
++            fflush(stdout);
++            return;   /* SDL_NumJoysticks is 0 until then: no pad, keyboard fallback */
+         }
++        /* State is read by polling; nobody drains SDL's event queue, so
++         * stop it from filling with every stick movement. */
++        SDL_JoystickEventState(SDL_IGNORE);
++        SDL_GameControllerEventState(SDL_IGNORE);
+         s_sdl_inited = 1;
+     }
+     memset(s_sdl_controllers, 0, sizeof(s_sdl_controllers));
+-
+-    /* Open any controllers already connected */
+-    int num = SDL_NumJoysticks();
+-    for (int i = 0; i < num && i < PAD_MAX_HOST_PORTS; i++) {
+-        if (SDL_IsGameController(i)) {
+-            s_sdl_controllers[i] = SDL_GameControllerOpen(i);
+-        }
+-    }
++    pad_sdl_open_new();
+ }
+ 
+ static void pad_shutdown_backend(void)
+@@ -405,6 +383,84 @@ static void pad_shutdown_backend(void)
+ 
+ #endif /* PAD_BACKEND_SDL2 */
+ 
++/* Keyboard fallback for port 0.
++ *
++ * On a machine with no controller plugged in a title gets a pad that is
++ * reported present and never presses anything -- it can be watched but not
++ * played. That is what The Simpsons Arcade Game hit: it reached its attract
++ * loop and no input existed to start a game.
++ *
++ * Only fills in for port 0, only when the backend found nothing there, so a
++ * real controller always wins and nothing changes for a port that has one.
++ * Keys are read only while a window of THIS process is in the foreground, so
++ * typing in another application does not drive the game. Set
++ * PAD_NO_KEYBOARD=1 to disable it entirely.
++ *
++ * Arrows = d-pad, Z/X/A/S = cross/circle/square/triangle, Q/W = L1/R1,
++ * 1/2 = L2/R2, Enter = START, Tab = SELECT. The left stick mirrors the d-pad
++ * so a title that reads the stick instead is playable too.
++ *
++ * macOS has the same fallback (plus Space = cross) when SDL2 found no pad on
++ * port 0, fed by the Metal backend's key monitor rather than a poll of the
++ * system keyboard, so it needs no Input Monitoring permission. */
++#ifdef _WIN32
++static int pad_host_window_focused(void)
++{
++    HWND fg = GetForegroundWindow();
++    if (!fg) return 0;
++    DWORD pid = 0;
++    GetWindowThreadProcessId(fg, &pid);
++    return pid == GetCurrentProcessId();
++}
++
++static void pad_poll_keyboard(void)
++{
++    static int off = -1;
++    if (off < 0) off = getenv("PAD_NO_KEYBOARD") ? 1 : 0;
++    if (off) return;
++
++    PadHostState* hs = &s_host_state[0];
++    if (!pad_host_window_focused()) {
++        /* Release everything on focus loss, or a key held while alt-tabbing
++         * would stay down forever. */
++        hs->buttons = 0;
++        hs->analog_lx = hs->analog_ly = 128;
++        hs->analog_rx = hs->analog_ry = 128;
++        hs->connected = 1;
++        return;
++    }
++
++    static const struct { int vk; u16 btn; } map[] = {
++        { VK_UP,     CELL_PAD_CTRL_UP },      { VK_DOWN,  CELL_PAD_CTRL_DOWN },
++        { VK_LEFT,   CELL_PAD_CTRL_LEFT },    { VK_RIGHT, CELL_PAD_CTRL_RIGHT },
++        { 'Z',       CELL_PAD_CTRL_CROSS },   { 'X',      CELL_PAD_CTRL_CIRCLE },
++        { 'A',       CELL_PAD_CTRL_SQUARE },  { 'S',      CELL_PAD_CTRL_TRIANGLE },
++        { 'Q',       CELL_PAD_CTRL_L1 },      { 'W',      CELL_PAD_CTRL_R1 },
++        { '1',       CELL_PAD_CTRL_L2 },      { '2',      CELL_PAD_CTRL_R2 },
++        { VK_RETURN, CELL_PAD_CTRL_START },   { VK_TAB,   CELL_PAD_CTRL_SELECT },
++    };
++
++    u16 btns = 0;
++    for (unsigned i = 0; i < sizeof map / sizeof map[0]; i++)
++        if (GetAsyncKeyState(map[i].vk) & 0x8000) btns |= map[i].btn;
++
++    hs->buttons   = btns;
++    hs->connected = 1;
++    hs->analog_lx = (u8)((btns & CELL_PAD_CTRL_LEFT) ? 0 :
++                         (btns & CELL_PAD_CTRL_RIGHT) ? 255 : 128);
++    hs->analog_ly = (u8)((btns & CELL_PAD_CTRL_UP) ? 0 :
++                         (btns & CELL_PAD_CTRL_DOWN) ? 255 : 128);
++    hs->analog_rx = hs->analog_ry = 128;
++    hs->trigger_l2 = (u8)((btns & CELL_PAD_CTRL_L2) ? 255 : 0);
++    hs->trigger_r2 = (u8)((btns & CELL_PAD_CTRL_R2) ? 255 : 0);
++
++    { static int said = 0;
++      if (!said && btns) { said = 1;
++          printf("[cellPad] keyboard fallback active on port 0 (no controller)\n");
++          fflush(stdout); } }
++}
++#endif /* _WIN32 */
++
+ #if defined(__APPLE__)
+ /* Keys come from the Metal backend's NSEvent monitor (rsx_metal_backend.m),
+  * which only sees events while the game window is key, so typing elsewhere
+-- 
+2.55.0
+
+
+From 5eb97b58a911696c4698bf2beb0e5be230cb14ce Mon Sep 17 00:00:00 2001
+From: soyjxck <soyjxck@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 03:05:02 +0100
+Subject: [PATCH 07/13] cellPad SDL2: the pad on a thread of its own, rumble
+ held until changed
+
+SDL_GameControllerUpdate also runs every driver's device detection, and
+on Windows a pad plugged in or out makes that enumerate the DirectInput
+and HID devices on the calling thread, with the joystick lock held:
+hundreds of milliseconds to seconds. Polled from the game thread, one
+plug event stalled Drakengard 3 for 3 s (4 fps over the next five
+seconds). So the guest never calls SDL now: a pad thread starts the
+subsystem, polls every PAD_POLL_INTERVAL_MS, keeps the latest state of
+every port, and applies the rumble the guest asked for; the guest's poll
+copies that snapshot and its actuator call leaves a request, both under
+a mutex the pad thread holds only for the copy. On Windows the thread
+also dispatches its own message queue, which is where SDL's HID
+discovery window delivers device changes.
+
+Rumble: SDL's has a duration and the guest's actuator call does not (a
+DS3 rumbles until told otherwise), so a non-zero request is re-sent
+every 50 ms.
+
+Tested on Windows through twelve hands-off runs of Drakengard 3 (the
+thread up, input through PAD_FILE). A pad plugged in and out with the
+thread in place is still to be tried with one to hand.
+
+Ported to SARPBC-recomp (T008) from soyjxck/ps3recomp cd2ab9b04c12 (MIT),
+libs/input part only; the original author is kept.
+---
+ libs/input/cellPad.c | 262 ++++++++++++++++++++++++++++---------------
+ 1 file changed, 174 insertions(+), 88 deletions(-)
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index a9fe724..725bf08 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -55,6 +55,21 @@
+ 
+ #define PAD_MAX_HOST_PORTS  4  /* XInput supports max 4; SDL may support more */
+ 
++/* Re-poll the host at most every PAD_POLL_INTERVAL_MS; serve cached state in
++ * between.
++ *
++ * XInputGetState is a driver call, and on a slot with nothing plugged in it is
++ * an expensive one: measured at 97.6 us for a sweep of the 7 host ports on a
++ * machine with no controller attached. cellPadGetData ran that sweep on EVERY
++ * call, and a guest that polls the pad from a spin loop -- The Simpsons Arcade
++ * Game does, in its input stage -- therefore spends its whole main thread
++ * inside the input driver.
++ *
++ * 4 ms is 250 Hz, well above the 60 Hz a title can actually observe (and above
++ * a real DualShock 3's own report rate), so no game can tell the difference,
++ * including one sampling for button-press edges. */
++#define PAD_POLL_INTERVAL_MS 4
++
+ typedef struct {
+     int  connected;
+     u16  buttons;           /* CELL_PAD_CTRL_* bitmask */
+@@ -84,11 +99,6 @@ static PadHostState  s_host_state[PAD_MAX_HOST_PORTS];
+ /* Per-port "a report has arrived since your last read" flag; see cellPadGetData. */
+ static int s_data_fresh[PAD_MAX_HOST_PORTS];
+ 
+-#if PAD_BACKEND_SDL2
+-static SDL_GameController* s_sdl_controllers[PAD_MAX_HOST_PORTS];
+-static int s_sdl_inited = 0;
+-#endif
+-
+ /* ---------------------------------------------------------------------------
+  * XInput backend
+  * -----------------------------------------------------------------------*/
+@@ -208,6 +218,26 @@ static void pad_shutdown_backend(void)
+ 
+ #if PAD_BACKEND_SDL2
+ 
++/* SDL is driven from a thread of its own, and the guest never calls it.
++ *
++ * SDL_GameControllerUpdate also runs every driver's device detection, and on
++ * Windows a pad plugged in or out makes that enumerate the DirectInput and HID
++ * devices on the calling thread, with the joystick lock held: hundreds of
++ * milliseconds to seconds. Polled from the game thread, one plug event
++ * stalled Drakengard 3 for 3 s (4 fps over the next five seconds). So the pad
++ * thread polls every PAD_POLL_INTERVAL_MS, keeps the latest state of every
++ * port in s_sdl_state and applies the rumble the guest asked for; the guest's
++ * poll copies that snapshot and its actuator call leaves a request, both under
++ * s_sdl_lock, which the pad thread holds only for the copy. */
++static SDL_mutex*          s_sdl_lock;
++static SDL_Thread*         s_sdl_thread;
++static volatile int        s_sdl_quit;
++static PadHostState        s_sdl_state[PAD_MAX_HOST_PORTS];      /* under s_sdl_lock */
++static u8                  s_sdl_rumble[PAD_MAX_HOST_PORTS][2];  /* large, small; under s_sdl_lock */
++static int                 s_sdl_rumble_new[PAD_MAX_HOST_PORTS]; /* under s_sdl_lock */
++/* The pad thread's own */
++static SDL_GameController* s_sdl_controllers[PAD_MAX_HOST_PORTS];
++
+ static u8 pad_sdl_axis_to_u8(int raw)
+ {
+     /* SDL axis: -32768..32767 -> 0..255, a centred stick exactly 128 (the
+@@ -227,6 +257,43 @@ static u8 pad_sdl_trigger_to_u8(int raw)
+     return (u8)val;
+ }
+ 
++/* The subsystem, started on the pad thread. */
++static int pad_sdl_start(void)
++{
++    /* Hints are read when the subsystem starts, so they go first. */
++    /* The pad is read whether or not a window of ours has the focus, as the
++     * XInput backend does; a port decides for itself what to do in the
++     * background. (Only matters where the window is SDL's.) */
++    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
++    /* Buttons by position, not by label: the bottom face button is CROSS on
++     * a Switch Pro pad too, which is what a PS3 title's prompts mean. */
++    SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "0");
++#ifdef SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE
++    /* Extended reports over Bluetooth, which carry the rumble. */
++    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE, "1");
++#endif
++#ifdef SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE
++    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, "1");
++#endif
++#ifdef _WIN32
++    /* No SDL_PumpEvents runs anywhere here: SDL's own joystick thread owns
++     * the DirectInput/XInput device-notification window and re-checks the
++     * XInput slots by itself. */
++    SDL_SetHint(SDL_HINT_JOYSTICK_THREAD, "1");
++#endif
++    if (SDL_WasInit(SDL_INIT_GAMECONTROLLER) == 0 &&
++        SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
++        printf("[cellPad] SDL_InitSubSystem(GAMECONTROLLER) failed: %s\n", SDL_GetError());
++        fflush(stdout);
++        return 0;   /* no pad: the keyboard fallback */
++    }
++    /* State is read by polling; nobody drains SDL's event queue, so stop it
++     * from filling with every stick movement. */
++    SDL_JoystickEventState(SDL_IGNORE);
++    SDL_GameControllerEventState(SDL_IGNORE);
++    return 1;
++}
++
+ /* Put every pad SDL knows and no slot holds into the lowest free slot.
+  *
+  * By instance id, not device index: the index of a pad shifts down when one
+@@ -255,7 +322,8 @@ static void pad_sdl_open_new(void)
+     }
+ }
+ 
+-static void pad_poll_sdl2(void)
++/* One sweep: pads gone, pads new, then every port into st. */
++static void pad_sdl_read(PadHostState* st)
+ {
+     /* Also runs every driver's device detection, so a pad plugged in
+      * mid-game is seen without anyone pumping SDL's event queue. */
+@@ -274,12 +342,11 @@ static void pad_poll_sdl2(void)
+ 
+     for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
+         SDL_GameController* gc = s_sdl_controllers[i];
+-        if (!gc) {
+-            s_host_state[i].connected = 0;
+-            continue;
+-        }
++        PadHostState* hs = &st[i];
++        memset(hs, 0, sizeof *hs);
++        if (!gc) continue;
+ 
+-        s_host_state[i].connected = 1;
++        hs->connected = 1;
+ 
+         u16 btns = 0;
+         if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_BACK))          btns |= CELL_PAD_CTRL_SELECT;
+@@ -303,86 +370,120 @@ static void pad_poll_sdl2(void)
+         if (lt > 3000) btns |= CELL_PAD_CTRL_L2;
+         if (rt > 3000) btns |= CELL_PAD_CTRL_R2;
+ 
+-        s_host_state[i].buttons = btns;
++        hs->buttons = btns;
+ 
+         /* Analog sticks */
+-        s_host_state[i].analog_lx = pad_sdl_axis_to_u8(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTX));
+-        s_host_state[i].analog_ly = pad_sdl_axis_to_u8(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTY));
+-        s_host_state[i].analog_rx = pad_sdl_axis_to_u8(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTX));
+-        s_host_state[i].analog_ry = pad_sdl_axis_to_u8(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTY));
++        hs->analog_lx = pad_sdl_axis_to_u8(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTX));
++        hs->analog_ly = pad_sdl_axis_to_u8(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTY));
++        hs->analog_rx = pad_sdl_axis_to_u8(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTX));
++        hs->analog_ry = pad_sdl_axis_to_u8(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTY));
+ 
+         /* Triggers */
+-        s_host_state[i].trigger_l2 = pad_sdl_trigger_to_u8(lt);
+-        s_host_state[i].trigger_r2 = pad_sdl_trigger_to_u8(rt);
++        hs->trigger_l2 = pad_sdl_trigger_to_u8(lt);
++        hs->trigger_r2 = pad_sdl_trigger_to_u8(rt);
+ 
+         /* Pressure: SDL has digital buttons, so 0 or 255 */
+-        s_host_state[i].press_up       = (btns & CELL_PAD_CTRL_UP)       ? 255 : 0;
+-        s_host_state[i].press_down     = (btns & CELL_PAD_CTRL_DOWN)     ? 255 : 0;
+-        s_host_state[i].press_left     = (btns & CELL_PAD_CTRL_LEFT)     ? 255 : 0;
+-        s_host_state[i].press_right    = (btns & CELL_PAD_CTRL_RIGHT)    ? 255 : 0;
+-        s_host_state[i].press_triangle = (btns & CELL_PAD_CTRL_TRIANGLE) ? 255 : 0;
+-        s_host_state[i].press_circle   = (btns & CELL_PAD_CTRL_CIRCLE)   ? 255 : 0;
+-        s_host_state[i].press_cross    = (btns & CELL_PAD_CTRL_CROSS)    ? 255 : 0;
+-        s_host_state[i].press_square   = (btns & CELL_PAD_CTRL_SQUARE)   ? 255 : 0;
+-        s_host_state[i].press_l1       = (btns & CELL_PAD_CTRL_L1)       ? 255 : 0;
+-        s_host_state[i].press_r1       = (btns & CELL_PAD_CTRL_R1)       ? 255 : 0;
++        hs->press_up       = (btns & CELL_PAD_CTRL_UP)       ? 255 : 0;
++        hs->press_down     = (btns & CELL_PAD_CTRL_DOWN)     ? 255 : 0;
++        hs->press_left     = (btns & CELL_PAD_CTRL_LEFT)     ? 255 : 0;
++        hs->press_right    = (btns & CELL_PAD_CTRL_RIGHT)    ? 255 : 0;
++        hs->press_triangle = (btns & CELL_PAD_CTRL_TRIANGLE) ? 255 : 0;
++        hs->press_circle   = (btns & CELL_PAD_CTRL_CIRCLE)   ? 255 : 0;
++        hs->press_cross    = (btns & CELL_PAD_CTRL_CROSS)    ? 255 : 0;
++        hs->press_square   = (btns & CELL_PAD_CTRL_SQUARE)   ? 255 : 0;
++        hs->press_l1       = (btns & CELL_PAD_CTRL_L1)       ? 255 : 0;
++        hs->press_r1       = (btns & CELL_PAD_CTRL_R1)       ? 255 : 0;
+     }
+ }
+ 
+-static void pad_init_backend(void)
++/* With s_sdl_lock held. A request is sent as it arrives, and a non-zero one
++ * again every 50 ms: SDL's rumble has a duration, the guest's actuator call
++ * does not (a DS3 rumbles until told otherwise). */
++static void pad_sdl_rumble_apply(void)
+ {
+-    if (!s_sdl_inited) {
+-        /* Hints are read when the subsystem starts, so they go first. */
+-        /* The pad is read whether or not a window of ours has the focus,
+-         * as the XInput backend does; a port decides for itself what to do
+-         * in the background. (Only matters where the window is SDL's.) */
+-        SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+-        /* Buttons by position, not by label: the bottom face button is
+-         * CROSS on a Switch Pro pad too, which is what a PS3 title's prompts
+-         * mean. */
+-        SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "0");
+-#ifdef SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE
+-        /* Extended reports over Bluetooth, which carry the rumble. */
+-        SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE, "1");
+-#endif
+-#ifdef SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE
+-        SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, "1");
+-#endif
+-#ifdef _WIN32
+-        /* There is no SDL window here and the pad is polled from whichever
+-         * guest thread asks: SDL's own thread owns the device-notification
+-         * window and re-checks the XInput slots, so hot-plugging does not
+-         * depend on who pumps what. */
+-        SDL_SetHint(SDL_HINT_JOYSTICK_THREAD, "1");
+-#endif
+-        if (SDL_WasInit(SDL_INIT_GAMECONTROLLER) == 0 &&
+-            SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
+-            printf("[cellPad] SDL_InitSubSystem(GAMECONTROLLER) failed: %s\n", SDL_GetError());
+-            fflush(stdout);
+-            return;   /* SDL_NumJoysticks is 0 until then: no pad, keyboard fallback */
+-        }
+-        /* State is read by polling; nobody drains SDL's event queue, so
+-         * stop it from filling with every stick movement. */
+-        SDL_JoystickEventState(SDL_IGNORE);
+-        SDL_GameControllerEventState(SDL_IGNORE);
+-        s_sdl_inited = 1;
++    static Uint32 last[PAD_MAX_HOST_PORTS];
++    const Uint32 now = SDL_GetTicks();
++    for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
++        SDL_GameController* gc = s_sdl_controllers[i];
++        if (!gc) continue;
++        const int on = s_sdl_rumble[i][0] || s_sdl_rumble[i][1];
++        if (!s_sdl_rumble_new[i] && !(on && now - last[i] >= 50)) continue;
++        s_sdl_rumble_new[i] = 0;
++        last[i] = now;
++        SDL_GameControllerRumble(gc, (Uint16)(s_sdl_rumble[i][0] * 257),
++                                 (Uint16)(s_sdl_rumble[i][1] * 257), 100);
+     }
+-    memset(s_sdl_controllers, 0, sizeof(s_sdl_controllers));
+-    pad_sdl_open_new();
+ }
+ 
+-static void pad_shutdown_backend(void)
++static int SDLCALL pad_sdl_thread_main(void* arg)
+ {
++    (void)arg;
++    const int ok = pad_sdl_start();
++    while (!s_sdl_quit) {
++        if (ok) {
++#ifdef _WIN32
++            /* The HID discovery window SDL made when the subsystem started
++             * belongs to this thread, and its device-change messages are
++             * dispatched by whoever pumps this thread's queue: here. */
++            MSG msg;
++            while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
++                TranslateMessage(&msg);
++                DispatchMessageW(&msg);
++            }
++#endif
++            PadHostState st[PAD_MAX_HOST_PORTS];
++            pad_sdl_read(st);
++            SDL_LockMutex(s_sdl_lock);
++            memcpy(s_sdl_state, st, sizeof st);
++            pad_sdl_rumble_apply();
++            SDL_UnlockMutex(s_sdl_lock);
++        }
++        SDL_Delay(PAD_POLL_INTERVAL_MS);
++    }
+     for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
+         if (s_sdl_controllers[i]) {
+             SDL_GameControllerClose(s_sdl_controllers[i]);
+             s_sdl_controllers[i] = NULL;
+         }
+     }
++    return 0;
++}
++
++/* The guest's side: the latest snapshot. */
++static void pad_poll_sdl2(void)
++{
++    if (!s_sdl_lock) return;
++    SDL_LockMutex(s_sdl_lock);
++    memcpy(s_host_state, s_sdl_state, sizeof s_sdl_state);
++    SDL_UnlockMutex(s_sdl_lock);
++}
++
++static void pad_init_backend(void)
++{
++    if (!s_sdl_lock) s_sdl_lock = SDL_CreateMutex();
++    memset(s_sdl_state, 0, sizeof s_sdl_state);
++    memset(s_sdl_rumble, 0, sizeof s_sdl_rumble);
++    memset(s_sdl_rumble_new, 0, sizeof s_sdl_rumble_new);
++    if (s_sdl_thread) return;
++    s_sdl_quit = 0;
++    s_sdl_thread = SDL_CreateThread(pad_sdl_thread_main, "cellPad", NULL);
++    if (!s_sdl_thread) {
++        printf("[cellPad] SDL_CreateThread failed: %s\n", SDL_GetError());
++        fflush(stdout);
++    }
++}
++
++static void pad_shutdown_backend(void)
++{
++    if (!s_sdl_thread) return;
++    s_sdl_quit = 1;
++    SDL_WaitThread(s_sdl_thread, NULL);
++    s_sdl_thread = NULL;
+ }
+ 
+ #endif /* PAD_BACKEND_SDL2 */
+ 
++
+ /* Keyboard fallback for port 0.
+  *
+  * On a machine with no controller plugged in a title gets a pad that is
+@@ -530,20 +631,6 @@ static void pad_poll_keyboard(void)
+  * Poll dispatcher
+  * -----------------------------------------------------------------------*/
+ 
+-/* Re-poll the host at most every PAD_POLL_INTERVAL_MS; serve cached state in
+- * between.
+- *
+- * XInputGetState is a driver call, and on a slot with nothing plugged in it is
+- * an expensive one: measured at 97.6 us for a sweep of the 7 host ports on a
+- * machine with no controller attached. cellPadGetData ran that sweep on EVERY
+- * call, and a guest that polls the pad from a spin loop -- The Simpsons Arcade
+- * Game does, in its input stage -- therefore spends its whole main thread
+- * inside the input driver.
+- *
+- * 4 ms is 250 Hz, well above the 60 Hz a title can actually observe (and above
+- * a real DualShock 3's own report rate), so no game can tell the difference,
+- * including one sampling for button-press edges. */
+-#define PAD_POLL_INTERVAL_MS 4
+ 
+ static unsigned long long pad_now_ms(void)
+ {
+@@ -1252,13 +1339,12 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
+ #endif
+ 
+ #if PAD_BACKEND_SDL2
+-    if (port_no < PAD_MAX_HOST_PORTS && s_sdl_controllers[port_no]) {
+-        SDL_GameControllerRumble(
+-            s_sdl_controllers[port_no],
+-            (Uint16)(param->motor[CELL_PAD_ACTUATOR_PARAM_LARGE] * 257),
+-            (Uint16)(param->motor[CELL_PAD_ACTUATOR_PARAM_SMALL] * 257),
+-            100 /* duration ms */
+-        );
++    if (port_no < PAD_MAX_HOST_PORTS && s_sdl_lock) {
++        SDL_LockMutex(s_sdl_lock);
++        s_sdl_rumble[port_no][0] = (u8)param->motor[CELL_PAD_ACTUATOR_PARAM_LARGE];
++        s_sdl_rumble[port_no][1] = (u8)param->motor[CELL_PAD_ACTUATOR_PARAM_SMALL];
++        s_sdl_rumble_new[port_no] = 1;
++        SDL_UnlockMutex(s_sdl_lock);
+     }
+ #endif
+ 
+-- 
+2.55.0
+
+
+From 3d6a356669ff22b5d12d6f1f8c407a09a3ab8f33 Mon Sep 17 00:00:00 2001
+From: soyjxck <soyjxck@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 04:41:16 +0100
+Subject: [PATCH 08/13] cellPad: what kind of pad a host port holds
+
+cellPad_host_kind(port): CELL_PAD_HOST_XBOX, _PS3, _PS4, _PS5, _SWITCH,
+_OTHER, or _NONE with nothing plugged in, from SDL's controller type
+(every pad is an Xbox one to the XInput backend). For a port that shows
+the buttons of the pad the player holds in place of the DualShock 3's.
+
+Ported to SARPBC-recomp (T008) from soyjxck/ps3recomp 6ce47d7f4cef (MIT),
+libs/input part only; the original author is kept.
+---
+ libs/input/cellPad.c | 38 ++++++++++++++++++++++++++++++++++++++
+ libs/input/cellPad.h | 12 ++++++++++++
+ 2 files changed, 50 insertions(+)
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 725bf08..9099a01 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -98,6 +98,14 @@ static u32           s_port_setting[CELL_PAD_MAX_PORT_NUM];
+ static PadHostState  s_host_state[PAD_MAX_HOST_PORTS];
+ /* Per-port "a report has arrived since your last read" flag; see cellPadGetData. */
+ static int s_data_fresh[PAD_MAX_HOST_PORTS];
++/* What each host port holds (CELL_PAD_HOST_*): written where the backend
++ * finds and loses its pads, read by anyone. */
++static volatile int s_host_kind[PAD_MAX_HOST_PORTS];
++
++int cellPad_host_kind(u32 port)
++{
++    return port < PAD_MAX_HOST_PORTS ? s_host_kind[port] : CELL_PAD_HOST_NONE;
++}
+ 
+ /* ---------------------------------------------------------------------------
+  * XInput backend
+@@ -145,11 +153,13 @@ static void pad_poll_xinput(void)
+         DWORD result = XInputGetState((DWORD)i, &state);
+         if (result != ERROR_SUCCESS) {
+             s_host_state[i].connected = 0;
++            s_host_kind[i] = CELL_PAD_HOST_NONE;
+             next_probe[i] = now + 1000;
+             continue;
+         }
+ 
+         s_host_state[i].connected = 1;
++        s_host_kind[i] = CELL_PAD_HOST_XBOX;   /* XInput sees no other family */
+         XINPUT_GAMEPAD* gp = &state.Gamepad;
+ 
+         /* Map XInput buttons to PS3 CELL_PAD_CTRL_* */
+@@ -294,6 +304,32 @@ static int pad_sdl_start(void)
+     return 1;
+ }
+ 
++/* The pad's family, as SDL names it. */
++static int pad_sdl_kind(SDL_GameController* gc)
++{
++#if SDL_VERSION_ATLEAST(2, 0, 12)
++    switch (SDL_GameControllerGetType(gc)) {
++    case SDL_CONTROLLER_TYPE_XBOX360:
++    case SDL_CONTROLLER_TYPE_XBOXONE:             return CELL_PAD_HOST_XBOX;
++    case SDL_CONTROLLER_TYPE_PS3:                 return CELL_PAD_HOST_PS3;
++    case SDL_CONTROLLER_TYPE_PS4:                 return CELL_PAD_HOST_PS4;
++#if SDL_VERSION_ATLEAST(2, 0, 14)
++    case SDL_CONTROLLER_TYPE_PS5:                 return CELL_PAD_HOST_PS5;
++#endif
++    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO: return CELL_PAD_HOST_SWITCH;
++#if SDL_VERSION_ATLEAST(2, 24, 0)
++    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
++    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
++    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR: return CELL_PAD_HOST_SWITCH;
++#endif
++    default:                                      return CELL_PAD_HOST_OTHER;
++    }
++#else
++    (void)gc;
++    return CELL_PAD_HOST_OTHER;
++#endif
++}
++
+ /* Put every pad SDL knows and no slot holds into the lowest free slot.
+  *
+  * By instance id, not device index: the index of a pad shifts down when one
+@@ -316,6 +352,7 @@ static void pad_sdl_open_new(void)
+         SDL_GameController* gc = SDL_GameControllerOpen(d);
+         if (!gc) continue;
+         s_sdl_controllers[slot] = gc;
++        s_host_kind[slot] = pad_sdl_kind(gc);
+         const char* name = SDL_GameControllerName(gc);
+         printf("[cellPad] port %d: %s\n", slot, name ? name : "controller");
+         fflush(stdout);
+@@ -336,6 +373,7 @@ static void pad_sdl_read(PadHostState* st)
+             fflush(stdout);
+             SDL_GameControllerClose(gc);
+             s_sdl_controllers[i] = NULL;
++            s_host_kind[i] = CELL_PAD_HOST_NONE;
+         }
+     }
+     pad_sdl_open_new();
+diff --git a/libs/input/cellPad.h b/libs/input/cellPad.h
+index 89c58ab..e646f3d 100644
+--- a/libs/input/cellPad.h
++++ b/libs/input/cellPad.h
+@@ -200,6 +200,18 @@ s32 cellPadClearBuf(u32 port_no);
+ /* Internal: call once per frame to update pad state from host input */
+ void cellPad_poll(void);
+ 
++/* What a host port holds, for a port that shows the pad's own button names
++ * in place of the DualShock 3's. NONE is also the keyboard that stands in for
++ * port 0 with nothing plugged in. Any thread. */
++#define CELL_PAD_HOST_NONE    0
++#define CELL_PAD_HOST_XBOX    1
++#define CELL_PAD_HOST_PS3     2
++#define CELL_PAD_HOST_PS4     3
++#define CELL_PAD_HOST_PS5     4
++#define CELL_PAD_HOST_SWITCH  5
++#define CELL_PAD_HOST_OTHER   6   /* a pad of no known family */
++int cellPad_host_kind(u32 port);
++
+ #ifdef __cplusplus
+ }
+ #endif
+-- 
+2.55.0
+
+
+From c86be1c50381984ed3634ed4dcd1b518f38d4b78 Mon Sep 17 00:00:00 2001
+From: soyjxck <soyjxck@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 09:08:22 +0100
+Subject: [PATCH 09/13] cellPad: a port's own keyboard and mouse as port 0's
+ pad
+
+cellPad_set_host_input: the port is asked at every sweep of the host's
+pads for what its keys hold (buttons, the two sticks, the triggers), in
+place of the built-in keyboard fallback and beside a real pad: the two
+are merged, so either can be used at any moment. Which of them was
+touched last is remembered, and cellPad_host_kind(0) says NONE while it
+was the keyboard, so a port that shows the pad's own button names can
+follow the player from one to the other.
+
+Ported to SARPBC-recomp (T008) from soyjxck/ps3recomp 9fd90e3e70aa (MIT),
+libs/input part only; the original author is kept.
+---
+ libs/input/cellPad.c | 54 +++++++++++++++++++++++++++++++++++++++++++-
+ libs/input/cellPad.h | 15 ++++++++++++
+ 2 files changed, 68 insertions(+), 1 deletion(-)
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 9099a01..b71b16d 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -102,9 +102,23 @@ static int s_data_fresh[PAD_MAX_HOST_PORTS];
+  * finds and loses its pads, read by anyone. */
+ static volatile int s_host_kind[PAD_MAX_HOST_PORTS];
+ 
++/* A port's own keyboard and mouse beside port 0's pad (cellPad.h). */
++static cellPad_host_input_fn s_host_input_fn;
++static void* s_host_input_user;
++static volatile int s_host_keyboard_last;   /* of the keyboard and the pad, the one touched last */
++static volatile int s_host_pad0;            /* a real pad is on port 0 */
++
++void cellPad_set_host_input(cellPad_host_input_fn fn, void* user)
++{
++    s_host_input_user = user;
++    s_host_input_fn = fn;
++}
++
+ int cellPad_host_kind(u32 port)
+ {
+-    return port < PAD_MAX_HOST_PORTS ? s_host_kind[port] : CELL_PAD_HOST_NONE;
++    if (port >= PAD_MAX_HOST_PORTS) return CELL_PAD_HOST_NONE;
++    if (port == 0 && s_host_input_fn && (s_host_keyboard_last || !s_host_pad0)) return CELL_PAD_HOST_NONE;
++    return s_host_kind[port];
+ }
+ 
+ /* ---------------------------------------------------------------------------
+@@ -682,6 +696,40 @@ static unsigned long long pad_now_ms(void)
+ #endif
+ }
+ 
++/* The port's keyboard and mouse into port 0, beside whatever pad is there. */
++static void pad_poll_host_input(void)
++{
++    PadHostState* hs = &s_host_state[0];
++    CellPadHostInput in;
++    int focused = 1;
++#ifdef _WIN32
++    focused = pad_host_window_focused();
++#endif
++    memset(&in, 0, sizeof in);
++    in.lx = in.ly = in.rx = in.ry = 128;
++    const int keyboard_used = s_host_input_fn(s_host_input_user, focused, &in);
++    const int pad = hs->connected;
++    s_host_pad0 = pad;
++    if (!pad) {
++        memset(hs, 0, sizeof *hs);
++        hs->analog_lx = hs->analog_ly = hs->analog_rx = hs->analog_ry = 128;
++    }
++    /* Which of the two the player is on: a button, a stick well off its
++     * centre or a trigger says the pad; the port says the keyboard. */
++    const int pad_used = pad && (hs->buttons || hs->trigger_l2 > 48 || hs->trigger_r2 > 48 ||
++                                 abs((int)hs->analog_lx - 128) > 56 || abs((int)hs->analog_ly - 128) > 56 ||
++                                 abs((int)hs->analog_rx - 128) > 56 || abs((int)hs->analog_ry - 128) > 56);
++    if (keyboard_used) s_host_keyboard_last = 1;
++    else if (pad_used) s_host_keyboard_last = 0;
++
++    hs->connected = 1;
++    hs->buttons |= in.buttons;
++    if (in.lx != 128 || in.ly != 128) { hs->analog_lx = in.lx; hs->analog_ly = in.ly; }
++    if (in.rx != 128 || in.ry != 128) { hs->analog_rx = in.rx; hs->analog_ry = in.ry; }
++    if (in.l2 > hs->trigger_l2) hs->trigger_l2 = in.l2;
++    if (in.r2 > hs->trigger_r2) hs->trigger_r2 = in.r2;
++}
++
+ static void pad_poll_backend(void)
+ {
+     /* Benign race: two threads may poll in the same tick. That costs one extra
+@@ -700,6 +748,10 @@ static void pad_poll_backend(void)
+ #elif PAD_BACKEND_SDL2
+     pad_poll_sdl2();
+ #endif
++    if (s_host_input_fn) {
++        pad_poll_host_input();
++        return;
++    }
+ #if defined(_WIN32) || defined(__APPLE__)
+     if (!s_host_state[0].connected) pad_poll_keyboard();
+ #endif
+diff --git a/libs/input/cellPad.h b/libs/input/cellPad.h
+index e646f3d..e701c87 100644
+--- a/libs/input/cellPad.h
++++ b/libs/input/cellPad.h
+@@ -212,6 +212,21 @@ void cellPad_poll(void);
+ #define CELL_PAD_HOST_OTHER   6   /* a pad of no known family */
+ int cellPad_host_kind(u32 port);
+ 
++/* A port's own keyboard and mouse as port 0's pad, in place of the built-in
++ * keyboard fallback. Asked at every sweep of the host's pads, with whether
++ * the title's window has the focus: what it holds goes in `out` (buttons as
++ * CELL_PAD_CTRL_*, sticks 0-255 with 128 the centre), and the return is
++ * nonzero while it is in use -- a key held, the mouse moved. It plays beside
++ * a real pad: the two are merged, and cellPad_host_kind(0) says NONE while
++ * the keyboard was the last of the two touched. */
++typedef struct CellPadHostInput {
++    u16 buttons;
++    u8  lx, ly, rx, ry;
++    u8  l2, r2;
++} CellPadHostInput;
++typedef int (*cellPad_host_input_fn)(void* user, int focused, CellPadHostInput* out);
++void cellPad_set_host_input(cellPad_host_input_fn fn, void* user);
++
+ #ifdef __cplusplus
+ }
+ #endif
+-- 
+2.55.0
+
+
+From 286b7d947c75ec1c81e11425bc7c3736cebef79d Mon Sep 17 00:00:00 2001
+From: soyjxck <soyjxck@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 14:00:58 +0100
+Subject: [PATCH 10/13] rsx metal: the window's mouse, modifier keys and mouse
+ buttons, for a port played with them
+
+rsx_host_mouse.h had only its Windows half; on macOS the calls did
+nothing. The Metal backend owns the window there, so it implements them:
+
+- rsx_host_mouse_capture: while asked for and the window is key, the
+  cursor is put at the middle of the picture, hidden, and detached from
+  the mouse (CGAssociateMouseAndMouseCursorPosition), so it cannot leave
+  the window or reach the Dock; the mouse's events still carry its motion.
+  Given back the moment the window is not key, and at shutdown.
+- motion from the events' deltas (points; fractions carried over), the
+  wheel as notches in the device's own direction whatever "natural
+  scrolling" says (an event a notch for a wheel, 40 points a notch for a
+  trackpad, its glide ignored).
+- While the cursor is held the mouse's events stop at the event monitor,
+  so a click cannot land on a title bar under the hidden cursor; otherwise
+  they are AppKit's as before.
+- rsx_metal_backend_mouse_button_down, and Shift, Control and Option in
+  rsx_metal_backend_key_down: those keys send no key event, only a change
+  of flags, whose per-side bits are now recorded under their keycodes.
+
+rsx_host_mouse.c leaves the Apple build to the backend (its stubs stay for
+every other system). cellPad hands a port's host-input function the Metal
+window's focus, as it does the Win32 window's.
+
+PS3RECOMP_METAL_EVENT_FILE=<path>: lines of key / flags / move / button /
+wheel become events sent to the window through that same monitor, for a
+run with no one at the keyboard. Checked with it in Drakengard 3: a key,
+two keys at once, left Shift, both mouse buttons, the wheel both ways and
+Escape each reach the pad as bound; 100 counts of motion arrive as 100;
+the cursor is visible again after the process is killed while holding it.
+The headless end-to-end step's 18 invocations pass. Not checked: a real
+mouse or trackpad in the hand (the cursor's hiding, the feel of the
+deltas).
+
+Ported to SARPBC-recomp (T008) from soyjxck/ps3recomp c231b9df3d5d (MIT),
+libs/input part only; the original author is kept.
+---
+ libs/input/cellPad.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index b71b16d..917fd6c 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -704,6 +704,8 @@ static void pad_poll_host_input(void)
+     int focused = 1;
+ #ifdef _WIN32
+     focused = pad_host_window_focused();
++#elif defined(__APPLE__)
++    if (rsx_metal_backend_window_focused) focused = rsx_metal_backend_window_focused();
+ #endif
+     memset(&in, 0, sizeof in);
+     in.lx = in.ly = in.rx = in.ry = 128;
+-- 
+2.55.0
+
+
+From 5faa28add7d5eeeb13cfdf4a5c898bcf651016ed Mon Sep 17 00:00:00 2001
+From: soyjxck <soyjxck@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 16:35:53 +0100
+Subject: [PATCH 11/13] "The first N times" gates stop counting at N
+
+The gate that flooded (21f2763) was one of some three hundred of the same
+shape in the runtime and the HLE libraries:
+
+    static int n; if (n++ < 8) fprintf(stderr, ...);
+
+The counter goes up on every call whether or not anything is printed, so
+on a path called often enough it passes INT_MAX, turns negative, and the
+gate is open again for the next 2^31 calls. How long that takes is only a
+matter of the call rate: hours on the syscall, HLE-dispatch, SPU channel
+and DMA paths, days on a per-draw one. Rather than judge each one's rate,
+every one outside the five renderer files being worked on elsewhere
+(rsx_draw_engine.c/.h, rsx_d3d12_engine.c, rsx_vulkan_engine.c,
+rsx_vulkan_encode.inc) now stops counting once it has shut:
+
+  304  x++ < N  ->  (x < N && ++x), and the like for <= and ++x: true on
+       the same calls, the counter the same wherever the gate is open
+    4  (x <= N && x++ < N): the counter is read again as `x <= N` after
+       the gate, so it has to reach N + 1, and stops there
+    6  made unsigned instead: the counter also paces a periodic line
+       (x % 2000), so it must go on counting; it wraps to 0, not below it
+    6  "print the first N, say 'suppressed' once, n++;": the increment on
+       its own becomes `if (n <= N) n++;`
+
+Unsigned and 64-bit counters were already safe and are untouched.
+
+tools/audit_log_gates.py finds both shapes, rewrites with --fix the gates
+that are nothing more than a gate, and reports the rest with every other
+read of the counter for a person to decide (its docstring says how); it
+exits 1 when anything is left, so it can serve as a check. On this tree
+with those five files excluded it finds nothing; in them, 20.
+
+One of the hand-decided ones I first got wrong: the file-read log's
+counter (ppu_fs.cpp) also paces "[fs] read summary", which stopped
+appearing. Comparing the log of a 250 s run with one from before the
+change showed it; it is one of the six unsigned ones now, and the tool no
+longer excuses a line as "only a print argument" when the counter is used
+another way on it.
+
+Checked: each rewritten form against the original call by call for
+limits 0-40 (identical); the macOS workflow's standalone tests, the
+headless end-to-end step's 18 invocations and the replay regression
+(frame for frame as before); two 250 s runs of Drakengard 3's chapter 1
+battle, whose logs have the same number of lines of every kind as a run
+from before the change in 226 of 234 kinds, the other eight being paced by
+time or by the run's length. The Windows-only parts (rsx_d3d12_backend.c)
+are not compiled here.
+
+Ported to SARPBC-recomp (T008) from soyjxck/ps3recomp 43d581201f98 (MIT),
+libs/input part only; the original author is kept.
+---
+ libs/input/cellPad.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 917fd6c..6d6f1f2 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -1334,7 +1334,7 @@ s32 cellPadPeriphGetInfo(CellPadPeriphInfo* info_guest)
+           vm_write32((unsigned long long)ea + _o, *(u32*)((char*)info + _o)); }
+ 
+     { static int _n = 0;
+-      if (_n++ < 2)
++      if (_n < 2 && ++_n)
+           printf("[cellPad] PeriphGetInfo(max=%u now=%u) -> STANDARD class\n",
+                  info->max_connect, connected); }
+     return CELL_OK;
+-- 
+2.55.0
+
+
+From db3fa5904ee0bfde1742a5ec71d7cf1e415f5dbd Mon Sep 17 00:00:00 2001
+From: soyjxck <soyjxck@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 18:16:44 +0100
+Subject: [PATCH 12/13] cellPad, cellAudio: SDL leaves SIGINT and SIGTERM alone
+
+SDL's events subsystem, which the pad and the audio device each bring up,
+installs handlers for SIGINT and SIGTERM that only queue an SDL_QUIT
+event. Outside the Linux Vulkan backend nothing reads SDL's events -- the
+window is the Metal or the Win32 one -- so the process ignored Ctrl-C in a
+terminal and `kill` alike. A benchmark harness's kill at 180 s was
+ignored that way and the game ran for 18 hours.
+
+SDL_HINT_NO_SIGNAL_HANDLERS is set before either subsystem starts (either
+may be first), except where PS3RECOMP_RSX_VULKAN is defined: that
+backend's window is SDL's and its pump acts on the event.
+
+Drakengard 3 on macOS, signalled 25 s after launch with the pad and the
+audio device up: before, still running 10 s after SIGTERM; now gone
+0.17 s after SIGTERM and 0.10 s after SIGINT, ended by the signal. The
+cursor a port holds is back afterwards (the window server's doing).
+
+Ported to SARPBC-recomp (T008) from soyjxck/ps3recomp f58d67dee687 (MIT),
+libs/input part only; the original author is kept.
+---
+ libs/input/cellPad.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 6d6f1f2..4059c4a 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -304,6 +304,16 @@ static int pad_sdl_start(void)
+      * the DirectInput/XInput device-notification window and re-checks the
+      * XInput slots by itself. */
+     SDL_SetHint(SDL_HINT_JOYSTICK_THREAD, "1");
++#endif
++#if defined(SDL_HINT_NO_SIGNAL_HANDLERS) && !defined(PS3RECOMP_RSX_VULKAN)
++    /* SDL's events subsystem, which the pad brings up with it, takes SIGINT
++     * and SIGTERM for itself and turns each into an SDL_QUIT event. Nothing
++     * here reads SDL's events -- the window is not SDL's -- so the process
++     * then ignored Ctrl-C and `kill` alike, and only SIGKILL ended it. The
++     * signals are left as the system has them. (Not under the Linux Vulkan
++     * backend: its window is SDL's and its pump acts on that event.) The
++     * audio backend says the same, as either may start SDL first. */
++    SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
+ #endif
+     if (SDL_WasInit(SDL_INIT_GAMECONTROLLER) == 0 &&
+         SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
+-- 
+2.55.0
+
+
+From 51185a9a71b8892a85d0470357cf45b9eaaa3312 Mon Sep 17 00:00:00 2001
+From: soyjxck <soyjxck@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 22:41:51 +0100
+Subject: [PATCH 13/13] cellPad: PAD_NO_HOST=1, a hands-off run that no
+ controller on the desk can steer
+
+The host's controllers are read whether or not the title's window is in
+front. A run driven by PAD_FILE or PAD_SCRIPT on a machine with a
+controller connected is then at the mercy of it: a drifting stick or a
+bump moves a menu cursor a step, and the run that was to load a save
+starts a new game. On a machine with one connected, benchmark runs of
+Drakengard 3 now and then did just that, or started a mission from the
+hub, with nothing else about them different.
+
+With PAD_NO_HOST set nothing of the host's reaches the title -- no
+controller, no key -- and port 0 is a pad nobody touches, which the
+injected presses still go through.
+
+Ported to SARPBC-recomp (T008) from soyjxck/ps3recomp de08397c0a48 (MIT),
+libs/input part only; the original author is kept.
+---
+ libs/input/cellPad.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 4059c4a..cc6d7f0 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -755,6 +755,24 @@ static void pad_poll_backend(void)
+      * every port. cellPadGetData hands each one out exactly once. */
+     for (int _i = 0; _i < PAD_MAX_HOST_PORTS; _i++) s_data_fresh[_i] = 1;
+ 
++    /* PAD_NO_HOST=1: no controller and no key of the host's reaches the
++     * title, and port 0 is a pad nobody touches.
++     * For a run driven by PAD_FILE or PAD_SCRIPT: the controllers are read
++     * whether or not the title's window is in front, so one lying on the
++     * desk (a drifting stick, a bump) or in someone's hands for another
++     * game steers a run that was meant to be hands-off. */
++    { static int no_host = -1;
++      if (no_host < 0) no_host = getenv("PAD_NO_HOST") ? 1 : 0;
++      if (no_host) {
++          PadHostState* hs = &s_host_state[0];
++          hs->buttons = 0;
++          hs->analog_lx = hs->analog_ly = 128;
++          hs->analog_rx = hs->analog_ry = 128;
++          hs->trigger_l2 = hs->trigger_r2 = 0;
++          hs->connected = 1;
++          return;
++      } }
++
+ #if PAD_BACKEND_XINPUT
+     pad_poll_xinput();
+ #elif PAD_BACKEND_SDL2
+-- 
+2.55.0
+

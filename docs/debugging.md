@@ -32,6 +32,10 @@ of runtime env vars is generated upstream in `external/ps3recomp/docs/DIAGNOSTIC
 | `PS3_NO_AUDIO`, `SDL_AUDIODRIVER=dummy` | Remove audio from the equation |
 | `PAD_SCRIPT="frame:mask,..."` | Scripted input for unattended runs |
 | `PS3RECOMP_VK_DUMP=<path>` + `_EVERY` | Save presented frames to check rendering headlessly |
+| `PS3_LWCOND_POLL_MS`, `PS3_LWCOND_SLEEP` | lwcond wait tuning (patch 0019; waits now wake on signal) |
+| `PPU_THREAD_SLOTS`, `PPU_THREAD_END_STALL_US` | PPU thread table size / end-of-thread stall (patch 0020) |
+| `PS3_VFS_OVERLAY=<dir>` | Lay patched files over the dump (patch 0021) |
+| `PAD_TRACE=1`, `PAD_TRIGGERS=port,value,start[,len]` | Log the pad buffer the game reads; force trigger values. Timing counts from the first GetData (~4.0 s on 01.09), not launch (patch 0017) |
 
 Verify a variable still exists in the pinned `DIAGNOSTICS.md` before relying on it.
 
