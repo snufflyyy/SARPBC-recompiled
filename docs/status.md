@@ -5,7 +5,9 @@ work session. Newest log entry first. Use absolute dates.
 
 ## Resume here (running again 2026-10-19, max 3 agents)
 
-**State:** `main` builds both versions with **17 ps3recomp patches** (`tools/apply_patches.sh`).
+**Priority (user, 2026-10-19): get 01.09 into the menus.** Every slot works on the boot stall; features wait.
+
+**State:** `main` builds both versions with **22 ps3recomp patches** (`tools/apply_patches.sh`).
 01.09 boots past the loading screen, package loading and PhysX init (SPURS queues work), then
 hangs on job guard `0x0133AA80` / event flag `0x01372000` (MultiStream).
 
@@ -15,10 +17,14 @@ config.toml). R2=128 seen in the game's pad buffer (0x0FEFF360). Held keys and r
 unverified until the loading stall is fixed. Note: `PAD_TRIGGERS` times from the first
 GetData (~4.0 s on 01.09), not from launch.
 
-**Running:** T022 (01.09 frontier, agent-frontier2), T007 (audio, agent-audio, resumed from
-`worktree-agent-acc9f9ae8ed145a97`).
+**Merged 2026-10-19:** T023 fork fixes 0018-0022 (SPU task stack UAF, lwcond wake, PPU slot reclaim,
+sys_fs overlay, SPURS task error codes); boot unchanged (stall at 21.6 s). New lead: GCM FIFO
+parks on a jump-to-self at io 0x8B144 (T024).
 
-**Open tasks, by priority:** T023 (fork fixes), T020 (remaining: unresolved-NID reporting,
+**Running (all on the boot stall):** T022 (job guard 0x0133AA80, agent-frontier2), T007 narrowed to
+the DSP lift that unblocks flag 0x01372000 (agent-audio), T024 (GCM FIFO, agent-gcm).
+
+**Open tasks, by priority (after the menus):** T020 (remaining: unresolved-NID reporting,
 hle-coverage.md), T017 (saves), T021 (rest of the dod3 inventory), T012, T009, T018, T005,
 T010, T011, T013, T014. T015 multiplayer stays **blocked** (user permission needed).
 Follow-ups proposed by T008 (after the stall): windowed key/rumble check, mouse camera, button
