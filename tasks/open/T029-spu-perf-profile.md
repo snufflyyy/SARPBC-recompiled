@@ -2,6 +2,7 @@
 
 Status: open
 Owner: -
+Model: sonnet
 Touches: tools/spu_profile.sh (new), docs/debugging.md (a new "Profiling" section only)
 Reads: tasks/*/T025*, docs/subsystems.md
 

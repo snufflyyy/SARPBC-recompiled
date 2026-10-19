@@ -14,11 +14,11 @@ T028 (agent-frontier3: ESRB to menus, new).
 **User plan (2026-10-19), in order:**
 1. Menus first (T024-T028 as above).
 2. Once the menus are reached, every slot moves to **SPU performance, easy wins only**:
-   T029 (profiling harness, do it first), T030 (busy-wait loops), T031 (lifter codegen),
+   T029 (profiling harness on Sonnet; it may take the first free slot even before the menus, since it is tooling only), T030 (busy-wait loops), T031 (lifter codegen),
    T032 (DMA/MFC), T033 (host threads), and T025's SIMD helpers. Measured, bit-exact, nothing deep;
    bigger ideas become proposed tasks.
 3. When the easy wins are done: wrap up and stop all agents.
-4. The coordinator audits the project for cleanliness, tidiness and extensibility: docs vs.
+4. The coordinator audits the project (read-only sweeps on Sonnet agents, fixes by the coordinator) for cleanliness, tidiness and extensibility: docs vs.
    reality, the patch stack, scripts, overrides, the task board, stale worktrees and branches.
 
 ## Resume here (paused 2026-10-19 for usage)

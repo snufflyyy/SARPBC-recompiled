@@ -18,3 +18,4 @@ A test fails on the old code and passes on the new; a boot_check line with `GCM_
 ## Log
 - 2026-10-19 10:04 agent-cbstack: claimed
 - 2026-10-19 10:05 agent-cbstack: Reuse check: soyjxck/ps3recomp fork (bbcf9a5) ppu_loader.cpp has the identical fixed 0xCFFE0000 s_cb_sp in both ppu_guest_call and _ct; dod3-recomp has nothing. Nothing to port; writing our own.
+- 2026-10-19 10:12 agent-cbstack: Test first: external/ps3recomp tools/test_ppu_guest_call_stacks.py (+ runtime/ppu/tests/test_ppu_guest_call_stacks.cpp) on the OLD code: 6 checks FAIL (both threads' frames at 0xCFFDFC00; nested outer/inner both 0xCFFDFC00; sp 0xCFFE0000 is inside RSX local memory 0xC0000000+256MB, cellGcmSys localSize is 256 MB, so the old callback stack also sat on top of VRAM).

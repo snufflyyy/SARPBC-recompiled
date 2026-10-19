@@ -74,6 +74,12 @@ the HANDOFF note.
 - Create tasks with `tools/task.sh new <slug> <title>` and fill in **Touches** (exclusive
   write scope) and **Reads**. No two open or claimed tasks may share a Touches path.
 - Spawn at most as many agents as the user allows (currently 5), each with `isolation: worktree`, and tell each its task ID.
+- **Model per task** (user, 2026-10-19). A task file may carry a `Model:` line. `sonnet` means spawn
+  with `model: "sonnet"` (Sonnet 5.5). Use it for well-scoped, easily verified work: tooling
+  scripts (T029), mechanical ports and compile fixes, tests for known behaviour, and the read-only
+  sweeps of an audit. Leave it out (Opus) for frontier debugging (GCM/SPURS stalls), SPU or runtime
+  concurrency, and lifter codegen, where a plausible but wrong fix costs more than it saves.
+  Every diff gets the same review before merging, whatever the model.
 - On completion: review the branch diff, merge into `main`, renumber patches, run
   `tools/apply_patches.sh`, rebuild, re-run, and update `docs/status.md` and the
   AGENTS.md current-state paragraph. Commit the task board (`tasks/`) with the merge.
