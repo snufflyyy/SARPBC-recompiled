@@ -44,6 +44,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <sys/mman.h>
+#endif
 
 #ifdef _WIN32
 /* timeBeginPeriod: <windows.h> arrives with WIN32_LEAN_AND_MEAN set, which
@@ -70,6 +73,9 @@ int      ppu_run(uint32_t entry_opd, uint32_t stack_top);
  * into guest RAM and register their exports. stubs.cpp has the empty version
  * a game with no lifted PRX wants. */
 void     ps3_load_prx_modules(void);
+
+/* src/overrides/: firmware functions the runtime lacks, done for this title. */
+void     sarpbc_register_edgezlib(void);
 
 extern const char* ppu_vfs_root;              /* host dir the PS3 mount points map into */
 
@@ -335,12 +341,23 @@ static bool alloc_guest_vm(void)
     vm_base = (uint8_t*)VirtualAlloc(NULL, VM_SIZE, MEM_RESERVE, PAGE_READWRITE);
     ppu_vm_size = 0;              /* the whole space is backed; no OOB guard needed */
 #else
-    /* No vectored exception handlers off Windows, so the arena is committed up
-     * front and lazily backed by the OS: only pages the title touches cost
-     * anything. It stops below the 0xE0000000 mark, so ppu_vm_size arms the
-     * loader's bounds check for what is left. */
-    vm_base = (uint8_t*)calloc(1, 0xE0000000u);
-    ppu_vm_size = 0xE0000000u;
+    /* The template's calloc(0xE0000000) does not work here: glibc hands back a
+     * pointer 16 bytes into its mmap, so vm_base is not page aligned and every
+     * vm_commit() mprotect fails (sys_memory_allocate -> ENOMEM, and the game's
+     * allocator spins on NULL). The runtime also needs the low 32 bits of
+     * vm_base to be zero (GUEST_EA truncates host pointers; see vm_init in
+     * runtime/memory/vm.h). So: map the whole guest space read/write, lazily
+     * backed and zero-filled, on a 4 GB boundary -- over-map by 4 GB and trim. */
+    const uintptr_t align = 0x100000000ull;
+    const size_t    span  = VM_SIZE + align;
+    uint8_t* raw = (uint8_t*)mmap(NULL, span, PROT_READ | PROT_WRITE,
+                                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (raw == MAP_FAILED) return false;
+    uint8_t* base = (uint8_t*)(((uintptr_t)raw + align - 1) & ~(align - 1));
+    if (base > raw) munmap(raw, (size_t)(base - raw));
+    if (raw + span > base + VM_SIZE) munmap(base + VM_SIZE, (size_t)(raw + span - (base + VM_SIZE)));
+    vm_base = base;
+    ppu_vm_size = 0;              /* the whole space is backed; no OOB guard needed */
 #endif
     return vm_base != nullptr;
 }
@@ -392,6 +409,7 @@ int main(int argc, char** argv)
     ppu_recomp_register();   /* lifted function table -> address map */
     ps3_load_prx_modules();  /* this game's lifted system PRX, if it has any */
     ppu_hle_init();          /* firmware import NID -> HLE handlers */
+    sarpbc_register_edgezlib();   /* _cellSpursLFQueuePushBody for Edge zlib */
     ppu_sysprx_register();   /* boot-critical CRT */
     ppu_fs_register();       /* cellFs over the game directory */
     lv2_init_syscalls();     /* the lv2 syscall table */

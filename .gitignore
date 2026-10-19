@@ -33,3 +33,8 @@ __pycache__/
 *.rep/
 *.idb
 *.i64
+
+# --- Shared compiler cache and agent coordination state ---
+/.cache/
+/.locks/
+/.worktrees/

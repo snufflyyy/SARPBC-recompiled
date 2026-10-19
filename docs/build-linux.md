@@ -47,6 +47,19 @@ tools/run.sh                 # build/sarpbc game/EBOOT.elf vfs, window + guest s
   compiles the per-game PPU scaffold (`runtime/ppu/`), and globs `src/recomp/*.cpp` —
   reconfigure after every relift.
 - `clang` here is `~/.local/bin/clang` (ROCm clang 20); `/usr/bin/gcc` is GCC 16.
+- **ccache** is on by default (`SARPBC_CCACHE`): a repo-wide cache at
+  `<main checkout>/.cache/ccache` (40 GB cap) shared by all worktrees, with
+  `CCACHE_BASEDIR` set to each source tree. Turning it on, or changing compile flags,
+  recompiles everything once.
+- Numbers (2026-10-18, 16 threads): full build 8 min 38 s, binary 385 MB, build dir
+  0.9 GB. The largest lifted TU (`ppu_recomp_077.cpp`, 43k lines) takes 27 s and 630 MB at
+  `-O3`, so `-j16` is safe on 31 GB of RAM.
+- **Template bug on Linux (fixed in our `main.cpp`):** the template allocates guest memory
+  with `calloc(0xE0000000)`, which glibc places 16 bytes into its mmap, so `vm_base` is
+  not page-aligned. Every `vm_commit` mprotect fails, `sys_memory_allocate` returns
+  ENOMEM, and the game's allocator spins on NULL. Ours maps the guest space with `mmap` on
+  a 4 GB boundary, which the runtime also requires (`GUEST_EA` truncation). Upstream's
+  `boot_main.cpp` has the same code (upstream candidate).
 - Lifted TUs are huge. Keep `--chunks` high enough that no single file takes minutes, and
   watch RAM with `-j$(nproc)`; lower parallelism if the linker or compiler OOMs.
 - Verify the upstream runtime on its own first:
@@ -71,7 +84,9 @@ elsewhere. Without glslang the Vulkan backend still builds but stays fixed-funct
 
 ## Known Linux gaps (upstream, as of v0.15.0)
 
-- No title has booted to gameplay from the upstream tree on Linux. The PPU boot scaffold
+- No title had booted to gameplay from the upstream tree on Linux. **SARPBC boots on
+  Linux/Vulkan to its loading screen and package loading** (2026-10-18), with the fixes
+  listed in [status.md](status.md). The PPU boot scaffold
   (`ppu_loader.cpp`, `boot_main.cpp`, HLE dispatch) compiles on POSIX and the frame clock
   runs, but expect missing pieces. A CI ratchet (`tools/check_ppu_scaffold.py`) keeps it
   compiling.

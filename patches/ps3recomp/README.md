@@ -26,4 +26,30 @@ order we expect to need them (details in `docs/reference-ports.md`):
 - On a pin bump: `git -C external/ps3recomp checkout <new>`, re-apply, fix conflicts,
   re-export, relift, rebuild, and record the result in `docs/status.md`.
 
-No patches yet (2026-10-18).
+## Current patches
+
+| Patch | What | Upstream |
+|---|---|---|
+| `0001-trophy-deliver-RegisterContext-statuses-synchronousl.patch` | `sceNpTrophyRegisterContext` delivers PROCESSING_COMPLETE synchronously again (17047c9 deferred it, which races SARPBC's -1 "done" marker); test updated | to offer (it reverts a recent upstream choice, so explain the firmware ordering) |
+
+Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
+`git -C external/ps3recomp format-patch -1 -o ../../patches/ps3recomp/ --start-number N`.
+Agents working in parallel name theirs `T###-description.patch`; the coordinator
+renumbers them on merge.
+
+Upstream's unit tests assume macOS's `-dead_strip`. On Linux, build them with
+`-ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,-z,muldefs` and a no-op shim for
+`cellMsgDialog_tick`, `np_psnr_pump`, `cellGame_get_title_id`, `vm_write32`, `vm_write8`.
+
+## To upstream (handled port-side for now)
+
+- **Linux guest VM in the template** (`templates/project/main.cpp`, `boot_main.cpp`):
+  `calloc` → 4 GB-aligned `mmap`; see docs/build-linux.md.
+- **`_cellSpursLFQueuePushBody`** has no HLE. Ours (`src/overrides/edgezlib.cpp`) is
+  Edge-zlib specific; a general one needs libsre's push protocol.
+
+- **Linker TOC-switch stubs** fold into the preceding function in `ppu_loader.py`, and
+  the lifter turns each one into a wrapper running to the end of the run (3.6× source
+  bloat on this EBOOT). Our workaround is `tools/split_toc_stubs.py`. The proper fix is in
+  `ppu_loader.py` (or the lifter's boundary recovery): treat a run of
+  `std r2,40(r1); addis/addi r2,r2; b` as one function per stub.

@@ -11,11 +11,13 @@ you are touching instead of re-scanning the tree or the game files.
 
 ## Current state (keep this line true)
 
-**Phase 4: lifted, not yet built.** Project skeleton from the ps3recomp template is in
-place (`CMakeLists.txt`, `src/main.cpp`, `src/stubs.cpp`); `tools/relift.sh` lifted the
-EBOOT to `src/recomp/` (64,397 functions, 256 chunks). The first build is waiting on
-system packages (SDL2-devel, vulkan-headers, glslang-devel). No SPU lift yet. Live
-status and next steps: [docs/status.md](docs/status.md).
+**Phase 6/7: boots on Linux, draws its "Loading..." screen through Vulkan, and loads
+UE3 packages.** The PPU lift (64,397 functions) and 14 of 15 SPU images build into
+`build/sarpbc`. With the Edge zlib override and patch 0001 (trophy), boot reaches the
+package loader (`CORE`, `STARTUP_INT`, `TAGAME`, `ENGINE`, ...) and then stalls somewhere
+not yet diagnosed. Work runs in parallel through the task board
+([docs/agents-workflow.md](docs/agents-workflow.md)). Live status and next steps:
+[docs/status.md](docs/status.md).
 
 ## Key facts
 
@@ -37,17 +39,28 @@ status and next steps: [docs/status.md](docs/status.md).
    SPRX, extracted assets, lifted C/C++ from the game, or SPU dumps. They are all
    derived from copyrighted code. Only our own sources, configs, scripts and notes go
    into git. Keys/klicensees never go anywhere.
-2. **Do not commit changes inside `external/ps3recomp`.** It is a pinned upstream
-   submodule. Changes to it, including features ported from the Drakengard 3 fork, live
-   as patches in `patches/ps3recomp/` (see its README) and are offered upstream. Shared
-   runtime code must stay title-agnostic (upstream ratchets this with `tools/title_hacks.py`).
+2. **The superproject never records a patched ps3recomp.** `external/ps3recomp` is pinned
+   to an upstream commit (`.gitmodules` has `ignore = all`, so its local branch is never
+   staged by accident). Every change to it is a commit on its local `sarpbc-patches`
+   branch, exported to `patches/ps3recomp/` (see its README) and offered upstream.
+   `tools/apply_patches.sh` rebuilds that branch from the pin. Shared runtime code must
+   stay title-agnostic (upstream ratchets this with `tools/title_hacks.py`).
 3. **Generated code is never hand-edited.** `src/recomp/` and `src/spu_gen/` are
    rebuilt by `tools/relift.sh`. Game-specific behaviour goes in `src/overrides/` or
    `src/stubs.cpp`, keyed by guest address or NID.
-4. **Record what you learn.** A new fact about the binary (an address, a subsystem, a
-   hang and its cause) goes into the matching doc in the same change. Update
-   [docs/status.md](docs/status.md) at the end of a work session. Mark guesses as guesses.
-5. Linux is not yet a proven boot platform upstream (see
+4. **Document as you work, not afterwards.** These docs exist so the next agent does not
+   have to rediscover anything. Whenever you learn something that cost effort (an
+   address and what it does, a hang and its cause, a tool quirk, a dead end, a number),
+   write it into the matching `docs/*.md` **in the same change** as the code, and log it
+   on your task (`tools/task.sh note`). A new topic gets a new doc plus a row in the index
+   below. Mark guesses as guesses and give the evidence (log line, address, command). The
+   coordinator keeps [docs/status.md](docs/status.md) and the current-state paragraph
+   above up to date.
+5. **Parallel agents follow [docs/agents-workflow.md](docs/agents-workflow.md)**: claim a task
+   on the board before working; your own worktree; write only inside your task's
+   *Touches* paths; builds under `tools/task.sh lock cpu`; never `pkill` the game by
+   name; no relifting into the shared tree; commit on your branch, never into `main`.
+6. Linux is not yet a proven boot platform upstream (see
    [docs/build-linux.md](docs/build-linux.md)); expect to fix POSIX/Vulkan gaps and keep
    those fixes upstreamable.
 
@@ -59,25 +72,27 @@ docs/                        technical docs, one topic per file (index below)
 Supersonic Acrobatic ... (USA)/   original .pkg + .rap — read-only, git-ignored
 external/ps3recomp/          git submodule, pinned; override with $PS3RECOMP
 patches/ps3recomp/           our patches against the pinned upstream (+ README: how/why)
+tasks/{open,claimed,done}/   the task board (tools/task.sh); live copy is in the main checkout
 vfs/dev_hdd0/game/NPUB30035/ extracted install (PARAM.SFO, USRDIR/...) — git-ignored
 game/                        decrypted EBOOT.elf, SPUJOBS.prx — git-ignored
 analysis/                    ppu_loader / imports / SPU image output — git-ignored
 tools/rpcs3/                 RPCS3 AppImage + isolated config, used only by decrypt.sh — git-ignored
 .venv/                       Python venv for ps3recomp tools — git-ignored
 src/main.cpp src/stubs.cpp   from the ps3recomp project template
-src/overrides/               per-address / per-NID game fixes
+src/overrides/               native replacements / per-NID fixes (edgezlib.cpp, ...)
 src/recomp/ src/spu_gen/     GENERATED (lift, NID table, SPU) — git-ignored
-tools/                       extract.sh, relift.sh, run.sh, helper scripts
+tools/                       extract.sh decrypt.sh relift.sh run.sh apply_patches.sh
+                             split_toc_stubs.py task.sh agent_setup.sh
 CMakeLists.txt  config.toml
 ```
 
 ## Pipeline in one screen
 
 ```bash
-git submodule update --init   # external/ps3recomp, then apply patches/ps3recomp/*.patch
+tools/apply_patches.sh # submodule at the pin + patches/ps3recomp/*.patch (branch sarpbc-patches)
 tools/extract.sh      # PKG -> vfs/dev_hdd0/game/NPUB30035/   (ps3recomp tools/pkg_extract.py)
 tools/decrypt.sh      # RAP + RPCS3 --decrypt (headless) -> game/EBOOT.elf, game/SPUJOBS.prx
-tools/relift.sh       # ppu_loader -> ppu_lifter --hle-stubs --chunks 256 -> gen_hle_nids (~3 min)
+tools/relift.sh       # loader, TOC-stub split, PPU lift, NID table, SPU lift (~1 min)
 cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
 cmake --build build   # Release + Vulkan are the defaults on Linux -> build/sarpbc
 tools/run.sh          # build/sarpbc game/EBOOT.elf vfs (main.cpp maps /dev_hdd0 itself)
@@ -97,6 +112,7 @@ Details and every flag: [docs/pipeline.md](docs/pipeline.md).
 | [docs/reference-ports.md](docs/reference-ports.md) | Before solving a UE3 problem: Drakengard 3 (dod3-recomp) is a finished UE3 port on ps3recomp |
 | [docs/subsystems.md](docs/subsystems.md) | Working on graphics, audio, input, SPU/SPURS, saves, video, network, trophies |
 | [docs/debugging.md](docs/debugging.md) | Something hangs, crashes or draws wrong; env vars and triage recipes |
+| [docs/agents-workflow.md](docs/agents-workflow.md) | Before any work in parallel: task board, claiming, worktrees, locks, merge flow |
 
 ## Working conventions
 

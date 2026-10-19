@@ -11,10 +11,10 @@ work session. Newest log entry first. Use absolute dates.
 | 1 | Extract PKG to `vfs/` (`tools/extract.sh`) | done 2026-10-18 |
 | 2 | Decrypt EBOOT.BIN + SPUJOBS.SPRX (`tools/decrypt.sh`) | done 2026-10-18 |
 | 3 | Load + triage ELF, record imports/SPU/NP facts | done 2026-10-18 (see game-profile.md) |
-| 4 | Project skeleton from the template, first lift + build on Linux | skeleton + lift done 2026-10-18; build waiting on system packages |
-| 5 | Boot to first file opens / first HLE gaps | — |
-| 6 | Loading screen draws (`LOADSCREEN` FPO/VPO) | — |
-| 7 | Intro movies / main menu | — |
+| 4 | Project skeleton from the template, first lift + build on Linux | done 2026-10-18 |
+| 5 | Boot to first file opens / first HLE gaps | done 2026-10-18 |
+| 6 | Loading screen draws (`LOADSCREEN` FPO/VPO) | done 2026-10-18 — "Loading..." through Vulkan |
+| 7 | Intro movies / main menu | in progress: packages load, then a stall (T001) |
 | 8 | Offline match in an arena, with input and audio | — |
 | 9 | Polish: saves, trophies, perf, split-screen; online later | — |
 
@@ -30,23 +30,54 @@ work session. Newest log entry first. Use absolute dates.
 
 ## Next steps
 
-1. User installs build deps: `sudo dnf install SDL2-devel vulkan-headers glslang-devel`.
-2. Build the runtime alone first (`ps3recomp_host --draw` with Vulkan), then
-   `cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++`
-   and `cmake --build build`. Watch RAM (256 TUs of ~100k lines) and disk (~20 GB free).
-3. First run with `PS3_FSLOG=1 tools/run.sh`; record what breaks.
-4. Lift the 15 embedded SPU ELFs (`build_spu_workloads.py --input`); work out how to get
-   the Edge Geometry job images out of `SPUJOBS.prx`.
+The work is split into tasks on the board: `tools/task.sh list` (protocol:
+[agents-workflow.md](agents-workflow.md)). Highest value first:
+
+1. **T001** — find and fix the stall after package loading (the boot frontier).
+2. **T002** — `sys_prx_load_module`/`start_module` are unresolved: SPUJOBS.SPRX (Edge
+   Geometry jobs) never loads.
+3. **T003** — PhysX: `cellOvis` overlay table ("PhysX: Error allocating memory for overlay
+   table: 0 0") and SPU image #7 (overlapping PT_LOADs, not lifted).
+4. **T004** — HLE coverage audit: which of the 274 imports have no handler, plus the 17 NIDs
+   the database cannot name.
+5. **T005** — upstream the TOC-stub split into ps3recomp's loader (a patch).
 
 ## Open questions
 
 - What are SPU images 0, 3–5, 8–10 (unidentified by strings)?
 - Does MultiStream need the firmware MP3 decoder like Drakengard 3 did?
-- Does the game block on `sceNpDrmIsAvailable` or NP sign-in when offline?
+- Does the game block on `sceNpDrmIsAvailable` or NP sign-in when offline? (So far
+  `sceNpDrmIsAvailable` on SPUJOBS.SPRX passes; `sceNpManager` status unknown.)
 - How are saves written (no cellSaveData import — raw sys_fs?)
 - Does the upstream POSIX boot scaffold get a UE3-sized title to `main` on Linux?
 
 ## Log
+
+### 2026-10-18 (session 4) — first boot
+- Build deps installed by the user (SDL2-devel, vulkan-headers, glslang-devel); `/home`
+  now has 173 GB free. `ps3recomp_host` passes every Vulkan scene (draw, tex, shader, rtt,
+  mrt, depthtex, cube) on RADV / RX 7800 XT with guest programs on.
+- **Lift bloat found and fixed:** linker TOC-switch stubs (4,242 of them in two runs) were
+  folded into the preceding function, so each was lifted as a tail-entry wrapper
+  running to the end of the run. `tools/split_toc_stubs.py` gives each stub its own
+  function: 27.2M → 7.57M lines, 1.6 GB → 442 MB, lift 45 s. Full build 8 min 38 s, binary 385 MB.
+- **Linux VM bug fixed in `src/main.cpp`:** the template's `calloc` guest memory is not
+  page-aligned, so every `vm_commit` mprotect failed and `sys_memory_allocate` returned
+  ENOMEM (allocator spun on NULL). Now a 4 GB-aligned `mmap` (upstream template and
+  boot_main have the same bug — upstream candidate).
+- First boot gets through CRT/TLS, sysmodules, GCM/videoout, SPURS, NP, trophies,
+  PS3TOC/INI/INT, splash BMPs, global shader cache, RenderingThread, and **draws the
+  game's own "Loading..." screen** (captured to `captures/`).
+- SPU: 14/15 embedded images lifted and registered (`--allow-partial`). The Edge zlib task
+  is dispatched and runs.
+- **`_cellSpursLFQueuePushBody` (0x8A85674D) has no HLE upstream** → `src/overrides/edgezlib.cpp`
+  services Edge zlib requests natively (inflate + event flag). This title passes no
+  work-to-do counter, so each request sets the flag itself. Packages now load.
+- **Trophy race fixed (patch 0001):** upstream delivered `PROCESSING_COMPLETE` through
+  the sysutil poll, which raced the game's "-1 = done" write and hung "Registering Trophy
+  Information" at 0% in ~2 of 3 runs. Now synchronous, as on firmware.
+- Set up parallel work: task board + claims (`tools/task.sh`), per-agent worktrees
+  (`tools/agent_setup.sh`), shared ccache, flock locks; docs/agents-workflow.md.
 
 ### 2026-10-18 (session 3)
 - Copied ps3recomp `templates/project` (@ `838800e`) to `CMakeLists.txt`, `src/main.cpp`,

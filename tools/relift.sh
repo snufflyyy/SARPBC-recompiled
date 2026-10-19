@@ -27,18 +27,34 @@ JOBS=${JOBS:-8}
 mkdir -p "$ROOT/analysis"
 "$PY" "$PS3RECOMP/tools/ppu_loader.py" "$ELF" -o "$ROOT/analysis/"
 "$PY" "$PS3RECOMP/tools/gen_imports.py" "$ELF" -o "$ROOT/analysis/imports_named.json"
+# One function per linker TOC-switch stub; otherwise each stub lifts as a wrapper
+# running to the end of the run (see the script's docstring).
+"$PY" "$ROOT/tools/split_toc_stubs.py" "$ELF" "$ROOT/analysis/EBOOT.functions.json" \
+    -o "$ROOT/analysis/EBOOT.functions.split.json"
 
 # --hle-stubs rewrites each import trampoline as ps3_hle_call(nid); without it
 # the first firmware call runs the raw stub and dies at 0x39800000.
 rm -rf "$ROOT/src/recomp"
 mkdir -p "$ROOT/src/recomp"
 "$PY" "$PS3RECOMP/tools/ppu_lifter.py" "$ELF" \
-    --functions "$ROOT/analysis/EBOOT.functions.json" \
+    --functions "$ROOT/analysis/EBOOT.functions.split.json" \
     --hle-stubs "$ROOT/analysis/EBOOT.imports.json" \
     --code-end "$CODE_END" \
     --chunks "$CHUNKS" --jobs "$JOBS" \
     --output "$ROOT/src/recomp/"
 
 "$PY" "$PS3RECOMP/tools/gen_hle_nids.py" --all --out "$ROOT/src/recomp/ppu_hle_nids.cpp"
+
+# ---- SPU -------------------------------------------------------------------
+# The 15 SPU ELFs embedded in the EBOOT (Edge zlib, PhysX, MultiStream DSP, ...),
+# lifted and registered by content fingerprint; cellSpurs dispatches to them.
+# --allow-partial: every image lifts with no unsupported instructions but has a
+# few executable bytes outside any detected function (padding / literal pools),
+# which the strict mode refuses to register. The SPU interpreter covers a miss.
+# The 324 KB PhysX image has overlapping PT_LOADs and is skipped for now.
+rm -rf "$ROOT/src/spu_gen"
+"$PY" "$PS3RECOMP/tools/build_spu_workloads.py" --input "$ELF" \
+    --lifted "$ROOT/src/spu_gen" --out "$ROOT/src/spu_gen/spu_workloads.c" \
+    --constructor --allow-partial
 
 echo "lifted -> $ROOT/src/recomp ($(ls "$ROOT/src/recomp" | wc -l) files, $(du -sh "$ROOT/src/recomp" | cut -f1))"

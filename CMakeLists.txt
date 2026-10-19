@@ -12,6 +12,27 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
+# Compiler cache shared by every worktree of this repo (agents work in their own
+# worktrees; see docs/agents-workflow.md). The cache lives in the MAIN checkout,
+# and CCACHE_BASEDIR makes paths relative to each worktree, so the 7.5M lifted
+# lines compile once and every other worktree's build hits the cache.
+option(SARPBC_CCACHE "Compile through ccache with a repo-wide shared cache" ON)
+find_program(CCACHE_PROGRAM ccache)
+if(SARPBC_CCACHE AND CCACHE_PROGRAM)
+    execute_process(COMMAND git rev-parse --path-format=absolute --git-common-dir
+                    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                    OUTPUT_VARIABLE _git_common OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(_git_common)
+        get_filename_component(SARPBC_MAIN_DIR "${_git_common}" DIRECTORY)
+    else()
+        set(SARPBC_MAIN_DIR "${CMAKE_SOURCE_DIR}")
+    endif()
+    set(_launcher "${CMAKE_COMMAND};-E;env;CCACHE_DIR=${SARPBC_MAIN_DIR}/.cache/ccache;CCACHE_BASEDIR=${CMAKE_SOURCE_DIR};CCACHE_NOHASHDIR=1;CCACHE_MAXSIZE=40G;${CCACHE_PROGRAM}")
+    set(CMAKE_C_COMPILER_LAUNCHER   "${_launcher}")
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${_launcher}")
+    message(STATUS "ccache:          ${SARPBC_MAIN_DIR}/.cache/ccache")
+endif()
+
 # Vulkan is our renderer on Linux. Set before the SDK's option() so it wins.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(PS3RECOMP_RSX_VULKAN ON CACHE BOOL "Build the Vulkan RSX backend (Linux)")
@@ -184,9 +205,14 @@ elseif(PORT_ENABLE_SPU)
     endif()
 endif()
 
+# Port-side native replacements and overrides (see AGENTS.md rule 3).
+file(GLOB PORT_OVERRIDES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/overrides/*.cpp")
+find_package(ZLIB REQUIRED)   # src/overrides/edgezlib.cpp
+
 add_executable(${PROJECT_NAME}
     src/main.cpp
     src/stubs.cpp
+    ${PORT_OVERRIDES}
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}
     ${RECOMP_SOURCES}
@@ -231,6 +257,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
     ps3recomp_runtime
+    ZLIB::ZLIB
 )
 
 # The runtime is C++, and on Apple also Objective-C. Letting CMake infer the

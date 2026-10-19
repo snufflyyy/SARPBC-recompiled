@@ -89,6 +89,13 @@ python $PS3RECOMP/tools/ppu_lifter.py game/EBOOT.elf \
 python $PS3RECOMP/tools/gen_hle_nids.py --all --out src/recomp/ppu_hle_nids.cpp   # CMake uses it when present
 ```
 
+- **Split the linker's TOC-switch stubs first** (`tools/split_toc_stubs.py`, run by
+  `relift.sh`; the lifter is fed `EBOOT.functions.split.json`). The EBOOT uses four TOCs, so
+  the linker emits 4,242 `std r2,40(r1); addis/addi r2; b` stubs in two runs
+  (`0x61B6A8..0x61CA98`, `0x1921350..0x1930880`). ppu_loader folds each run into the
+  preceding function, and the lifter then emits every stub as a tail-entry wrapper
+  running to the end of the run. That took the lift from 7.6M lines to 27.2M (two thirds
+  dead code), with ~170 of the 256 chunks holding nothing else. Upstream candidate.
 - `--hle-stubs` is mandatory; without it, or without `ppu_hle_nids.cpp` compiled in, the
   first import call fails with `unresolved indirect call -> 0x39800000`.
 - `--chunks N` splits output by guest address and rewrites only changed files —
@@ -127,9 +134,20 @@ tools/run.sh      # = build/sarpbc game/EBOOT.elf vfs, with Vulkan window + gues
 `PS3_USRDIR_BASE`, and sets the guest's argv[0] (`PS3_BOOT_PATH`) to
 `/dev_hdd0/game/NPUB30035/USRDIR/EBOOT.BIN`. Any of them set in the environment wins.
 
+### What `tools/relift.sh` does for SPU
+
+`build_spu_workloads.py --input game/EBOOT.elf --lifted src/spu_gen --out
+src/spu_gen/spu_workloads.c --constructor --allow-partial` finds the embedded SPU ELFs,
+lifts each into `src/spu_gen/spu_<sha256>/`, and writes a registry keyed by content
+fingerprint. `--allow-partial` is needed: strict mode refuses all 14 because a few
+executable bytes fall outside any detected function (padding), even though nothing is
+unsupported. `src/spu_gen/inventory.json` lists each image's status and reason. CMake picks
+the images up from `src/spu_gen/*/spu_recomp.c` (reconfigure after a relift).
+
 ## Regenerating (`tools/relift.sh`)
 
 One idempotent script runs steps 3–5 so any agent can rebuild generated code after a
 ps3recomp bump or a lifter fix. Generated directories are deleted and recreated; never
 hand-edit them. After a ps3recomp pin change: re-apply `patches/ps3recomp/`, relift,
-rebuild, and note the result in [status.md](status.md).
+rebuild, and note the result in [status.md](status.md). Patches are applied with
+`tools/apply_patches.sh`.

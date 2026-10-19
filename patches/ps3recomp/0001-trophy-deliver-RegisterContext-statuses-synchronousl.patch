@@ -1,0 +1,80 @@
+From c294ee0b695b44822cf8e990b07758f43742cfb9 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Sun, 18 Oct 2026 23:00:40 -0500
+Subject: [PATCH] trophy: deliver RegisterContext statuses synchronously, as
+ firmware does
+
+17047c9 moved PROCESSING_COMPLETE onto the sysutil poll. Firmware runs
+every status callback on the registering thread before RegisterContext
+returns, and titles depend on that order: Supersonic Acrobatic
+Rocket-Powered Battle-Cars (NPUB30035) registers on a worker whose callback
+stores `completed` into a word the main thread polls, then writes -1 there
+once RegisterContext returns. A completion delivered later by the main
+thread's CheckCallback put 0 back over the -1 in about two runs of three,
+and the title showed "Registering Trophy Information" at 0% forever.
+
+The test now expects both statuses before RegisterContext returns.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/network/sceNpTrophy.c                    | 18 ++++++++++--------
+ libs/network/tests/test_trophy_registration.c |  6 +++---
+ 2 files changed, 13 insertions(+), 11 deletions(-)
+
+diff --git a/libs/network/sceNpTrophy.c b/libs/network/sceNpTrophy.c
+index d99e8ac..ffa5e38 100644
+--- a/libs/network/sceNpTrophy.c
++++ b/libs/network/sceNpTrophy.c
+@@ -325,20 +325,22 @@ s32 sceNpTrophyRegisterContext(SceNpTrophyContext context,
+            "arg=0x%08X) -> loaded saved data\n", context, handle, statusCb, arg);
+ 
+     /* Use the runner's OPD bridge, not the optional code/TOC scaffold entry
+-     * point. Registration status is synchronous; its terminal notification is
+-     * delivered through sysutil polling, after the HLE storage load completes.
++     * point. Registration is blocking on hardware: every status callback,
++     * the terminal PROCESSING_COMPLETE included, runs on the calling thread
++     * before this returns. Titles depend on that ordering. Supersonic
++     * Acrobatic Rocket-Powered Battle-Cars registers on a worker thread whose
++     * callback stores `completed` into a word the main thread polls, and the
++     * worker writes -1 ("done") into the same word right after this returns;
++     * a completion deferred to the main thread's sysutil poll could land after
++     * that write, put the 0 back, and leave the title polling forever.
+      * Intermediate firmware installation progress is not simulated here. */
+     g_ps3_guest_caller(statusCb, (u32)context, SCE_NP_TROPHY_STATUS_INSTALLED,
+                        0, 0, arg, 0, 0, 0);
+     if (!s_trophy_initialized) return SCE_NP_TROPHY_ERROR_NOT_INITIALIZED;
+     if (!s_contexts[context].in_use) return SCE_NP_TROPHY_ERROR_INVALID_CONTEXT;
+     if (!s_handles[handle].in_use) return SCE_NP_TROPHY_ERROR_INVALID_HANDLE;
+-    const u64 completion[8] = {(u32)context, SCE_NP_TROPHY_STATUS_PROCESSING_COMPLETE,
+-                               0, 0, arg, 0, 0, 0};
+-    if (cellSysutilQueueGuestCallbackArgs(statusCb, completion) != CELL_OK) {
+-        s_contexts[context].registered = 0;
+-        return SCE_NP_TROPHY_ERROR_OUT_OF_MEMORY;
+-    }
++    g_ps3_guest_caller(statusCb, (u32)context, SCE_NP_TROPHY_STATUS_PROCESSING_COMPLETE,
++                       0, 0, arg, 0, 0, 0);
+ 
+     return CELL_OK;
+ }
+diff --git a/libs/network/tests/test_trophy_registration.c b/libs/network/tests/test_trophy_registration.c
+index cdbee09..b515a67 100644
+--- a/libs/network/tests/test_trophy_registration.c
++++ b/libs/network/tests/test_trophy_registration.c
+@@ -36,11 +36,11 @@ int main(void)
+     assert(sceNpTrophyRegisterContext(1, 1, 0x300, 0xCAFE, 0) == SCE_NP_TROPHY_ERROR_UNKNOWN);
+     g_ps3_guest_caller = callback;
+     assert(sceNpTrophyRegisterContext(1, 1, 0x300, 0xCAFE, 0) == CELL_OK);
+-    assert(calls == 1 && s_contexts[1].registered);
+-    cellSysutilCheckCallback(); assert(calls == 2);
++    /* Both statuses arrive before RegisterContext returns, as on hardware. */
++    assert(calls == 2 && s_contexts[1].registered);
+     cellSysutilCheckCallback(); assert(calls == 2);
+     assert(sceNpTrophyTerm() == CELL_OK);
+     char file[256]; snprintf(file, sizeof(file), "%s/NPWR00000.json", root);
+     assert(unlink(file) == 0); assert(rmdir(root) == 0); free(vm_base);
+-    puts("Trophy registration delivers installed and deferred completion statuses");
++    puts("Trophy registration delivers installed and completion statuses synchronously");
+ }
+-- 
+2.55.0
+

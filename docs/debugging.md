@@ -56,3 +56,46 @@ Verify a variable still exists in the pinned `DIAGNOSTICS.md` before relying on 
 3. Fix at the right layer: lifter bug → upstream patch; HLE gap → upstream module patch;
    true game quirk → `src/overrides/`.
 4. Write down the cause and the fix in the relevant doc and in [status.md](status.md).
+
+## Recipes that worked on this title (2026-10-18)
+
+**Headless run with a frame capture** (no window opens on the desktop):
+```bash
+PS3RECOMP_VK_WINDOW=0 SDL_AUDIODRIVER=dummy PS3_FSLOG=1 \
+PS3RECOMP_VK_DUMP=captures/frame.ppm PS3RECOMP_VK_DUMP_EVERY=120 \
+timeout -k 5 -s TERM 60 tools/run.sh > analysis/run.log 2>&1
+```
+- The runtime catches SIGINT once the game is running, so use `timeout -s TERM -k 5`.
+- **Never `pkill -f build/sarpbc`.** It matches the invoking shell's own command line and
+  kills it (exit 144). `pkill -x sarpbc` works but kills every agent's instance, so in
+  parallel work only kill the PID your own `timeout` started.
+- View a dump: `python3 tools/ppm2png.py captures/frame.ppm`, then open the PNG with the
+  Read tool. It also prints how many sampled pixels are non-black.
+
+**Filter the log.** A run writes 15–20k lines. Drop the per-frame noise first:
+```bash
+grep -v -E '^\s+(r[0-9]|rawstk|ARG)|timer_usleep\(30 us\)|opendir|CLEAR_SURFACE|SetFlipImmediate|SetPrepareFlip|GET_REPORT|label write|usercmd|sys_memory\] allocate|LWM-|DRAW_ARRAYS|port_send' analysis/run.log
+```
+
+**Every thread's guest stack** (lifted functions are named `func_<guest addr>`):
+```bash
+timeout 120 gdb -p <pid> -batch -ex 'set pagination off' -ex 'thread apply all bt 14' > analysis/stacks.txt
+```
+`ptrace_scope` is 0 here, so attaching works without sudo.
+
+**Which HLE calls a stuck loop makes:** `PS3_HLE_TRACE=<N>` logs the first N calls as
+`[HLETRACE] nid=... lr=...`. Name the NIDs from `analysis/imports_named.json`, then read
+the lifted loop around the `lr` (`grep -n 'ctx->lr = 0x<lr>' src/recomp/*.cpp`).
+
+**Read a guest function:** `awk '/^void func_<ADDR>\(/,/^}/' src/recomp/ppu_recomp_*.cpp`.
+Resolve an OPD (callbacks, thread entries) to its code address by reading the first word
+at the OPD in `game/EBOOT.elf`.
+
+## Hangs found so far, and their causes
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Allocator loops: `sys_memory allocate(...)` with no `-> addr`, NULL writes/calls | Guest VM from `calloc` is not page-aligned on Linux, so `vm_commit` mprotect fails | 4 GB-aligned `mmap` in `src/main.cpp` |
+| "Registering Trophy Information" stuck at 0% (intermittent) | Deferred `PROCESSING_COMPLETE` overwrote the game's -1 "done" marker | patch 0001 |
+| PoolThread `EventFlagWait BLOCKED ... flagEA=0x01DC8E00` after opening `CORE.XXX` | `_cellSpursLFQueuePushBody` missing, so Edge zlib never got work | `src/overrides/edgezlib.cpp` |
+| `[spu_workload] async dispatch MISS fp=0x4100F6EDD2441719` | SPU images not lifted | SPU step in `tools/relift.sh` |

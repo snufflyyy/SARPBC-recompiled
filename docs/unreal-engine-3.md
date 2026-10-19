@@ -46,6 +46,13 @@ you where to look before you have symbols. Facts about *this* binary are marked
 - Big-endian serialization (`FArchive`) with byte swapping in game code: lifted, so no
   action needed, but useful when reading memory dumps.
 
+## Threads seen at boot (2026-10-18)
+
+`FlipPump` (0x01BF2080), `spu_printf_handler` ×2, `PoolThread` (0x01BF14A8, waits on Edge
+zlib completions), `RegisterTrophyContext` (0x684788), `AsyncIOSystem`,
+`RenderingThread` (started, joined and restarted once during init). The main thread polls
+`cellSysutilCheckCallback` from its loops.
+
 ## Threads *(UE3, verify against `sys_ppu_thread_create` calls at boot)*
 
 | Thread | Role |

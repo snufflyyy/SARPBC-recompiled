@@ -8,10 +8,16 @@ work. Update the **Status** line of a section when you change it.
 - Game installs as an HDD title: guest paths are `/dev_hdd0/game/NPUB30035/USRDIR/SARB/...`.
   Map with `PS3_HDD0_ROOT=<dir containing game/>` (`runtime/ppu/ppu_fs.cpp`). `PS3_VFS_ROOT`
   covers `/dev_bdvd` — not used by this title unless it probes for a disc.
-- **Case sensitivity**: the PKG ships upper-case names; the engine asks for mixed case
-  (`..\TAGame\CookedPS3\Startup_int.xxx`). Real PS3 hardware is case-sensitive too, so
-  the engine must already normalise (probably upper-cases) — confirm with `PS3_FSLOG=1`
-  on the first run before adding any case-folding.
+- **Case sensitivity: no problem.** The engine opens upper-case paths itself
+  (`/dev_hdd0/game/NPUB30035/USRDIR/SARB/TAGAME/COOKEDPS3/CORE.XXX`), so they match the
+  extracted tree as is (verified with `PS3_FSLOG=1`, 2026-10-18).
+- Observed file order at boot: `PS3TOC.TXT`, `___LOCK` (created), `BINARIES/EPICINTERNAL.TXT`
+  (ENOENT, fine), `COALESCED.INI`, `COALESCED.INT`, `SPLASH.BMP`, `LOADING.BMP`,
+  `LOADSCREEN.VPO/FPO`, `GLOBALSHADERCACHE-PS3.BIN`, then packages `CORE`, `PSYUI`,
+  `MAINMENU`, `STARTUP_INT`, `TASTATS`, `TAGAME`, `ONLINESUBSYSTEMGAMESPY(_LOC_INT)`,
+  `IPDRV`, `ENGINE`, ...
+- `cellGame` is used after all (`HddGameCheck` on `NPUB30035`), through the cellSysutil
+  library rather than as its own import.
 - `..\` relative paths and backslashes are resolved by the game against its own base
   dir; watch the first opens to see what reaches cellFs.
 - Save data: the EBOOT imports **no** cellSaveData or cellGame — saves likely go through
@@ -53,6 +59,18 @@ work. Update the **Status** line of a section when you change it.
 
 ## SPU / SPURS
 
+- **Status (2026-10-18):** 14 of 15 embedded images are lifted and registered
+  (`build_spu_workloads.py --input --allow-partial` in `tools/relift.sh`). Image #7 (324 KB,
+  PhysX) is refused because of overlapping PT_LOADs. The Edge zlib task (image 1, fp
+  `4100F6EDD2441719`) is dispatched, runs, and then idles in `WAIT_SIGNAL`, because Edge
+  zlib requests are now serviced natively on the PPU (`src/overrides/edgezlib.cpp`).
+- **`_cellSpursLFQueuePushBody` (NID `0x8A85674D`) has no HLE upstream.** The override
+  handles only 32-byte (Edge zlib) queues and refuses others loudly.
+  Request layout: in/out EA, in/out size, counter EA|inflate bit, flag EA, flag bits,
+  skips. This title passes counter 0 and flag `0x01DC8E00` bits `0x0001`.
+- `sys_prx_load_module` / `sys_prx_start_module` are unresolved NIDs: SPUJOBS.SPRX
+  (Edge Geometry) is not loaded yet.
+- PhysX prints "Error allocating memory for overlay table: 0 0" after `cellOvis` loads.
 - Confirmed sources ([game-profile.md](game-profile.md#spu-code)): 15 SPU ELFs embedded
   in the EBOOT — **Edge zlib** (package inflate), **PhysX** tasks, **MultiStream** DSP,
   several unidentified — and **Edge Geometry** job images inside `SPUJOBS.prx`
@@ -92,8 +110,9 @@ work. Update the **Status** line of a section when you change it.
 
 ## Trophies, system UI, misc
 
-- Trophy set `NPWR00406_00` (`TROPHY.TRP`): sceNpTrophy HLE exists; it needs the TRP
-  readable at its install path.
+- Trophy set `NPWR00406_00`: registration works (status callback `0x683B48` stores
+  `completed` at arg+4; the registration thread `0x684788` writes -1 there when done). It
+  needs patch 0001: upstream's deferred completion raced that -1.
 - System dialogs (cellMsgDialog, cellOskDialog for names), cellSysutil callbacks (XMB
   exit, game-exit request) — implemented upstream; watch for an unhandled callback stall.
 - `PS3LOGO.DAT`, `ICON1.PAM` are XMB assets the game never reads.
