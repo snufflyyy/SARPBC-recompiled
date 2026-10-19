@@ -12,11 +12,16 @@ servers** to use them with this recomp, since it is heavily AI-assisted. Until t
 so on the record, no agent connects to RPCN or any community server, nor works on this task.
 
 ## Goal (once unblocked)
-The user's chosen route is the open-source community one: "SARPBC Online Mod 1.15" by kuxir97
-(over 1.02 → 1.04), playing through RPCN (open-source PSN replacement,
-github.com/RipleyTom/rpcn; setup at github.com/eiddor/sarpbc-online). Find out what the
-mod changes, which NP APIs it uses, and what the runtime needs to talk to RPCN (native RPCN
-client, or a bridge to ps3recomp's psnr); implement it.
+**Stay on 01.09** (user, 2026-10-18): do not switch the port to the mod's 1.04 base. Port
+the community multiplayer mod ("SARPBC Online Mod 1.15" by kuxir97, made for 1.02 → 1.04,
+playing through RPCN; setup at github.com/eiddor/sarpbc-online) onto 01.09:
+1. With the user-supplied mod packages, diff the mod against 1.04 (EBOOT patches, packages,
+   UnrealScript, config) to get a precise list of what it changes and why.
+2. Re-apply those changes to 01.09's EBOOT/packages: port-side overrides keyed to 01.09
+   addresses, package/UnrealScript edits through an overlay (Drakengard 3's tools/ue3/
+   pkgpatch approach), never by editing the original files.
+3. Give the runtime what RPCN play needs (native RPCN client, or a bridge to ps3recomp's psnr).
+4. Credit kuxir97 and the mod in the docs and the UI where appropriate.
 
 ## Done when
 Two instances play an online match through an approved server.
