@@ -40,3 +40,4 @@ __pycache__/
 /.worktrees/
 /updates/
 /versions/
+/.claude/
