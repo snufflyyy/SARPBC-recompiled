@@ -3,73 +3,58 @@
 Living document. Update the phase table, "Next steps" and the log at the end of each
 work session. Newest log entry first. Use absolute dates.
 
-## Running now (2026-10-19, resumed)
+## Resume here (paused 2026-10-19 ~11:15 for usage)
 
-Step 1 below is done: T025's patch is merged as 0028, both versions are relifted, and
-01.09's `spu_func_00020180` (PhysX static ctor) is lifted (15/15 images complete). T022 is closed.
-Agents running: T025 (agent-spuperf: verify without `SPU_INTERP_UNLIFTED`, x86 SIMD), T024
-(agent-gcm: park reconcile, `gcm_config.cpp`), T027 (agent-rwlock), T026 (agent-cbstack),
-T028 (agent-frontier3: ESRB to menus, new). T027 merged as 0029 (10:50); T030 (agent-spinwait) started early by the user because one boot spins ~15 of 16 cores. T026 merged as 0030 (11:05); T029 (Sonnet) takes its slot. New: T034 (callback follow-ups), T035 (broken entry-args test, Sonnet).
+**To restart, paste this into a new Claude Code session in the main checkout:**
+> Read AGENTS.md, docs/status.md "Resume here" and docs/agents-workflow.md. Merge the paused
+> branches listed below (renumber patches, `tools/apply_patches.sh`), then resume the tasks
+> in "Restart these" with up to 5 agents from docs/agent-brief.md. Use the Model line in each task.
 
 **User plan (2026-10-19), in order:**
-1. Menus first (T024-T028 as above).
-2. Once the menus are reached, every slot moves to **SPU performance, easy wins only**:
-   T029 (profiling harness on Sonnet; it may take the first free slot even before the menus, since it is tooling only), T030 (busy-wait loops), T031 (lifter codegen),
-   T032 (DMA/MFC), T033 (host threads), and T025's SIMD helpers. Measured, bit-exact, nothing deep;
-   bigger ideas become proposed tasks.
+1. Menus first (T024, T028).
+2. Then every slot goes to **SPU performance, easy wins only**: T029 (profiling harness, Sonnet),
+   T030 (busy-wait spins, started early because one boot burns ~15 of 16 cores), T031 (lifter
+   codegen), T032 (DMA/MFC), T033 (host threads), T025 (SIMD helpers). Measured, bit-exact,
+   nothing deep; bigger ideas become proposed tasks.
 3. When the easy wins are done: wrap up and stop all agents.
-4. The coordinator audits the project (read-only sweeps on Sonnet agents, fixes by the coordinator) for cleanliness, tidiness and extensibility: docs vs.
-   reality, the patch stack, scripts, overrides, the task board, stale worktrees and branches.
+4. The coordinator audits the project (read-only sweeps on Sonnet/Haiku, fixes by the coordinator)
+   for cleanliness, tidiness and extensibility: docs vs. reality, the patch stack, scripts,
+   overrides, the task board, the ~20 stale worktrees and branches under `.claude/worktrees/`.
 
-## Resume here (paused 2026-10-19 for usage)
+**Furthest point (01.09):** the **safe-area screen** ("Use the Left Stick to adjust the
+screen... press X") at ~76 s, after Loading, ESRB with the car, the Psyonix logo and Powered by
+Unreal. That needs `GCM_INTR_THREAD=1 GCM_PARK_GRACE_MS=600000` (T024 is choosing the default)
+on top of `main`. That screen waits for X, and boot_check presses nothing (T028). 01.09 has no
+Bink movies, so the "intros" are logo screens in the MAINMENU map.
 
-**Priority (user): get 01.09 into the menus.** Every agent slot goes to the boot until then.
-At most **5** agents (raised from 3 on 2026-10-19).
+**State of `main`:** 30 patches (48 commits on 39a3629), both versions relifted with 0028.
+Merged this session: 0028 (T025: SPU finder seeds .ctors/.dtors; PhysX LS 0x20180 is lifted, so
+`SPU_INTERP_UNLIFTED` is no longer needed), 0029 (T027: SRW locks prefer writers on glibc),
+0030 (T026: per-thread, per-depth guest callback stacks).
 
-**Headline:** T022 reached the **legal/ESRB screen with a 3D car rendered** on 01.09 by
-combining three fixes (`PROGRESSING | last open TEXTURES.TFC@6.1s | flips 106`, 90 s,
-`SPU_INTERP_UNLIFTED=1`). Two of them are merged; the third (GCM) exists in two overlapping
-forms that still need reconciling. Nobody has booted `main` as merged yet.
+**Known problem:** one 01.09 boot uses ~1460% CPU. 50-170 PhysX SPU threads spin at SPU pc 0x32B44
+on `GETLLAR 0x0133B880`, through `mfc_for`'s shared lock (T030). Boots must run one at a time:
+`tools/task.sh lock boot ...` (docs/agents-workflow.md).
 
-**State of `main`:** 27 ps3recomp patches (`tools/apply_patches.sh` -> 45 commits on 39a3629).
-- 0024 (T022): SPURS job chains re-walk and resume, and a never-notified guard waits 200 ms.
-  Guard 0x0133AA80 itself was a red herring (an idle service chain on its own thread).
-- `src/overrides/gcm_inject_base.cpp` (T022): moves the GCM window to 0x1FF00000. The game's
-  256 MB raw reservation at 0x000DFA68 lands at 0x20000000, on top of the GCM labels.
-- 0025-0027 (T024): GCM user-command queue, pump fast exit, and the watchdog no longer
-  skipping jump-to-itself parks (`GCM_PARK_GRACE_MS`, `GCM_PARK_LOG`, opt-in `GCM_INTR_THREAD`).
-- 0023 (T007): MultiStream DSP overlay; audio no longer blocks the boot.
-- Also merged today: 0016-0017 (controls), 0018-0022 (fork generic fixes).
+**Paused branches to merge, and tasks to restart:** see the table below (filled in from each
+agent's HANDOFF).
 
-**Resume plan (in this order):**
-1. **T025, merge + relift:** merge branch `worktree-agent-a4cc29237e98a2e6f`. It patches the SPU
-   finder so it seeds `.ctors/.dtors`; PhysX's "unlifted LS 0x20180" is a static constructor.
-   Renumber its patch to 0028, `tools/apply_patches.sh`, then relift both versions
-   (`tools/relift.sh`, and with `GAME_DIR=versions/0109/game OUT_DIR=versions/0109`). Boot
-   without `SPU_INTERP_UNLIFTED`. Its other half (x86 SIMD speed) is still open.
-2. **T024, resume:** reconcile `patches/experimental/T022-esrb-experiment.diff` hunk (1)
-   ("never skip a park") with patch 0027's 50 ms grace. T022 saw the flip-handler park released
-   only at the next HLE call, which comes after the grace. Try `GCM_INTR_THREAD=1` or
-   `GCM_PARK_GRACE_MS` large. Default whatever works for SARPBC in `src/overrides/gcm_config.cpp`.
-3. **T027:** writer-preferring rwlocks on Linux (experiment hunk 2). Without it the ESRB screen
-   stops after 8-25 s.
-4. Then: get from ESRB to the intro movies and main menu (new task). Open leads: PhysX
-   `HALT-ASSERT heqi pc=0x24884` and spinning on `GETLLAR 0x0133B880` (T022 notes); T026
-   (per-thread guest callback stacks: all callbacks share 0xCFFE0000, unsafe with
-   `GCM_INTR_THREAD`).
+| Task | Model | Branch | State |
+|---|---|---|---|
+| T024 GCM parks + flip fixes | Opus | (pending handoff) | |
+| T025 SPU SIMD helpers | Opus | (pending handoff) | |
+| T028 ESRB to menus | Opus | (pending handoff) | |
+| T030 SPU busy-waits | Opus | (pending handoff) | |
+| T029 SPU profiling harness | Sonnet | (pending handoff) | |
 
-Steps 1-3 can run as 3 parallel agents (Touches don't overlap). A boot check after merging all
-three is the coordinator's job.
+**Restart these** (5 slots): T024, T028, T030, T025, T029. Next in line: T035 (Sonnet, broken
+test), T031, T032, T033, T034.
 
-**Branches not merged:** `worktree-agent-a4cc29237e98a2e6f` (T025 WIP, see step 1). All other
-agent branches are merged; their worktrees under `.claude/worktrees/` can be deleted.
+**After the SPU easy wins, by priority:** T007 rest (silent audio), T008 follow-ups, T020 rest,
+T017 (saves), T021 rest, T012, T009, T018, T005, T010, T011, T013, T014. T015 multiplayer stays
+**blocked** (user permission needed).
 
-**After the menus, by priority:** T007 rest (silent audio, mixer at 27% of real time), T008
-follow-ups (windowed key/rumble check), T020 rest, T017 (saves), T021 rest, T012, T009, T018,
-T005, T010, T011, T013, T014. T015 multiplayer stays **blocked** (user permission needed).
-
-**To restart:** see docs/agents-workflow.md "Pausing and resuming"; spawn agents with
-docs/agent-brief.md. Before building `main`: `tools/apply_patches.sh`, then reconfigure CMake.
+Before building `main`: `tools/apply_patches.sh`, then reconfigure CMake.
 
 ## Phases
 
@@ -82,7 +67,7 @@ docs/agent-brief.md. Before building `main`: `tools/apply_patches.sh`, then reco
 | 4 | Project skeleton from the template, first lift + build on Linux | done 2026-10-18 |
 | 5 | Boot to first file opens / first HLE gaps | done 2026-10-18 |
 | 6 | Loading screen draws (`LOADSCREEN` FPO/VPO) | done 2026-10-18 — "Loading..." through Vulkan |
-| 7 | Intro movies / main menu | in progress: packages load, then a stall (T001) |
+| 7 | Intro movies / main menu | in progress: 01.09 reaches the safe-area screen (before the title screen) with env overrides |
 | 8 | Offline match in an arena, with input and audio | — |
 | 9 | Polish: saves, trophies, perf, split-screen; online later | — |
 
