@@ -59,6 +59,23 @@ The work is split into tasks on the board: `tools/task.sh list` (protocol:
 
 ## Log
 
+### 2026-10-18 (session 5, later) — first wave merged
+- Merged: **T001** (patch 0005: sys_memory reuses freed ranges; UE3 ran the bump allocator
+  out → OOM on 01.02 and NULL-buffer zlib loops on 01.09), **T002** (0004: general
+  `sys_prx_load_module`; SPUJOBS loads; its 2 SPURS jobs lifted by `tools/lift_prx_jobs.py`),
+  **T003** (0007/0008: real cellOvis overlay table; SPU pipeline lifts overlay images),
+  **T004** (0003 + docs/hle-coverage.md: every import named and graded), **T016** (0006:
+  SPU function finder stops lifting .rodata of section-stripped images). The coordinator
+  rebased 0008 onto 0006 (merged seed filter).
+- HLE NID table is now generated per build dir (no shared ppu_hle_nids.cpp), so worktrees
+  with different patch sets link.
+- **SPU: 15/15 images + 2 SPUJOBS jobs registered on both versions.**
+- **01.09 boot now:** past PhysX init (no overlay-table error). Stalls at 4–5 s on three owned
+  gaps: `cellSpursQueuePopBody` (T019), MultiStream's firmware `flashMP3.pic` → event flag
+  `0x01372000` (T007), cellVoice InitEx/CreateNotifyEventQueue/SetNotifyEventQueue (T020).
+- User directive: reuse Drakengard 3's port as much as possible → T021 (inventory + generic
+  ports); running agents told to start from dod3's code in their areas.
+
 ### 2026-10-18 (session 5) — parallel agents, 01.09
 - First agent wave started: T001, T002, T003, T004, T006. **T006 done and merged**:
   `tools/boot_check.sh` (headless boot report, version aware, kills only its own game).
