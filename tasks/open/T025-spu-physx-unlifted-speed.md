@@ -2,6 +2,7 @@
 
 Status: open
 Owner: -
+Priority: 6
 Touches: CMakeLists.txt (compile flags only), patches/ps3recomp/T025-*.patch (runtime/spu/spu_helpers.h, runtime/spu/tests/** new tests, tools/build_spu_workloads.py / find_spu_functions.py only; narrowed 2026-10-19 so T030/T032/T033 can own the rest of runtime/spu), tools/make_spu_overlays.py (only to add a PhysX overlay case), docs/subsystems.md (SPU/SPURS section only)
 Reads: tasks/done/T007*, tasks/done/T003*, docs/dod3-reuse.md
 

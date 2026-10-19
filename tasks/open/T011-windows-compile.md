@@ -2,6 +2,7 @@
 
 Status: open
 Owner: -
+Priority: 23
 Touches: src/main.cpp (#ifdef _WIN32 regions only), CMakeLists.txt (WIN32 branches only), docs/build-windows.md (new)
 Reads: external/ps3recomp/tools/check_ppu_scaffold.py, external/ps3recomp/docs/BUILDING.md
 

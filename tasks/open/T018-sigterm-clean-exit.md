@@ -2,6 +2,7 @@
 
 Status: open
 Owner: -
+Priority: 20
 Touches: patches/ps3recomp/T018-*.patch (runtime signal handling only), src/main.cpp (signal setup only; coordinate, T001 also edits main.cpp), docs/debugging.md (boot_check "killing" paragraph)
 Reads: external/ps3recomp/runtime/ppu/ (where SIGINT is caught), tools/boot_check.sh
 

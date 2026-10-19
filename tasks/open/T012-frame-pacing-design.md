@@ -2,6 +2,7 @@
 
 Status: open
 Owner: -
+Priority: 18
 Touches: docs/frame-pacing.md (new); src/overrides/frame_*.cpp (new) only after T001 is done
 Reads: src/main.cpp (frame_clock), dod3-recomp src/main.cpp + docs/TECHNICAL.md, external/ps3recomp/libs/video/cellGcmSys.c
 

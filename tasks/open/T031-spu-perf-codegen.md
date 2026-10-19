@@ -2,6 +2,7 @@
 
 Status: open
 Owner: -
+Priority: 5
 Touches: tools/spu_lifter.py, tools/test_spu_*.py (new tests only), patches/ps3recomp/T031-*.patch
 Reads: tasks/*/T025* (it owns runtime/spu/spu_helpers.h), tasks/*/T009*, docs/pipeline.md
 

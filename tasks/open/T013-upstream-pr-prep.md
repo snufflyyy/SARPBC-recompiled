@@ -2,6 +2,7 @@
 
 Status: open
 Owner: -
+Priority: 24
 Touches: docs/upstream.md (new)
 Reads: patches/ps3recomp/*, patches/ps3recomp/README.md, src/main.cpp (VM fix), tools/split_toc_stubs.py, src/overrides/edgezlib.cpp
 
@@ -12,7 +13,7 @@ missing _cellSpursLFQueuePushBody, and upstream unit tests that only link on mac
 write the upstream PR as it would be filed: title, motivation with evidence, the diff
 against upstream master (not our pin, so check whether master has moved), and tests. Keep
 them as text and local branches only. **Do not push, fork, or open anything on GitHub.**
-That needs the user's approval, and the coordinator will ask.
+That needs the user's approval: ask first.
 
 ## Done when
 docs/upstream.md lists each contribution with status, a ready-to-file description, and the

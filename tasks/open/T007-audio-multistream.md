@@ -2,6 +2,7 @@
 
 Status: open
 Owner: -
+Priority: 14
 Touches: tools/make_spu_overlays.py + its relift.sh step (coordinator-approved 2026-10-19), src/overrides/audio_*.cpp (new), patches/ps3recomp/T007-*.patch (libs/audio/**, runtime/spu/** only for audio), docs/subsystems.md (Audio section only)
 Reads: analysis/spu_EBOOT_elf/ (images 12-14 mstream_dsp_*), docs/reference-ports.md (dod3 src/apu/)
 
@@ -22,7 +23,7 @@ ps3recomp maps `/dev_flash` to `$PS3_DEV_FLASH`, defaulting to a Windows path
 (`D:/recomp/tools/rpcs3/dev_flash`, runtime/ppu/ppu_fs.cpp:144). We ship no firmware.
 Preferred fix: a native stand-in for the MP3 decoder MultiStream loads, as Drakengard 3 did
 (docs/reference-ports.md, dod3 src/apu/mp3_native.c + a stand-in SPU image). Using real
-firmware files is an option only if the user explicitly agrees; ask the coordinator, never
+firmware files is an option only if the user explicitly agrees; ask the user, never
 download firmware yourself. Also make the default `/dev_flash` path sane on Linux (patch).
 Target 01.09 (versions/0109, read-only).
 

@@ -2,6 +2,7 @@
 
 Status: open
 Owner: -
+Priority: 25
 Touches: docs/online.md (new), src/overrides/net_*.cpp (new), patches/ps3recomp/T014-*.patch (libs/network/** only, offline behaviour)
 Reads: docs/subsystems.md (network), analysis/imports_named.json (sys_net, sceNp*, cellNetCtl)
 

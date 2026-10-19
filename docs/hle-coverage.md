@@ -77,7 +77,7 @@ The generated block has the exact counts per class and library.
   `cellFsOpendir/Readdir/Closedir`. The one unresolved NID hit is `0x45FE2FCE`
   `_sys_spu_printf_initialize` (right after the game starts its own `_SPU_printf_server`
   thread); the T004 patch registers it.
-- **01.02**: `build/sarpbc` in this worktree, 90 s, headless, 90 distinct imports. The
+- **01.02**: `build/sarpbc` in T004's worktree, 90 s, headless, 90 distinct imports. The
   unresolved hits are `sys_prx_load_module`/`sys_prx_start_module` (T002),
   `cellGameDataGetSizeKB` (`0xA9B0C1D9`, early, after `cellHddGameCheck`) and
   **`cellGameDataExitBroken` (`0x9949BF82`)**, which is the *last* new HLE call of the

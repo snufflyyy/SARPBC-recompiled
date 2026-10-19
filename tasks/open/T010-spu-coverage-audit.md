@@ -2,6 +2,7 @@
 
 Status: open
 Owner: -
+Priority: 22
 Touches: docs/game-profile.md (SPU table only), tools/spu_coverage.py (new)
 Reads: src/spu_gen/inventory.json, src/spu_gen/*/lift.json, analysis/spu_EBOOT_elf/
 

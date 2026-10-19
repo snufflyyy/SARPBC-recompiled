@@ -2,6 +2,7 @@
 
 Status: open
 Owner: -
+Priority: 19
 Touches: patches/ps3recomp/T009-*.patch (external/ps3recomp/tools/ppu_lifter.py, runtime/ppu/ppu_vm_fast.h & memory macros), docs/reference-ports.md (lifter section), docs/pipeline.md (lifter flags)
 Reads: https://github.com/soyjxck/ps3recomp (MIT), its docs/PPU_RECOMP.md, dod3-recomp docs/TECHNICAL.md
 

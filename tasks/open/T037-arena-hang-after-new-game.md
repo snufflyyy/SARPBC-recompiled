@@ -2,6 +2,7 @@
 
 Status: open
 Owner: -
+Priority: 12
 Touches: src/overrides/frontier_*.cpp (new), docs/debugging.md, docs/unreal-engine-3.md
 Reads: tasks/*/T028*
 

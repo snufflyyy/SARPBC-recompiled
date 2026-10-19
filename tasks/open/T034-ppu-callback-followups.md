@@ -2,6 +2,7 @@
 
 Status: open
 Owner: -
+Priority: 10
 Touches: patches/ps3recomp/T034-*.patch (runtime/ppu/ppu_loader.cpp guest-call path, runtime/syscalls/sys_ppu_thread.c stack allocator only), docs/ps3recomp-primer.md (T026 section)
 Reads: tasks/done/T026*, patches/ps3recomp/0030-ppu-guest-call-stacks.patch
 

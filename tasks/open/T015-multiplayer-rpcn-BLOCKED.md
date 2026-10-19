@@ -2,6 +2,7 @@
 
 Status: open
 Owner: -
+Priority: blocked
 Touches: docs/online.md (multiplayer section), src/overrides/net_*.cpp, patches/ps3recomp/T015-*.patch (libs/network/**)
 Reads: docs/game-profile.md "Versions and updates"
 

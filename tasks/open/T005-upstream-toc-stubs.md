@@ -2,6 +2,7 @@
 
 Status: open
 Owner: -
+Priority: 21
 Touches: patches/ps3recomp/T005-*.patch (external/ps3recomp/tools/ppu_loader.py, ppu_lifter.py, tools/test_*.py), tools/split_toc_stubs.py, tools/relift.sh (only the split step)
 Reads: docs/pipeline.md (step 4), game/EBOOT.elf, analysis/
 

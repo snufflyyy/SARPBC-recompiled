@@ -2,6 +2,7 @@
 
 Status: open
 Owner: -
+Priority: 13
 Touches: patches/ps3recomp/T038-*.patch (runtime/rsx/** orientation only), docs/subsystems.md (Graphics)
 Reads: docs/subsystems.md
 

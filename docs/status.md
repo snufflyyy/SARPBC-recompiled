@@ -3,16 +3,17 @@
 Living document. Update the phase table, "Next steps" and the log at the end of each
 work session. Newest log entry first. Use absolute dates.
 
-## Resume here (paused 2026-10-19 ~11:30 for usage)
+## Resume here (agents started by the user, from 2026-10-19)
 
-**To restart, paste this into a new Claude Code session in the main checkout:**
-> Read AGENTS.md, docs/status.md "Resume here" and docs/agents-workflow.md, then resume the
-> tasks under "Restart these" with up to 5 agents from docs/agent-brief.md (worktree isolation;
-> use each task's Model line). Keep the slots full from "Next in line".
+**To restart, start an agent (Claude Code, pi, Antigravity, ...) in the main checkout and say:**
+> Read AGENTS.md, docs/status.md "Resume here" and docs/workflow.md, then take the next task
+> from `tools/task.sh next`.
 
-Every agent branch from this session is merged; nothing is left to merge. Each paused task has a
-`HANDOFF:` note (`tools/task.sh show <ID>`). Old worktrees under `.claude/worktrees/` can be
-deleted (the audit will do it).
+For more parallelism, start more agents the same way, each with its own name. **No agent spawns
+subagents** (user, 2026-10-19: they used too much usage). Every branch from the subagent era is
+merged into `main`; nothing is left to merge. Paused tasks have a `HANDOFF:` note
+(`tools/task.sh show <ID>`), whose `branch=` field is obsolete for those (docs/workflow.md
+"History").
 
 **Headline: 01.09 reached the main menu** (T028, 11:11): New Game / Play Online / Split Screen /
 Options / Extras, Profile Guest1. The intro is Loading, ESRB with the car, Powered by Unreal, the
@@ -38,35 +39,22 @@ task, 16 per frame, and they never exit: 123 at 45 s, 561 at 300 s. All of them 
 0x0133B880 (taskset 0x01335080's lock) through the one global `spu_lockline_lock`, which is 83% of
 all perf samples. The game runs at ~0.4 fps and uses ~1500% CPU. At ~297 s the taskset runs out of
 its 128 task ids ("PhysX: Error starting spurs task"). The fix is T033 (a ~6-thread SPURS worker
-pool, and why the tasks never exit). Boots run one at a time: `tools/task.sh lock boot ...`.
+pool, and why the tasks never exit). Boot one game at a time.
 
 **User plan (2026-10-19), in order:**
 1. ~~Menus~~ reached.
 2. Now: **SPU performance, easy wins only.** Measured (`tools/spu_profile.sh`), bit-exact,
    nothing deep; bigger ideas become proposed tasks.
-3. When the easy wins are done: wrap up and stop all agents.
-4. The coordinator audits the project (read-only sweeps on Sonnet/Haiku, fixes by the coordinator)
-   for cleanliness, tidiness and extensibility: docs vs. reality, the patch stack, scripts,
-   overrides, the task board, the ~25 stale worktrees and branches under `.claude/worktrees/`.
+3. When the easy wins are done: audit the project for cleanliness, tidiness and extensibility
+   (T039).
 
-**Restart these (5 slots):**
-
-| Task | Model | What is next (from its HANDOFF) |
-|---|---|---|
-| T033 SPU host threads | Opus | SPURS worker pool (~6 host threads instead of one per task); why PhysX tasks never exit. Biggest win |
-| T030 SPU busy-waits | Opus | GETLLAR re-read backoff + wait on `ch_wait_cv`; index coherence contexts by line; PUTLLC-fail backoff |
-| T032 DMA/MFC | Opus | fast paths; the rest of the `mfc_for` rwlock |
-| T031 lifter codegen | Opus | cheap wins in `spu_lifter.py` output |
-| T029 profiler | Sonnet | one end-to-end re-run of `tools/spu_profile.sh` after the `--no-inline` edit; name SPU threads |
-
-**Next in line:** T025 (Opus: force-inline SSE4.1 shufb, mixer to real time), T036 (Sonnet:
-`boot_check --pad`), T035 (Sonnet: broken entry-args test), T024 (Opus: ShaderPatching chain
-0x012B6F00 throughput, ~25 parks per frame), T037 (arena hang after New Game), T038 ("Loading..."
-drawn upside down), T034 (callback stack lock + TLS).
-
-**After the SPU easy wins and the audit, by priority:** T037, T038, T007 rest (silent audio),
-T008 follow-ups, T020 rest, T017 (saves), T021 rest, T012, T009, T018, T005, T010, T011, T013,
-T014. T015 multiplayer stays **blocked** (user permission needed).
+**Queue:** the board's `Priority:` lines (`tools/task.sh list` / `next`). The order now: T033 (SPURS
+worker pool, biggest win), T030 (busy-waits), T029 (profiler rerun; measure every SPU change with
+it), T032 (DMA/MFC), T031 (lifter codegen), T025 (SSE4.1 shufb, mixer to real time), T036
+(`boot_check --pad`), T035 (entry-args test), T024 (ShaderPatching chain throughput), T034
+(callback stacks), **T039 the audit** (alone), T037 (hang after New Game), T038 (upside-down
+Loading), then T007, T020, T017, T021, T012, T009, T018, T005, T010, T011, T013, T014. T015
+multiplayer is **blocked** (user permission needed). T028 (ESRB to menus) is done.
 
 Before building `main`: `tools/apply_patches.sh`, then reconfigure CMake.
 
@@ -103,8 +91,8 @@ Before building `main`: `tools/apply_patches.sh`, then reconfigure CMake.
 
 ## Next steps
 
-The work is split into tasks on the board: `tools/task.sh list` (protocol:
-[agents-workflow.md](agents-workflow.md)). Highest value first:
+*(Historical, from session 2; the live queue is "Resume here".)* The work is split into tasks on
+the board: `tools/task.sh list` (protocol: [workflow.md](workflow.md)). Highest value first:
 
 1. **T001** — find and fix the stall after package loading (the boot frontier).
 2. **T002** — `sys_prx_load_module`/`start_module` are unresolved: SPUJOBS.SPRX (Edge
@@ -125,6 +113,23 @@ The work is split into tasks on the board: `tools/task.sh list` (protocol:
 - Does the upstream POSIX boot scaffold get a UE3-sized title to `main` on Linux?
 
 ## Log
+
+### 2026-10-19 (session 8): agents the user starts, no subagents
+- User: running many subagents used too much usage. The user now starts each agent themselves
+  (Claude Code, pi, Antigravity), one or several, and they share the task board; no agent
+  spawns subagents and there is no coordinator. `docs/agents-workflow.md` became
+  [workflow.md](workflow.md) (harness-neutral procedure, merging, pause/resume, history);
+  `docs/agent-brief.md` was removed. `tools/task.sh` gained `Priority:` lines and `next`, and
+  `list` shows claim owners and last activity. `tools/agent_setup.sh <agent>` creates
+  `.worktrees/<agent>`. The new `tools/merge_to_main.sh` lets each agent merge its own work
+  (merge lock, patch renumbering, board commit; tested in a throwaway clone). `Model:` lines
+  dropped; the audit is task T039. GEMINI.md points other harnesses at AGENTS.md.
+- Checked before cleanup: all 24 worktree branches have 0 commits beyond `main`, and every
+  ps3recomp commit in them is in the 36-patch stack (T003's overlay lift landed rebased, as 0008).
+  T028 closed (menus reached; follow-up is T037), and its main-menu capture was copied to
+  `captures/boot_check/20261019-111110-397302-T028-main-menu/`. The worktrees under
+  `.claude/worktrees/` (~22 GB of build trees and run logs) are safe to delete:
+  `git worktree remove --force --force <dir>` then `git branch -d worktree-agent-*`.
 
 ### 2026-10-19 (session 7): main menu reached; SPU bottleneck located
 - Resumed with 5 agents (limit raised from 3). Merged T025 (0028/0031/0032 + SPU `-march`), T027

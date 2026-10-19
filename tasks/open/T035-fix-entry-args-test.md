@@ -2,7 +2,7 @@
 
 Status: open
 Owner: -
-Model: sonnet
+Priority: 8
 Touches: patches/ps3recomp/T035-*.patch (tools/test_ppu_entry_arguments.py and its harness only)
 Reads: patches/ps3recomp/0004-sys-prx-load-module.patch
 

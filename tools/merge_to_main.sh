@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Merge this worktree's branch into main (docs/workflow.md "Finishing a task").
+# There is no coordinator: each agent merges its own verified work, under the
+# merge lock so two agents never merge at once. Run from your worktree, with
+# everything committed, built and verified:
+#
+#   tools/task.sh lock merge tools/merge_to_main.sh
+#
+#   1. merge main into your branch (stops on conflicts: resolve, commit, verify, rerun)
+#   2. renumber patches/ps3recomp/T###-*.patch to the next free 00NN- numbers, in
+#      their current (apply) order, and fix their names in patches/ps3recomp/README.md
+#   3. check the whole patch stack applies from the pin (tools/apply_patches.sh)
+#   4. fast-forward main in the main checkout, re-apply the patch stack there if it
+#      changed, and commit the task board (tasks/ lives uncommitted in the main checkout)
+set -euo pipefail
+
+WT=$(cd "$(dirname "$0")/.." && pwd)
+MAIN=$(dirname "$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir)")
+[ "$WT" != "$MAIN" ] || { echo "run this from your worktree, not the main checkout" >&2; exit 1; }
+BR=$(git -C "$WT" branch --show-current)
+[ -n "$BR" ] && [ "$BR" != main ] || { echo "your worktree must be on its own branch" >&2; exit 1; }
+[ -z "$(git -C "$WT" status --porcelain --untracked-files=no --ignore-submodules=all)" ] \
+    || { echo "commit your changes first" >&2; exit 1; }
+[ "$(git -C "$MAIN" branch --show-current)" = main ] || { echo "the main checkout is not on main" >&2; exit 1; }
+dirty=$(git -C "$MAIN" status --porcelain --untracked-files=no --ignore-submodules=all -- . ':!tasks')
+[ -z "$dirty" ] || { printf 'the main checkout has changes outside tasks/:\n%s\n' "$dirty" >&2; exit 1; }
+
+# 1. Bring main in.
+if ! git -C "$WT" merge -q --no-edit main; then
+    echo "merge conflicts with main: resolve them, commit, rebuild and verify, then rerun" >&2
+    exit 1
+fi
+
+# 2. Renumber this branch's patches.
+P=$WT/patches/ps3recomp
+last=$(cd "$P" && ls [0-9][0-9][0-9][0-9]-*.patch 2>/dev/null | tail -1 | cut -c1-4)
+n=$((10#${last:-0}))
+renamed=()
+for f in "$P"/T[0-9][0-9][0-9]-*.patch; do
+    [ -e "$f" ] || continue
+    old=$(basename "$f")
+    n=$((n + 1))
+    new=$(printf '%04d-%s' "$n" "$(sed -E 's/^T[0-9]{3}-([0-9]+-)?//' <<<"$old")")
+    git -C "$WT" mv "patches/ps3recomp/$old" "patches/ps3recomp/$new"
+    sed -i "s/$old/$new/g" "$P/README.md"
+    renamed+=("$old -> $new")
+done
+if [ ${#renamed[@]} -gt 0 ]; then
+    git -C "$WT" add patches/ps3recomp/README.md
+    git -C "$WT" commit -q -m "patches: renumber for merge ($(printf '%s; ' "${renamed[@]}" | sed 's/; $//'))"
+    printf 'renumbered: %s\n' "${renamed[@]}"
+fi
+
+# 3. The whole stack must apply from the pin.
+"$WT/tools/apply_patches.sh"
+
+# 4. Fast-forward main, sync its submodule, commit the board.
+before=$(git -C "$MAIN" rev-parse main)
+git -C "$MAIN" merge -q --ff-only "$BR"
+if ! git -C "$MAIN" diff --quiet "$before" main -- patches/ps3recomp; then
+    "$MAIN/tools/apply_patches.sh"
+fi
+if [ -n "$(git -C "$MAIN" status --porcelain -- tasks)" ]; then
+    git -C "$MAIN" add tasks
+    git -C "$MAIN" commit -q -m "tasks: board after merging $BR"
+fi
+echo "merged $BR into main: ${before:0:7}..$(git -C "$MAIN" rev-parse --short main)"
+echo "main's own builds are stale now; rebuild them when you next need them"

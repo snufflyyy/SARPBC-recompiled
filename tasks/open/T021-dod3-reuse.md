@@ -2,6 +2,7 @@
 
 Status: open
 Owner: -
+Priority: 17
 Touches: docs/dod3-reuse.md (new), docs/reference-ports.md, patches/ps3recomp/T021-*.patch (runtime/** and libs/** pieces NOT owned by an active task: see "Exclusions"), src/overrides/dod3_*.cpp (new)
 Reads: https://github.com/soyjxck/dod3-recomp and https://github.com/soyjxck/ps3recomp (both MIT), docs/reference-ports.md, tasks/claimed/*
 
@@ -22,7 +23,7 @@ Reads: https://github.com/soyjxck/dod3-recomp and https://github.com/soyjxck/ps3
    prompts, camera), write how to find the corresponding addresses in our EBOOT (strings,
    patterns, call sites) and propose follow-up tasks.
 
-## Exclusions (owned by active tasks, so only inventory these and tell the coordinator)
+## Exclusions (have their own tasks: only inventory these, and note what you find on that task)
 SPURS queue/LFQueue (T019), MultiStream/MP3/audio (T007), input incl. kbm/camera (T008),
 HLE wait gaps (T020), lifter perf `--nonvolatile-locals`/`--hook` (T009, open).
 

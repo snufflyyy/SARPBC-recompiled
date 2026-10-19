@@ -2,6 +2,7 @@
 
 Status: open
 Owner: -
+Priority: 2
 Touches: patches/ps3recomp/T030-*.patch (runtime/spu/spu_channels.c, runtime/spu/spu_coherency.*, runtime/spu/spu_context.h for a cached engine pointer only)
 Reads: T022 notes (GETLLAR 0x0133B880 spin), T028 notes, docs/subsystems.md
 

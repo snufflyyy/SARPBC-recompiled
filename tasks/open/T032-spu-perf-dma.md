@@ -2,6 +2,7 @@
 
 Status: open
 Owner: -
+Priority: 4
 Touches: patches/ps3recomp/T032-*.patch (runtime/spu/spu_dma.h, runtime/spu/spu_drain.c, runtime/spu/spu_lockstep.*)
 Reads: tasks/*/T027* (the mfc_for rwlock), docs/subsystems.md
 

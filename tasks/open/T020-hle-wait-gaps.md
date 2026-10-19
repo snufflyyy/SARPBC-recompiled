@@ -2,6 +2,7 @@
 
 Status: open
 Owner: -
+Priority: 15
 Touches: patches/ps3recomp/T020-*.patch (libs/system/cellMsgDialog*, libs/misc/cellMusic*, libs/audio/cellVoice*, runtime/ppu/ppu_hle.cpp unresolved reporting, libs/misc/cellVideoExport*/cellVideoUpload*/cellGameRecording* names), docs/hle-coverage.md
 Reads: docs/hle-coverage.md (T004's ranked gaps), analysis/imports_named.json (both versions)
 

@@ -15,9 +15,9 @@ you are touching instead of re-scanning the tree or the game files.
 The PPU lift, all 15 SPU images, the 2 SPUJOBS jobs and the MultiStream overlay build on 01.02 and
 01.09, with 36 ps3recomp patches. The game runs at ~0.4 fps because PhysX starts one host thread per
 SPURS task, the tasks never exit, and they all spin on one global lock-line lock (~1500% CPU).
-Next is the SPURS worker pool (T033) and other easy SPU wins. Work runs in parallel through the
-task board ([docs/agents-workflow.md](docs/agents-workflow.md)); **resume from
-[docs/status.md](docs/status.md) "Resume here"**.
+Next is the SPURS worker pool (T033) and other easy SPU wins. Agents the user starts (Claude Code,
+pi, Antigravity) take tasks from the board by priority ([docs/workflow.md](docs/workflow.md));
+**resume from [docs/status.md](docs/status.md) "Resume here"**.
 
 ## Key facts
 
@@ -53,13 +53,14 @@ task board ([docs/agents-workflow.md](docs/agents-workflow.md)); **resume from
    address and what it does, a hang and its cause, a tool quirk, a dead end, a number),
    write it into the matching `docs/*.md` **in the same change** as the code, and log it
    on your task (`tools/task.sh note`). A new topic gets a new doc plus a row in the index
-   below. Mark guesses as guesses and give the evidence (log line, address, command). The
-   coordinator keeps [docs/status.md](docs/status.md) and the current-state paragraph
-   above up to date.
-5. **Parallel agents follow [docs/agents-workflow.md](docs/agents-workflow.md)**: claim a task
-   on the board before working; your own worktree; write only inside your task's
-   *Touches* paths; builds under `tools/task.sh lock cpu`; never `pkill` the game by
-   name; no relifting into the shared tree; commit on your branch, never into `main`.
+   below. Mark guesses as guesses and give the evidence (log line, address, command). Keep
+   [docs/status.md](docs/status.md) and the current-state paragraph above up to date.
+5. **Every agent follows [docs/workflow.md](docs/workflow.md)**, whatever its harness: take a
+   task with `tools/task.sh next` and claim it; work in your own worktree (`tools/agent_setup.sh
+   <agent>`) inside the task's *Touches*; builds under `tools/task.sh lock cpu`, boots under
+   `lock boot`; never `pkill` the game by name; merge your own verified work with
+   `tools/merge_to_main.sh`; leave a HANDOFF note before stopping. **Don't spawn subagents**:
+   the user starts every agent.
 6. Linux is not yet a proven boot platform upstream (see
    [docs/build-linux.md](docs/build-linux.md)); expect to fix POSIX/Vulkan gaps and keep
    those fixes upstreamable.
@@ -67,12 +68,13 @@ task board ([docs/agents-workflow.md](docs/agents-workflow.md)); **resume from
 ## Repo layout (planned — create as you go, update here if it changes)
 
 ```
-AGENTS.md  CLAUDE.md         agent entry points (CLAUDE.md just imports this file)
+AGENTS.md  CLAUDE.md GEMINI.md   agent entry points (CLAUDE.md and GEMINI.md just import this file)
 docs/                        technical docs, one topic per file (index below)
 Supersonic Acrobatic ... (USA)/   original .pkg + .rap — read-only, git-ignored
 external/ps3recomp/          git submodule, pinned; override with $PS3RECOMP
 patches/ps3recomp/           our patches against the pinned upstream (+ README: how/why)
 tasks/{open,claimed,done}/   the task board (tools/task.sh); live copy is in the main checkout
+.worktrees/<agent>/          one git worktree per agent (tools/agent_setup.sh) — git-ignored
 vfs/dev_hdd0/game/NPUB30035/ extracted install (PARAM.SFO, USRDIR/...) — git-ignored
 game/                        decrypted EBOOT.elf, SPUJOBS.prx — git-ignored
 analysis/                    ppu_loader / imports / SPU image output — git-ignored
@@ -82,7 +84,7 @@ src/main.cpp src/stubs.cpp   from the ps3recomp project template
 src/overrides/               native replacements / per-NID fixes (edgezlib.cpp, ...)
 src/recomp/ src/spu_gen/     GENERATED (lift, NID table, SPU) — git-ignored
 tools/                       extract.sh decrypt.sh relift.sh run.sh apply_patches.sh
-                             split_toc_stubs.py task.sh agent_setup.sh
+                             split_toc_stubs.py task.sh agent_setup.sh merge_to_main.sh boot_check.sh
 CMakeLists.txt  config.toml
 ```
 
@@ -114,8 +116,7 @@ Details and every flag: [docs/pipeline.md](docs/pipeline.md).
 | [docs/dod3-reuse.md](docs/dod3-reuse.md) | Before writing anything new: what Drakengard 3's port / fork already has, what's ported, what's next (partial inventory) |
 | [docs/subsystems.md](docs/subsystems.md) | Working on graphics, audio, input, SPU/SPURS, saves, video, network, trophies |
 | [docs/debugging.md](docs/debugging.md) | Something hangs, crashes or draws wrong; `tools/boot_check.sh` (paste the first line of `analysis/boot_report.txt` into task notes), env vars, triage recipes |
-| [docs/agents-workflow.md](docs/agents-workflow.md) | Before any work in parallel: task board, claiming, worktrees, locks, merge flow, **pausing and resuming** |
-| [docs/agent-brief.md](docs/agent-brief.md) | The prompt every subagent is spawned with (fill in agent, task) |
+| [docs/workflow.md](docs/workflow.md) | Before any work: task board, claiming, worktrees, locks, merging, **pausing and resuming** |
 | [docs/hle-coverage.md](docs/hle-coverage.md) | Which firmware imports have HLE handlers (stub/impl), named NIDs, ranked gaps (`tools/hle_coverage.py`) |
 
 ## Working conventions
@@ -127,12 +128,6 @@ Details and every flag: [docs/pipeline.md](docs/pipeline.md).
 - RPCS3 is a behavioural reference only — never copy its (GPL) code into this tree.
 - Long-running steps (full PKG extract, a full lift, a full build) take minutes; run them
   in the background and do not repeat them without cause.
-- **Claude Code: hand work to a smaller model wherever it fits.** Use **Sonnet 5.5**
-  (`model: "sonnet"` on the Agent tool) for real work, and **Haiku 5.5** (`model: "haiku"`) only
-  for read-only code and doc searches ("where is X", "list every Y"), never for edits or
-  judgement calls. Sonnet fits well-scoped, easily checked work: tooling scripts, audit
-  sweeps, mechanical ports and compile fixes, tests for behaviour already understood. Keep frontier
-  debugging (GCM/SPURS stalls), SPU or runtime concurrency and lifter codegen on the main
-  model. A task file's `Model: sonnet` line marks it; the coordinator reviews every diff the
-  same way whatever the model. Details: [docs/agents-workflow.md](docs/agents-workflow.md)
-  "Coordinator procedure".
+- **No subagents.** Don't spawn subagents (Claude Code's Agent tool, workflows, or another
+  harness's equivalent) unless the user asks: they used too much usage (user, 2026-10-19). The
+  user runs more agents in parallel by starting them, and they coordinate through the board.

@@ -2,6 +2,7 @@
 
 Status: open
 Owner: -
+Priority: 16
 Touches: patches/ps3recomp/T017-*.patch (libs/filesystem/cellSaveData*.c, libs/system/cellGame*.c), src/overrides/save_*.cpp (new), docs/subsystems.md (Save data bullet only)
 Reads: versions/0109/analysis/imports_named.json, external/ps3recomp/libs/filesystem/, docs/game-profile.md
 

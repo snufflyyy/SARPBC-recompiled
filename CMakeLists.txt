@@ -12,10 +12,10 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-# Compiler cache shared by every worktree of this repo (agents work in their own
-# worktrees; see docs/agents-workflow.md). The cache lives in the MAIN checkout,
-# and CCACHE_BASEDIR makes paths relative to each worktree, so the 7.5M lifted
-# lines compile once and every other worktree's build hits the cache.
+# Compiler cache shared by every build dir (and every git worktree, if any) of this
+# repo. The cache lives in the MAIN checkout, and CCACHE_BASEDIR makes paths
+# relative to the source tree, so the 7.5M lifted lines compile once and other
+# build dirs and worktrees hit the cache.
 option(SARPBC_CCACHE "Compile through ccache with a repo-wide shared cache" ON)
 find_program(CCACHE_PROGRAM ccache)
 if(SARPBC_CCACHE AND CCACHE_PROGRAM)

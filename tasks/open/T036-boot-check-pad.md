@@ -2,7 +2,7 @@
 
 Status: open
 Owner: -
-Model: sonnet
+Priority: 7
 Touches: tools/boot_check.sh, tools/boot_report.py (only if needed), docs/debugging.md (boot_check section)
 Reads: tasks/*/T028* (HANDOFF: the PAD_FILE loop), tasks/done/T008*
 

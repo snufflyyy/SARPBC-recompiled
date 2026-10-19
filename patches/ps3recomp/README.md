@@ -69,8 +69,9 @@ order we expect to need them (details in `docs/reference-ports.md`):
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `git -C external/ps3recomp format-patch -1 -o ../../patches/ps3recomp/ --start-number N`.
-Agents working in parallel name theirs `T###-description.patch`; the coordinator
-renumbers them on merge.
+On a task branch, name it `T###-description.patch` (`T###-1-...`, `T###-2-...` for several, in
+apply order) and add its row to the table above; `tools/merge_to_main.sh` gives it the next free
+number when it merges (docs/workflow.md).
 
 Upstream's unit tests assume macOS's `-dead_strip`. On Linux, build them with
 `-ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,-z,muldefs` and a no-op shim for

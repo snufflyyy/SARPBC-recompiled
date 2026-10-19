@@ -2,6 +2,7 @@
 
 Status: open
 Owner: -
+Priority: 9
 Touches: patches/ps3recomp/T024-*.patch (libs/gcm/**, runtime/rsx/**, libs/video/** only), src/overrides/gcm_*.cpp (new), docs/subsystems.md (Graphics section only)
 Reads: docs/dod3-reuse.md (T023's ranked GCM list), docs/debugging.md, tasks/done/T023*
 

@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
-# Task board and locks for agents working in parallel (docs/agents-workflow.md).
+# Task board and locks for the agents the user starts (docs/workflow.md): Claude
+# Code, pi, Antigravity, ... each under its own name. No agent spawns another.
 #
 # The board is tasks/{open,claimed,done}/<ID>-<slug>.md in the MAIN checkout,
 # whichever worktree this runs from, so every agent sees the same live state.
 # Claiming is a rename(2) of the task file from open/ to claimed/: atomic, so
 # exactly one agent wins; the loser gets "already claimed".
+# Queue order is each task's "Priority:" line (lower first; "blocked" = never
+# picked; no line = last).
 #
-#   tools/task.sh list
+#   tools/task.sh list                               # open by priority; claimed with owner + last activity
+#   tools/task.sh next                               # the open task to take next, and what is claimed
 #   tools/task.sh show    <ID>
 #   tools/task.sh claim   <ID> <agent>
 #   tools/task.sh note    <ID> <agent> <text...>     # append to the task's log
 #   tools/task.sh done    <ID> <agent> <summary...>
 #   tools/task.sh release <ID> <agent> <reason...>   # back to open/
-#   tools/task.sh new     <slug> <title...>           # coordinator: next free ID
+#   tools/task.sh new     <slug> <title...>           # next free ID
 #   tools/task.sh lock    <name> <command...>         # run under $MAIN/.locks/<name>.lock
 set -euo pipefail
 
@@ -28,18 +32,41 @@ find_task() {   # find_task <ID> <state...> -> path or empty
     done
 }
 log() { printf -- '- %s %s: %s\n' "$(now)" "$2" "$3" >> "$1"; }
+field() { grep -m1 "^$2:" "$1" | cut -d' ' -f2- || true; }   # field <file> <name>
+prio() {        # prio <file> -> sort key
+    local p; p=$(field "$1" Priority)
+    case "$p" in blocked) echo 9999 ;; ''|*[!0-9]*) echo 999 ;; *) echo "$p" ;; esac
+}
+open_by_prio() {    # open task files, queue order
+    for f in "$B/open"/*.md; do [ -e "$f" ] && printf '%s\t%s\n' "$(prio "$f")" "$f"; done | sort -n -k1,1 -s | cut -f2
+}
+last_log() { grep -E '^- [0-9]{4}-' "$1" | tail -1 | cut -c3-18; }
 
 cmd=${1:-list}; shift || true
 case "$cmd" in
 list)
-    for s in open claimed done; do
-        echo "== $s"
-        for f in "$B/$s"/*.md; do
-            [ -e "$f" ] || continue
-            owner=$(grep -m1 '^Owner:' "$f" | cut -d' ' -f2- || true)
-            printf '  %-40s %s\n' "$(basename "$f" .md)" "${owner:+($owner)}"
-        done
-    done ;;
+    echo "== open (queue order)"
+    open_by_prio | while read -r f; do
+        printf '  P%-8s %s\n' "$(field "$f" Priority)" "$(basename "$f" .md)"
+    done
+    echo "== claimed"
+    for f in "$B/claimed"/*.md; do
+        [ -e "$f" ] || continue
+        printf '  %-40s (%s, last log %s)\n' "$(basename "$f" .md)" "$(field "$f" Owner)" "$(last_log "$f")"
+    done
+    echo "== done"
+    for f in "$B/done"/*.md; do [ -e "$f" ] && printf '  %s\n' "$(basename "$f" .md)"; done ;;
+next)
+    echo "== claimed (don't overlap their Touches)"
+    for f in "$B/claimed"/*.md; do
+        [ -e "$f" ] || continue
+        printf '  %s (%s): %s\n' "$(basename "$f" .md)" "$(field "$f" Owner)" "$(field "$f" Touches)"
+    done
+    echo "== next open, in order"
+    open_by_prio | while read -r f; do
+        [ "$(field "$f" Priority)" = blocked ] && continue
+        printf '  P%-4s %s\n         Touches: %s\n' "$(field "$f" Priority)" "$(basename "$f" .md)" "$(field "$f" Touches)"
+    done | head -9 ;;
 show)
     f=$(find_task "$1" open claimed done); [ -n "$f" ] || { echo "no task $1" >&2; exit 1; }
     cat "$f" ;;
@@ -77,11 +104,11 @@ new)
     n=$(( 10#${last#T} + 1 ))
     id=$(printf 'T%03d' "$n")
     f=$B/open/$id-$slug.md
-    printf '# %s: %s\n\nStatus: open\nOwner: -\nTouches: \nReads: \n\n## Goal\n\n## Done when\n\n## Log\n' "$id" "$*" > "$f"
+    printf '# %s: %s\n\nStatus: open\nOwner: -\nPriority: \nTouches: \nReads: \n\n## Goal\n\n## Done when\n\n## Log\n' "$id" "$*" > "$f"
     echo "$f" ;;
 lock)
     name=$1; shift
     exec flock "$MAIN/.locks/$name.lock" "$@" ;;
 *)
-    sed -n '2,17p' "$0"; exit 1 ;;
+    sed -n '2,23p' "$0"; exit 1 ;;
 esac
