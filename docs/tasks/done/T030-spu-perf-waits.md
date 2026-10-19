@@ -1,6 +1,6 @@
 # T030: SPU perf: busy-wait loops (GETLLAR reservation spins, channel waits, idle SPURS kernels)
 
-Status: claimed
+Status: done
 Owner: pi
 Priority: 2
 Touches: patches/ps3recomp/T030-*.patch (runtime/spu/spu_channels.c, runtime/spu/spu_coherency.*, runtime/spu/spu_context.h for a cached engine pointer only)
@@ -39,3 +39,5 @@ Before/after numbers in docs/subsystems.md (SPU/SPURS section, your own subsecti
 - 2026-10-19 23:30 pi: Patch exported and complete stack replayed cleanly: 55 commits on pinned 39a3629 (37 patch files). Replayed toolkit tree is identical to the measured/tested b11f634 tree. Clang registry suite passes again after replay; gcc and ASan/UBSan already green. Profiler regression rerun passes (~16s). Final post-replay build queued under cpu lock.
 - 2026-10-19 23:33 pi: Post-replay build succeeded (only 69 incremental/cache steps). Default GCM settings, rebuilt-tree smoke: boot_check 2026-10-19 23:33 v01.09 70d7773+dirty 20s: PROGRESSING | last open TEXTURES.TFC@9.1s | pkgs 13 (GUIDCACHE last) | zlib 3279 | dumps 10 lit 10 distinct 6 | flips 273 | threads 13/9 alive | unresolved 0 | alerts assert,blocked
 - 2026-10-19 23:34 pi: Self-review PASS: no ABI/guest semantic changes, both index cleanup paths tested, no dependencies/secrets/game data, no task-pool overlap. Code whitespace clean. git diff --check on the added mail patch reports required unified-diff context spaces and format-patch signature/EOF (format data, not source); full git-am replay passes. Commits b1d85a3 (profiler fallback) and abe90b7 (registry patch/docs), ready to merge.
+- 2026-10-19 23:34 pi: HANDOFF: done=reservation-holder pointer index exported as 0037-spu-coherence-context-index.patch, collision/lifecycle tests + benchmark, profiler fallback fix; state=merged and pushed to origin/main at 2712c86, 37 patch files/55 commits on pin, build + 20s default-GCM smoke verified; next=Claude continues T033 worker pool (CPU/thread accumulation not fixed here), T029 mixer report remains open; branch=pi/work.
+- 2026-10-19 23:34 pi: DONE: Merged/pushed patch 0037: constant-average-time holder lookup, unchanged reservation semantics/ABI. Clang+GCC 558/634/2456/51 checks and allocation failure tests, ASan/UBSan, full patch replay, rebuild/default boot pass. ABBA 60s boots: 588–589 vs 320–374 flips; CPU/mixer unchanged, T033 remains critical.
