@@ -2,7 +2,7 @@
 
 Status: open
 Owner: -
-Touches: src/overrides/audio_*.cpp (new), patches/ps3recomp/T007-*.patch (libs/audio/**, runtime/spu/** only for audio), docs/subsystems.md (Audio section only)
+Touches: tools/make_spu_overlays.py + its relift.sh step (coordinator-approved 2026-10-19), src/overrides/audio_*.cpp (new), patches/ps3recomp/T007-*.patch (libs/audio/**, runtime/spu/** only for audio), docs/subsystems.md (Audio section only)
 Reads: analysis/spu_EBOOT_elf/ (images 12-14 mstream_dsp_*), docs/reference-ports.md (dod3 src/apu/)
 
 ## Goal

@@ -12,7 +12,7 @@ hangs on job guard `0x0133AA80` / event flag `0x01372000` (MultiStream). No agen
 **Unmerged WIP branches** (git worktrees under `.claude/worktrees/`; their HANDOFF notes are on the tasks):
 - `worktree-agent-ab345549dd2d5074c`: **T008** controls (dod3 cellPad port + racing fixes, SDL test
   passes; `src/overrides/input_config.cpp` was never compiled, so build it before merging).
-- T007 audio: see its task's HANDOFF note for the branch (wrapping up when the session paused).
+- `worktree-agent-acc9f9ae8ed145a97`: **T007** audio (Linux cellAudio pacing at 187.5 blocks/s with 0 underruns on PipeWire; /dev_flash default; dod3 stand-in flashMP3.pic + native MP3 decoder). Still silent: the MultiStream DSP plugin block at LS 0x37000 is not lifted (`SPU_INTERP_UNLIFTED=1` works around it). Next: port dod3 `tools/make_spu_overlays.py` plus a relift.sh step.
 
 **Open tasks, by priority:** T022 (01.09 frontier), T007 (audio, resume from HANDOFF), T008
 (controls, resume from HANDOFF), T023 (fork fixes), T020 (remaining: unresolved-NID reporting,
