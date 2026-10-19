@@ -70,7 +70,8 @@ rm -f "$RECOMP/ppu_hle_nids.cpp"
 # instructions (section-stripped 01.09 images used to lift their .rodata as code),
 # but some have executable bytes outside any detected function (padding / literal
 # pools), which strict mode refuses to register. The SPU interpreter covers a miss.
-# Images with overlapping PT_LOADs (PhysX, 01.02 image 7) are skipped for now (T003).
+# With patches 0007/0008 overlay images (PhysX Dynamics) lift too: 15/15 registered,
+# complete, on both 01.02 and 01.09 (2026-10-18).
 rm -rf "$SPU"
 "$PY" "$PS3RECOMP/tools/build_spu_workloads.py" --input "$ELF" \
     --lifted "$SPU" --out "$SPU/spu_workloads.c" \

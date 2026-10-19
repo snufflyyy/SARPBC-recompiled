@@ -210,7 +210,7 @@ and the frame rate is uncapped in the engine.
 | Entry OPD / TOC | `0x1BE8EC0` / `0x1C6EA28` | `0x12018A8` → `0xADB68` / `0x123C6D0` |
 | TOC-switch stub runs | 2 (4,242 stubs) | 0 |
 | Imports | 274 / 20 libs, 17 unnamed | 288 / 21 libs, 20 unnamed |
-| SPU images registered | 14/15 (15/15 with T003) | 14/15 (patch 0006; 12/15 before) |
+| SPU images registered | 15/15 + 2 SPUJOBS jobs (patches 0006-0008) | 15/15 + 2 SPUJOBS jobs (12/15 before 0006) |
 
 Import changes in 01.09: **+cellGame** (BootCheck, DataCheck, ContentPermit,
 CreateGameData, GetParamString, GetSizeKB, ContentErrorDialog), **+cellPngDec** (7),
