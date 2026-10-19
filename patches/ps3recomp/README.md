@@ -53,6 +53,10 @@ order we expect to need them (details in `docs/reference-ports.md`):
 | `0021-sys-fs-overlay-hdd0-symlinks.patch` | T023: fork 0119/0131/0132: `PS3_VFS_OVERLAY`, existing `/dev_hdd0` paths used directly, readdir lists symlinked dirs as dirs | fork author's work |
 | `0022-spurs-task-error-codes.patch` | T023: `CELL_SPURS_TASK_ERROR_*` use the SDK's 0x804109xx values (were 0x804107xx) | to offer |
 | `0023-audio-pacing-devflash-sig-region.patch` | T007: POSIX cellAudio pacing (+ `AUDIO_RATE`/`AUDIO_PEAK`/`AUDIO_WAV`), `/dev_flash` default off a Windows path, `spu_overlay_register_sig_region` (register an overlay by its first bytes over a span; used by `tools/make_spu_overlays.py`) | to offer |
+| `0024-spurs-job-chain-rewalk-resume-guard.patch` | T022: a RunJobChain that arrives mid-walk queues a re-walk (it was dropped, so ShaderPatching jobs that release FIFO parks never ran); walks resume where they stopped; a never-notified guard waits 200 ms, not 20 s. Ported from soyjxck/ps3recomp 26fdd50, 0f2870a, 6371138 (MIT) | fork author's work |
+| `0025-gcm-user-command-queue.patch` | T024: fork 0018 (soyjxck d2e6c1b): user commands queue in order instead of sharing one slot | fork author's work |
+| `0026-gcm-pump-fast-exit.patch` | T024: fork 0139 (soyjxck b6e4e18): GCM pump fast exit | fork author's work |
+| `0027-gcm-intr-thread-park-handling.patch` | T024: the stuck-get watchdog no longer resyncs away from a jump-to-itself park; `GCM_PARK_GRACE_MS` (50), `GCM_PARK_LOG`, opt-in `GCM_INTR_THREAD=1` host interrupt thread for vblank/flip/user handlers | to offer |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `git -C external/ps3recomp format-patch -1 -o ../../patches/ps3recomp/ --start-number N`.

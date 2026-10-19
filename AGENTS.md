@@ -11,14 +11,14 @@ you are touching instead of re-scanning the tree or the game files.
 
 ## Current state (keep this line true)
 
-**Phase 7: boots on Linux through Vulkan's "Loading..." screen; target version is 01.09.**
-The PPU lift and all 15 SPU images (plus the 2 SPUJOBS jobs) build on both 01.02 and 01.09,
-with patches 0001-0015 and the Edge zlib override. 01.09 loads its packages, gets through
-PhysX init (cellOvis, SPURS queues) and then stalls: the SPURS job guard `0x0133AA80` stays
-closed (T022), and the MultiStream event flag `0x01372000` blocks because the DSP block at
-LS 0x37000 is not lifted (T007; `SPU_INTERP_UNLIFTED=1` works around it). Work runs in
-parallel through the task board ([docs/agents-workflow.md](docs/agents-workflow.md)). Live
-status and next steps: [docs/status.md](docs/status.md).
+**Phase 7: 01.09 reached the legal/ESRB screen in a local test; next goal is the main menu.**
+The PPU lift and all 15 SPU images (plus the 2 SPUJOBS jobs and the MultiStream DSP overlay) build
+on both 01.02 and 01.09 with 27 ps3recomp patches. 01.09 loads its packages and gets through PhysX
+init. The stall that followed had three causes: GCM labels sitting under the game's heap (fixed
+by an override), lost SPURS job-chain runs (fixed, 0024), and the GCM watchdog skipping FIFO parks
+(0027 plus an experiment that still needs reconciling). Work runs in parallel through the task
+board ([docs/agents-workflow.md](docs/agents-workflow.md)); **resume from
+[docs/status.md](docs/status.md) "Resume here"**.
 
 ## Key facts
 

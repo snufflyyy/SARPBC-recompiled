@@ -3,38 +3,52 @@
 Living document. Update the phase table, "Next steps" and the log at the end of each
 work session. Newest log entry first. Use absolute dates.
 
-## Resume here (running again 2026-10-19, max 3 agents)
+## Resume here (paused 2026-10-19 for usage)
 
-**Priority (user, 2026-10-19): get 01.09 into the menus.** Every slot works on the boot stall; features wait.
+**Priority (user): get 01.09 into the menus.** Every agent slot goes to the boot until then.
+At most **3** agents.
 
-**State:** `main` builds both versions with **23 ps3recomp patches** (`tools/apply_patches.sh`).
-01.09 boots past the loading screen, package loading and PhysX init (SPURS queues work), then
-hangs on job guard `0x0133AA80` / event flag `0x01372000` (MultiStream).
+**Headline:** T022 reached the **legal/ESRB screen with a 3D car rendered** on 01.09 by
+combining three fixes (`PROGRESSING | last open TEXTURES.TFC@6.1s | flips 106`, 90 s,
+`SPU_INTERP_UNLIFTED=1`). Two of them are merged; the third (GCM) exists in two overlapping
+forms that still need reconciling. Nobody has booted `main` as merged yet.
 
-**Merged 2026-10-19:** T008 controls: dod3 cellPad port (0016), racing fixes (0017),
-`src/overrides/input_config.cpp` + `input_kbm.cpp` (keyboard/mouse as pad 0, car defaults in
-config.toml). R2=128 seen in the game's pad buffer (0x0FEFF360). Held keys and rumble are
-unverified until the loading stall is fixed. Note: `PAD_TRIGGERS` times from the first
-GetData (~4.0 s on 01.09), not from launch.
+**State of `main`:** 27 ps3recomp patches (`tools/apply_patches.sh` -> 45 commits on 39a3629).
+- 0024 (T022): SPURS job chains re-walk and resume, and a never-notified guard waits 200 ms.
+  Guard 0x0133AA80 itself was a red herring (an idle service chain on its own thread).
+- `src/overrides/gcm_inject_base.cpp` (T022): moves the GCM window to 0x1FF00000. The game's
+  256 MB raw reservation at 0x000DFA68 lands at 0x20000000, on top of the GCM labels.
+- 0025-0027 (T024): GCM user-command queue, pump fast exit, and the watchdog no longer
+  skipping jump-to-itself parks (`GCM_PARK_GRACE_MS`, `GCM_PARK_LOG`, opt-in `GCM_INTR_THREAD`).
+- 0023 (T007): MultiStream DSP overlay; audio no longer blocks the boot.
+- Also merged today: 0016-0017 (controls), 0018-0022 (fork generic fixes).
 
-**Merged 2026-10-19:** T023 fork fixes 0018-0022 (SPU task stack UAF, lwcond wake, PPU slot reclaim,
-sys_fs overlay, SPURS task error codes); boot unchanged (stall at 21.6 s). New lead: GCM FIFO
-parks on a jump-to-self at io 0x8B144 (T024).
+**Resume plan (in this order):**
+1. **T025, merge + relift:** merge branch `worktree-agent-a4cc29237e98a2e6f`. It patches the SPU
+   finder so it seeds `.ctors/.dtors`; PhysX's "unlifted LS 0x20180" is a static constructor.
+   Renumber its patch to 0028, `tools/apply_patches.sh`, then relift both versions
+   (`tools/relift.sh`, and with `GAME_DIR=versions/0109/game OUT_DIR=versions/0109`). Boot
+   without `SPU_INTERP_UNLIFTED`. Its other half (x86 SIMD speed) is still open.
+2. **T024, resume:** reconcile `patches/experimental/T022-esrb-experiment.diff` hunk (1)
+   ("never skip a park") with patch 0027's 50 ms grace. T022 saw the flip-handler park released
+   only at the next HLE call, which comes after the grace. Try `GCM_INTR_THREAD=1` or
+   `GCM_PARK_GRACE_MS` large. Default whatever works for SARPBC in `src/overrides/gcm_config.cpp`.
+3. **T027:** writer-preferring rwlocks on Linux (experiment hunk 2). Without it the ESRB screen
+   stops after 8-25 s.
+4. Then: get from ESRB to the intro movies and main menu (new task). Open leads: PhysX
+   `HALT-ASSERT heqi pc=0x24884` and spinning on `GETLLAR 0x0133B880` (T022 notes); T026
+   (per-thread guest callback stacks: all callbacks share 0xCFFE0000, unsafe with
+   `GCM_INTR_THREAD`).
 
-**Merged 2026-10-19:** T007: MultiStream DSP block lifted at LS 0x37000 (`tools/make_spu_overlays.py`,
-patch 0023): flag 0x01372000 no longer blocks, `SPU_INTERP_UNLIFTED` not needed. Boot now:
-`STALLED since 22.2s | last open GUIDCACHE.XXX@7.2s | pkgs 13`. Sound still silent (nothing plays
-before the stall); the mixer runs at 27% of real time (T025). Remaining audio work: T007 HANDOFF.
+Steps 1-3 can run as 3 parallel agents (Touches don't overlap). A boot check after merging all
+three is the coordinator's job.
 
-**Running (all on the boot stall):** T022 (job guard 0x0133AA80, agent-frontier2), T024 (GCM FIFO
-jump-to-self at io 0x8B144, agent-gcm), T025 (PhysX unlifted LS 0x20180 + SPU x86 speed,
-agent-spuperf).
+**Branches not merged:** `worktree-agent-a4cc29237e98a2e6f` (T025 WIP, see step 1). All other
+agent branches are merged; their worktrees under `.claude/worktrees/` can be deleted.
 
-**Open tasks, by priority (after the menus):** T020 (remaining: unresolved-NID reporting,
-hle-coverage.md), T017 (saves), T021 (rest of the dod3 inventory), T012, T009, T018, T005,
-T010, T011, T013, T014. T015 multiplayer stays **blocked** (user permission needed).
-Follow-ups proposed by T008 (after the stall): windowed key/rumble check, mouse camera, button
-prompts by pad type.
+**After the menus, by priority:** T007 rest (silent audio, mixer at 27% of real time), T008
+follow-ups (windowed key/rumble check), T020 rest, T017 (saves), T021 rest, T012, T009, T018,
+T005, T010, T011, T013, T014. T015 multiplayer stays **blocked** (user permission needed).
 
 **To restart:** see docs/agents-workflow.md "Pausing and resuming"; spawn agents with
 docs/agent-brief.md. Before building `main`: `tools/apply_patches.sh`, then reconfigure CMake.
