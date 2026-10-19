@@ -32,3 +32,4 @@ in docs/subsystems.md.
 
 ## Log
 - 2026-10-18 23:49 agent-audio: claimed
+- 2026-10-18 23:54 agent-audio: 01.09 (+local cellOvis workaround): cellAudio Init/PortOpen(8ch,8blk)/PortStart OK (buf 0x58000000). MultiStream mixer = SPU image 0 (sha e33837bb, fp C1759183E2FF7448, task entry EA 0x010AF300), lifted, dispatched as taskset 0x01370680 task 0. It ends at 'branched into unlifted LS 0x37018 (lr 0x03930)': the DSP plugin block DMA'd to LS 0x37000 (same as dod3). Update thread then blocks on flag 0x01372000. SPU_INTERP_UNLIFTED=1 gets past it (no more BLOCKED on 0x01372000), but drain-resume host depth climbs per call. flashMP3.pic missing -> 'mp3 failed to load MP3 codec' + MFC GET size=0 at SPU pc 0x0B1C8 lsa 0x30B60.
