@@ -143,8 +143,40 @@ decoder from console firmware that a port has to replace — check whether we hi
 
 **`SPUJOBS.SPRX`** → `game/SPUJOBS.prx`: a PPU PRX (`e_type 0xFFA4`) with no SPU ELFs
 inside; its strings are **Edge Geometry** errors (vertex/index decompression, blend
-shapes, skinning). So it carries raw SPURS job images for Edge Geometry, run through
-job chains. Capture them with `SPU_DUMP_MISS` or carve them from the PRX.
+shapes, skinning). It is a **data-only module** that carries two raw SPURS job
+binaries (read from the file 2026-10-18, both versions):
+
+| | 01.02 (`game/SPUJOBS.prx`, 67,856 B) | 01.09 (`versions/0109/game/SPUJOBS.prx`, 51,344 B, sha256 `189316bc…`) |
+|---|---|---|
+| Segments | seg0 RX 0x0..0xFF00, seg1 RW 0xFF00..0xFF20 | seg0 RX 0x0..0xC000, seg1 RW 0xC000..0xC020 |
+| Job A (Edge Geometry) | seg0+0x100, 0xFC00 bytes | seg0+0x100, 0xBD80 bytes |
+| Job B (shader patching, see below) | seg0+0xFD80, 0x108 bytes | seg0+0xBE80, 0x108 bytes (different bytes) |
+| Relocations | 16, all `R_PPC64_ADDR32` | same 16, same targets |
+
+- Module name `SPUJobs`, version 1.1. **No imports.** Exports only the module-level
+  `module_start` (NID `0xBC9A0086`, OPD at seg1+0), `module_stop` (`0xAB779874`, OPD
+  seg1+8, `li r3,0; blr`) and `module_info` (`0xD7F43016`). TOC = seg1 + 0x8010.
+- `module_start(args, argp)` is 12 instructions, identical in both versions: it
+  loads TOC-0x8000..-0x7FF4 (seg1+0x10..0x1C) and stores them to `argp[0..3]` =
+  `{job A EA, job A size, job B EA, job B size}`; returns 0. The job binaries are
+  not touched by any relocation, so their bytes (and fingerprints) do not depend on
+  where the module loads.
+- Caller (01.02): `func_006E4450` (TOC `0x1C6EA28`) calls `sys_prx_load_module(path,
+  0, 0)` (lr `0x6E4A88`) after `sceNpDrmIsAvailable`, then `sys_prx_start_module(id,
+  4, argp=sp+0x98, modres=sp+0x70, 0, 0)` (lr `0x6E4B08`), and copies argp into
+  the globals `0x01D32690` (A EA), `0x01D32694` (A size), `0x01D32698` (B EA),
+  `0x01D3269C` (B size). It then calls `func_006DB6B8(0x01D32700)`, which creates the
+  "ShaderPatching" job chain (its command list is at `0x01D32700`).
+- Job B is what the ShaderPatching chain runs: `func_006DEBF8` / `006DECE0` /
+  `006DEE10` / `006DEF28` read B's EA/size, build a job with `func_006DE6D8(ea,
+  size)` and call `cellSpursRunJobChain`. Job A (EA/size) is read by
+  `func_006DF040`. (From reading the lifted code; the chain has not run yet in a
+  boot, so this is not observed at run time.)
+- Both are raw job binaries entered at LS 0 (first word `ila`), lifted by
+  `tools/lift_prx_jobs.py`; FNV-1a-64 fingerprints: 01.02 A `0xE13FC05B93FA6AF6`,
+  B `0x6982B12EFDE17A51` (0x108 B) / `0xC5F68493430B2E71` (0x110 B, the size a job
+  header names); 01.09 A `0x83BD7B3A22EDAF27`, B `0x9CA670E2D5FBFF30` /
+  `0xCC5206038B0FC530`. How it loads at run time: [subsystems.md](subsystems.md#spu--spurs).
 
 ## Versions and updates (researched 2026-10-18)
 
