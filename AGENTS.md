@@ -73,7 +73,7 @@ docs/                        technical docs, one topic per file (index below)
 Supersonic Acrobatic ... (USA)/   original .pkg + .rap — read-only, git-ignored
 external/ps3recomp/          git submodule, pinned; override with $PS3RECOMP
 patches/ps3recomp/           our patches against the pinned upstream (+ README: how/why)
-tasks/{open,claimed,done}/   the task board (tools/task.sh); live copy is in the main checkout
+docs/tasks/{open,claimed,done}/  the task board (tools/task.sh); live copy is in the main checkout
 .worktrees/<agent>/          one git worktree per agent (tools/agent_setup.sh) — git-ignored
 vfs/dev_hdd0/game/NPUB30035/ extracted install (PARAM.SFO, USRDIR/...) — git-ignored
 game/                        decrypted EBOOT.elf, SPUJOBS.prx — git-ignored

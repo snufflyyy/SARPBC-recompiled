@@ -2,7 +2,7 @@
 # Task board and locks for the agents the user starts (docs/workflow.md): Claude
 # Code, pi, Antigravity, ... each under its own name. No agent spawns another.
 #
-# The board is tasks/{open,claimed,done}/<ID>-<slug>.md in the MAIN checkout,
+# The board is docs/tasks/{open,claimed,done}/<ID>-<slug>.md in the MAIN checkout,
 # whichever worktree this runs from, so every agent sees the same live state.
 # Claiming is a rename(2) of the task file from open/ to claimed/: atomic, so
 # exactly one agent wins; the loser gets "already claimed".
@@ -21,7 +21,7 @@
 set -euo pipefail
 
 MAIN=$(dirname "$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir)")
-B=$MAIN/tasks
+B=$MAIN/docs/tasks
 mkdir -p "$B/open" "$B/claimed" "$B/done" "$MAIN/.locks"
 
 now() { date '+%Y-%m-%d %H:%M'; }

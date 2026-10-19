@@ -3,7 +3,7 @@
 Status: done
 Owner: agent-cbstack
 Touches: patches/ps3recomp/T026-*.patch (runtime/ppu/** guest-call path only), docs/ps3recomp-primer.md
-Reads: tasks/claimed|open/T024*, T022*
+Reads: docs/tasks/claimed|open/T024*, T022*
 
 ## Goal
 Found by T024: `ppu_guest_call` and `ppu_guest_call_ct` run every guest callback on the same stack,

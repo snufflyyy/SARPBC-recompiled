@@ -11,7 +11,10 @@
 #      their current (apply) order, and fix their names in patches/ps3recomp/README.md
 #   3. check the whole patch stack applies from the pin (tools/apply_patches.sh)
 #   4. fast-forward main in the main checkout, re-apply the patch stack there if it
-#      changed, and commit the task board (tasks/ lives uncommitted in the main checkout)
+#      changed, and commit the task board (docs/tasks/ lives uncommitted in the main
+#      checkout)
+#   5. push main to origin, if there is one. If the push fails, the merge has still
+#      happened: fix the cause and rerun (every step above is a no-op the second time)
 set -euo pipefail
 
 WT=$(cd "$(dirname "$0")/.." && pwd)
@@ -22,8 +25,8 @@ BR=$(git -C "$WT" branch --show-current)
 [ -z "$(git -C "$WT" status --porcelain --untracked-files=no --ignore-submodules=all)" ] \
     || { echo "commit your changes first" >&2; exit 1; }
 [ "$(git -C "$MAIN" branch --show-current)" = main ] || { echo "the main checkout is not on main" >&2; exit 1; }
-dirty=$(git -C "$MAIN" status --porcelain --untracked-files=no --ignore-submodules=all -- . ':!tasks')
-[ -z "$dirty" ] || { printf 'the main checkout has changes outside tasks/:\n%s\n' "$dirty" >&2; exit 1; }
+dirty=$(git -C "$MAIN" status --porcelain --untracked-files=no --ignore-submodules=all -- . ':!docs/tasks')
+[ -z "$dirty" ] || { printf 'the main checkout has changes outside docs/tasks/:\n%s\n' "$dirty" >&2; exit 1; }
 
 # 1. Bring main in.
 if ! git -C "$WT" merge -q --no-edit main; then
@@ -60,9 +63,18 @@ git -C "$MAIN" merge -q --ff-only "$BR"
 if ! git -C "$MAIN" diff --quiet "$before" main -- patches/ps3recomp; then
     "$MAIN/tools/apply_patches.sh"
 fi
-if [ -n "$(git -C "$MAIN" status --porcelain -- tasks)" ]; then
-    git -C "$MAIN" add tasks
+if [ -n "$(git -C "$MAIN" status --porcelain -- docs/tasks)" ]; then
+    git -C "$MAIN" add docs/tasks
     git -C "$MAIN" commit -q -m "tasks: board after merging $BR"
 fi
 echo "merged $BR into main: ${before:0:7}..$(git -C "$MAIN" rev-parse --short main)"
+
+# 5. Publish main. Only main is pushed: agent branches stay local.
+if git -C "$MAIN" remote get-url origin >/dev/null 2>&1; then
+    if ! git -C "$MAIN" push -q origin main; then
+        echo "push to origin failed: main is merged locally; fix the cause and rerun this script" >&2
+        exit 1
+    fi
+    echo "pushed main to origin"
+fi
 echo "main's own builds are stale now; rebuild them when you next need them"

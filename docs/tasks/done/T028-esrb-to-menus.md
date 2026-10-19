@@ -3,7 +3,7 @@
 Status: done
 Owner: claude
 Touches: src/overrides/frontier_*.cpp (new), patches/ps3recomp/T028-*.patch (libs/spurs/**, libs/sysutil/**, libs/codec/** or other HLE modules no other claimed task touches; not libs/gcm, libs/video, runtime/spu, runtime/ppu, runtime/platform), docs/debugging.md, docs/unreal-engine-3.md
-Reads: tasks/done/T022*, patches/experimental/T022-esrb-experiment.diff, tasks/open|claimed/T024*, T025*, T027*, docs/dod3-reuse.md
+Reads: docs/tasks/done/T022*, patches/experimental/T022-esrb-experiment.diff, docs/tasks/open|claimed/T024*, T025*, T027*, docs/dod3-reuse.md
 
 ## Goal
 **User priority: menus.** T022 reached the legal/ESRB screen with a 3D car on 01.09 by combining

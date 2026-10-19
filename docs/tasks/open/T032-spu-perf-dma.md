@@ -4,7 +4,7 @@ Status: open
 Owner: -
 Priority: 4
 Touches: patches/ps3recomp/T032-*.patch (runtime/spu/spu_dma.h, runtime/spu/spu_drain.c, runtime/spu/spu_lockstep.*)
-Reads: tasks/*/T027* (the mfc_for rwlock), docs/subsystems.md
+Reads: docs/tasks/*/T027* (the mfc_for rwlock), docs/subsystems.md
 
 ## Goal
 **Phase: SPU performance, easy wins only** (user, 2026-10-19). Start after the main menu is reached. Measure before and after every change: T029's harness once it exists, otherwise `perf record` on a 60 s 01.09 boot_check and the T025 mixer metric (`SPURS_EF_STATS=1 SPU_DMA_RANGE=58000000-58200000`). Keep a change only if the numbers improve and the SPU tests pass; results must stay bit-exact. Nothing deep (no new JIT, no lifter redesign). Write anything bigger up as a proposed task instead.

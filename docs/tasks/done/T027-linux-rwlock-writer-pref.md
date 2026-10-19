@@ -3,7 +3,7 @@
 Status: done
 Owner: agent-rwlock
 Touches: patches/ps3recomp/T027-*.patch (runtime/platform/** only), docs/build-linux.md
-Reads: patches/experimental/T022-esrb-experiment.diff (its win32_compat.h hunk), tasks/open/T022*
+Reads: patches/experimental/T022-esrb-experiment.diff (its win32_compat.h hunk), docs/tasks/open/T022*
 
 ## Goal
 **Menus-first.** Found by T022: on Linux the shared SPU DMA lock (`mfc_for`) starves its writer:

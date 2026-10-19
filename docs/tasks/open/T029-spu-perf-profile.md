@@ -4,7 +4,7 @@ Status: open
 Owner: -
 Priority: 3
 Touches: tools/spu_profile.sh (new), docs/debugging.md (a new "Profiling" section only)
-Reads: tasks/*/T025*, docs/subsystems.md
+Reads: docs/tasks/*/T025*, docs/subsystems.md
 
 ## Goal
 **Phase: SPU performance, easy wins only** (user, 2026-10-19). Start after the main menu is reached. Measure before and after every change: T029's harness once it exists, otherwise `perf record` on a 60 s 01.09 boot_check and the T025 mixer metric (`SPURS_EF_STATS=1 SPU_DMA_RANGE=58000000-58200000`). Keep a change only if the numbers improve and the SPU tests pass; results must stay bit-exact. Nothing deep (no new JIT, no lifter redesign). Write anything bigger up as a proposed task instead.

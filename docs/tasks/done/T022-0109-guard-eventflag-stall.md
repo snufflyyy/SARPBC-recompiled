@@ -3,7 +3,7 @@
 Status: done
 Owner: coordinator
 Touches: src/overrides/ (new files), patches/ps3recomp/T022-*.patch (libs/spurs/** job guard/job chain only), docs/debugging.md, docs/unreal-engine-3.md
-Reads: docs/dod3-reuse.md, docs/subsystems.md, tasks/done/T019*, T007's HANDOFF note
+Reads: docs/dod3-reuse.md, docs/subsystems.md, docs/tasks/done/T019*, T007's HANDOFF note
 
 ## Goal
 With patches 0001-0015, 01.09 passes PhysX (SPURS queues work) and then hangs: an event-flag wait on

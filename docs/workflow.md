@@ -9,7 +9,7 @@ agent picks its own task from the board, works in its own worktree, and merges i
 
 | Piece | Where | What it is for |
 |---|---|---|
-| Task board | `tasks/{open,claimed,done}/T###-slug.md` in the **main checkout** | One file per task: priority, scope (**Touches**), reading list (**Reads**), goal, done-when, and a log of findings and HANDOFF notes. `tools/task.sh` always acts on the main checkout's board, from any worktree. **Never commit `tasks/` from your worktree**: `merge_to_main.sh` commits it |
+| Task board | `docs/tasks/{open,claimed,done}/T###-slug.md` in the **main checkout** | One file per task: priority, scope (**Touches**), reading list (**Reads**), goal, done-when, and a log of findings and HANDOFF notes. `tools/task.sh` always acts on the main checkout's board, from any worktree. **Never commit `docs/tasks/` from your worktree**: `merge_to_main.sh` commits it |
 | Queue | each task's `Priority:` line | Lower goes first; `blocked` is never picked. `tools/task.sh next` prints the next open tasks and what is claimed |
 | Claiming | `tools/task.sh claim <ID> <agent>` | An atomic rename from `open/` to `claimed/`: exactly one agent gets a task. If it fails, take another |
 | Worktree per agent | `.worktrees/<agent>`, branch `<agent>/work` (`tools/agent_setup.sh <agent>`) | One agent's half-finished edit never breaks another agent's build. The main checkout stays on `main` and only receives merges |
@@ -53,7 +53,7 @@ agent picks its own task from the board, works in its own worktree, and merges i
    (`T###-1-...`, `T###-2-...` for several, in apply order), add a row to its README table, and
    check that `tools/apply_patches.sh` applies the whole stack. The merge gives them numbers.
 9. Commit on your branch, ending messages with your harness's attribution line, if it has
-   one. Never push.
+   one. Don't push by hand: your branch stays local, and `merge_to_main.sh` pushes `main`.
 
 ## Finishing a task
 
@@ -64,7 +64,9 @@ agent picks its own task from the board, works in its own worktree, and merges i
 3. Commit, then merge into main from your worktree:
    `tools/task.sh lock merge tools/merge_to_main.sh`. The script merges main into your branch
    and stops on conflicts (resolve them, rebuild, verify, rerun). It renumbers your patches,
-   checks that the stack applies, fast-forwards main, and commits the board.
+   checks that the stack applies, fast-forwards main, commits the board, and pushes `main` to
+   `origin` (https://github.com/snufflyyy/SARPBC-recompiled). If only the push fails, the merge
+   is done locally: fix the cause (network, auth) and rerun the script.
 4. `tools/task.sh done <ID> <agent> "<summary: what changed, what's verified, what's left>"`.
    Add follow-up tasks with `tools/task.sh new <slug> <title>` (fill in Priority, Touches,
    Reads, Goal, Done when).

@@ -124,6 +124,9 @@ the board: `tools/task.sh list` (protocol: [workflow.md](workflow.md)). Highest 
   `.worktrees/<agent>`. The new `tools/merge_to_main.sh` lets each agent merge its own work
   (merge lock, patch renumbering, board commit; tested in a throwaway clone). `Model:` lines
   dropped; the audit is task T039. GEMINI.md points other harnesses at AGENTS.md.
+- The repo is on GitHub: `origin` = https://github.com/snufflyyy/SARPBC-recompiled (history checked
+  first: no game data, binaries or keys). The task board moved from `tasks/` to `docs/tasks/`.
+  `merge_to_main.sh` now pushes `main` to `origin` after each merge; agent branches stay local.
 - Checked before cleanup: all 24 worktree branches have 0 commits beyond `main`, and every
   ps3recomp commit in them is in the 36-patch stack (T003's overlay lift landed rebased, as 0008).
   T028 closed (menus reached; follow-up is T037), and its main-menu capture was copied to

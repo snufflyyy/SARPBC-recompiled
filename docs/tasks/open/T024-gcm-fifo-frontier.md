@@ -4,7 +4,7 @@ Status: open
 Owner: -
 Priority: 9
 Touches: patches/ps3recomp/T024-*.patch (libs/gcm/**, runtime/rsx/**, libs/video/** only), src/overrides/gcm_*.cpp (new), docs/subsystems.md (Graphics section only)
-Reads: docs/dod3-reuse.md (T023's ranked GCM list), docs/debugging.md, tasks/done/T023*
+Reads: docs/dod3-reuse.md (T023's ranked GCM list), docs/debugging.md, docs/tasks/done/T023*
 
 ## Goal
 **User priority (2026-10-19): get 01.09 into the menus.** T023 found that during loading the GCM

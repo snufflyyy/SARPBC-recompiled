@@ -3,8 +3,8 @@
 Status: open
 Owner: -
 Priority: 11
-Touches: docs/**, tools/** (scripts and their docs), patches/ps3recomp/README.md, src/overrides/** (comments and structure only), tasks/ (stale claims, priorities, closing done work). **Claim it only when no other task is claimed**: it touches everyone's files
-Reads: AGENTS.md, every docs/*.md, tasks/, `git log`
+Touches: docs/**, tools/** (scripts and their docs), patches/ps3recomp/README.md, src/overrides/** (comments and structure only), docs/tasks/ (stale claims, priorities, closing done work). **Claim it only when no other task is claimed**: it touches everyone's files
+Reads: AGENTS.md, every docs/*.md, docs/tasks/, `git log`
 
 ## Goal
 Step 3 of the user's plan (docs/status.md "Resume here"): once the SPU easy wins (T033, T030,

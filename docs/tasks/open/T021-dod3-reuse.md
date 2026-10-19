@@ -4,7 +4,7 @@ Status: open
 Owner: -
 Priority: 17
 Touches: docs/dod3-reuse.md (new), docs/reference-ports.md, patches/ps3recomp/T021-*.patch (runtime/** and libs/** pieces NOT owned by an active task: see "Exclusions"), src/overrides/dod3_*.cpp (new)
-Reads: https://github.com/soyjxck/dod3-recomp and https://github.com/soyjxck/ps3recomp (both MIT), docs/reference-ports.md, tasks/claimed/*
+Reads: https://github.com/soyjxck/dod3-recomp and https://github.com/soyjxck/ps3recomp (both MIT), docs/reference-ports.md, docs/tasks/claimed/*
 
 ## Goal
 **User directive (2026-10-18): reuse as much as possible from the other UE3 ps3recomp port.**
