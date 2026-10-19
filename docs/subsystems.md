@@ -53,7 +53,67 @@ work. Update the **Status** line of a section when you change it.
   during an in-flight walk is dropped; libs/spurs). Without `SPU_INTERP_UNLIFTED`
   (after T007), PhysX stalls first (`cellSpursQueuePopBody`, T025): the FIFO goes idle at
   get==put≈`0x6FF0C` and never gets that far.
-- Status: not started. Linux/Vulkan is the least-proven upstream path.
+  *Update 2026-10-19 (T024, second session):* the `0xD494C` park was cause 2; with 0024
+  (chain re-walk) and the relift (0028) no park goes unpatched. Park addresses move from
+  run to run, so do not key anything on them.
+- **Park grace: how long parks really take (T024, 2026-10-19).** `GCM_PARK_LOG=1` times
+  every release. Flip-handler (JUMP) parks: 4-40 ms, up to 192 ms when the host is loaded
+  and handlers are only pumped at HLE calls (28 ms with `GCM_INTR_THREAD=1`). Chain (NOP)
+  parks: average 8-45 ms, worst 300-950 ms (one frame has ~25 of them, so they set the
+  frame rate: ~1 flip/s at the screen-adjust prompt). The pin's 50 ms grace therefore
+  resyncs past a park in nearly every boot (even unloaded: boot `20261019-102519`, park
+  io `0x134F04`), drops the frame's fence write, and the render thread waits forever:
+  the boot stops on "Loading..." or the legal/ESRB screen. With a grace of 5 s or longer
+  there were 0 resyncs in every boot. Boots (01.09, 90-150 s, `GCM_PARK_LOG=1`):
+
+  | Setup | Result |
+  |---|---|
+  | grace 50 ms (pin), no intr thread | ESRB screen, then stuck (36-83 flips, 1-2 jump-park resyncs) |
+  | grace 50 ms, `GCM_INTR_THREAD=1` | stuck (84 flips; a chain park not patched within 50 ms) |
+  | grace 1e8 / 5000 ms, with or without intr thread | past ESRB to the Psyonix logo (63-119 flips), 0 resyncs |
+  | + PrepareFlip fix + ring-recycle fix (below), grace 5000, intr on or off | **screen-adjust prompt** ("Use the Left Stick ... press X"), 109-112 flips in 120 s, 0 resyncs |
+
+  The first three rows ran at host load ~150 (5 agents booting at once), the last under the
+  shared boot lock. The intr thread mattered under load (flip-handler parks 28 ms vs 192 ms)
+  and made no difference unloaded. **SARPBC default** (`src/overrides/gcm_config.cpp`,
+  setenv before init; values already in the environment win): `GCM_PARK_GRACE_MS=5000`,
+  `GCM_INTR_THREAD=1`. Caveat: guest callbacks still share one stack at `0xCFFE0000` on every
+  thread (T026), so the interrupt thread's handlers can collide with another thread's
+  callback; `GCM_INTR_THREAD=0` turns it off.
+- **PrepareFlip returns the buffer id (T024, patch `T024-4`).** The user handler
+  `func_000DC390` takes the flip id from the low 16 bits of the 0xEB00 user command's data
+  (stored at `0x0123CDB0`; `0xFF` = none) and calls `cellGcmSetFlipImmediate` with it. That
+  data is the return value of `cellGcmSetPrepareFlip`, which the RHI writes into its command
+  stream. The pin returned `CELL_OK` (0) and flipped on the spot, so the game prepared 0/1
+  alternately but every flip showed buffer 0 (108 of 108). Now PrepareFlip returns the id and
+  does not flip; FlipImmediate alternates 0/1. Part of fork 0049 (6eb35c0); its FIFO marker
+  and no-op FlipImmediate are not ported, because the park release needs FlipImmediate to
+  call the flip handler. `GCM_PREPARE_FLIPS_NOW=1` restores the old behaviour.
+- **Flip handler `func_000DC144` (01.09).** Bumps a counter at `0x01295428`; if the pending
+  count at `0x01295460` is non-zero it decrements it, takes the park slot from a 2-entry table
+  at `0x01295430` (index `0x01295458`, toggled each time; it waits for the slot with
+  `sys_timer_usleep` while it is empty), converts it with `func_00F8C340` and writes
+  `JUMP (park+4)` there. So each delivered flip releases at most one park, and extra calls
+  with nothing pending are harmless.
+- **Ring recycle (T024, patch `T024-5`).** The RHI's command buffer is ctx `0x0F800000`,
+  `begin 0x40000000`, `end 0x402FF000` (3 MB), with the runtime's buffer-full callback (OPD
+  `0x0F800010`). The game fills it to exactly `end` once per lap, then calls that callback
+  (`cellGcm_fifo_recycle`). The drain thread took `current == end` for an overrun and recycled
+  first ("recycled the title's own ring"), racing the callback; one boot (`20261019-110645`,
+  intr thread off) then never submitted again and stayed on "Loading...". Patch `T024-6`: no
+  drain-side recycle while the callback is the runtime's (boot `20261019-111716`: 0 such
+  recycles, PROGRESSING). Before that, patch `T024-5`: the drain-side recycle teleported `get`
+  to `begin`, dropping whatever the walker had not read yet: when the walker was parked in
+  the tail that was ~31 KB including the frame's fence (boot `20261019-101911`: stuck at 50 s).
+  Now `get` is left alone while it is still in the tail; the log says "walker drains the tail
+  first". `fifo recycle: drain stalled` (the runtime callback waited 2 s for the walker) also
+  appears with long parks; it rewinds `current` anyway, which is safe here because the head
+  of the ring has long been read.
+- **Next bottleneck: chain-park latency.** At the screen-adjust prompt the FIFO spends most
+  of its time on ShaderPatching chain parks (30-40 ms average each). That is SPURS job-chain
+  turnaround (libs/spurs), not GCM.
+- Status: 01.09 draws the legal/ESRB screen, the Psyonix logo and the screen-adjust prompt
+  through Vulkan. Linux/Vulkan is the least-proven upstream path.
 
 ## Audio
 

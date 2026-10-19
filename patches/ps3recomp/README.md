@@ -63,6 +63,9 @@ order we expect to need them (details in `docs/reference-ports.md`):
 | `0031-spu-ctor-dtor-seed-test.patch` | T025: unit test for `collect_ctor_dtor_targets` (0028) | with 0028 |
 | `0032-spu-sse2-float-helpers.patch` | T025: SSE2 port of the NEON `fa/fs/fm/fma/fms/fnms` fast path in `spu_helpers.h`, bit-exact (`test_spu_float_sse.c`); fma+fm 12 ns vs 33 ns | to offer |
 | `0033-spu-mfc-cache-lockline-ttas.patch` | T030: `mfc_for` looks up the engine only for MFC_Cmd/WrTagUpdate/WrListStallAck, cached in `spu_context` (`mfc_cache`, `mfc_cache_gen`, invalidated by a registry generation); POSIX `spu_lockline_lock` is TTAS + `_mm_pause` + `sched_yield`/256 like MSVC. 01.09 flips 100 -> 514 in 90 s (one run) | to offer |
+| `0034-gcm-prepare-flip-returns-id.patch` | T024: `cellGcmSetPrepareFlip` returns the buffer id and does not flip on the spot (part of fork 0049); SARPBC's user handler 0xDC390 flips the id it got back, so every flip was buffer 0. `GCM_PREPARE_FLIPS_NOW=1` = old behaviour. Test `test_gcm_prepare_flip.py` | to offer |
+| `0035-gcm-ring-recycle-drains-tail.patch` | T024: recycling the title's ring no longer teleports `get` to the start while the walker is still parked in the tail (dropped ~31 KB incl. the fence) | to offer |
+| `0036-gcm-no-drain-recycle-runtime-callback.patch` | T024: no recycle from the drain thread while the title's context still uses the runtime buffer-full callback (raced it; one boot stuck on Loading) | to offer |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `git -C external/ps3recomp format-patch -1 -o ../../patches/ps3recomp/ --start-number N`.

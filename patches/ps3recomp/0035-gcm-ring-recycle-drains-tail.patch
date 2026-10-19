@@ -1,0 +1,79 @@
+From 105a2c5d7d05fc69a5efe5b1c2b7316328e67b85 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Mon, 19 Oct 2026 10:49:40 -0500
+Subject: [PATCH] cellGcmSys: recycling the title's ring lets the walker drain
+ the tail
+
+When a title fills its ring to `end` and its buffer-full callback does
+not wrap it, the drain recycles the ring for it: a JUMP to `begin` at the
+write head, current = put = begin, and get = begin. Teleporting `get`
+dropped everything the walker had not read yet. Supersonic Acrobatic
+Rocket-Powered Battle-Cars 01.09 fills its 3 MB ring (0x40000000-
+0x402FF000) to exactly `end` once per lap, and the walker was often still
+parked in the tail on a JUMP-to-self waiting for the title's flip handler
+or a SPURS job to release it; the ~31 KB it dropped held the frame's
+fence, and the render thread waited on that fence for good.
+
+Leave `get` alone when the walker is still between `begin` and the new
+JUMP: it reads the tail, follows the JUMP to `begin`, and stops at `put`.
+Also log the first overrun (context, callback OPD, put/get) once.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/cellGcmSys.c | 28 ++++++++++++++++++++++++----
+ 1 file changed, 24 insertions(+), 4 deletions(-)
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 09552de..18bb713 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -2300,22 +2300,42 @@ static void gcm_rsx_process_fifo_unlocked(void)
+          * overruns first, so the first overrun is recycled by the path above
+          * and near-end recycling is enabled from then on. */
+         static int s_title_overran = 0;
+-        if (begin && end > begin && cur >= end) { head_consumed = 1; s_title_overran = 1; }
++        if (begin && end > begin && cur >= end) {
++            if (!s_title_overran)
++                fprintf(stderr, "[cellGcmSys] title overran its ring: ctx=0x%08X begin=0x%08X "
++                        "end=0x%08X current=0x%08X callback opd=0x%08X put=0x%08X get=0x%08X%c",
++                        ctx, begin, end, cur, vm_read32(ctx + 0xC), put, s_fifo_getoff, 10);
++            head_consumed = 1; s_title_overran = 1;
++        }
+         if (begin && end > begin && cur >= begin && cur + GCM_RECYCLE_SLACK >= end
+                 && head_consumed && s_title_overran) {
+             u32 io_begin = gcm_ea2io(begin);
+             if (io_begin != 0xFFFFFFFFu) {
+                 u32 jmp_at = (cur + 4 <= end) ? cur : end - 4;
++                const u32 io_jmp = gcm_ea2io(jmp_at);
++                /* The walker may still be behind in the tail -- parked on a
++                 * JUMP-to-self the title has not released yet, say. It reads
++                 * up to the JUMP below and follows it to `begin`, where `put`
++                 * now points, so leave `get` alone then. Teleporting it to
++                 * `begin` dropped the whole tail, the frame's fence write
++                 * included, and the title waited for that fence for good
++                 * (Supersonic Acrobatic Rocket-Powered Battle-Cars 01.09: a
++                 * ~31 KB tail behind a park, 2026-10-19). */
++                const int tail_pending = cur < end && io_jmp != 0xFFFFFFFFu &&
++                                         s_fifo_getoff != put &&
++                                         s_fifo_getoff >= io_begin && s_fifo_getoff <= io_jmp;
+                 vm_write32(jmp_at, 0x20000000u | io_begin);   /* JUMP -> begin */
+                 vm_write32(ctx + 0x8, begin);                 /* current = begin */
+                 vm_write32(GCM_CONTROL_GUEST_ADDR + 0, io_begin);  /* put */
+-                s_fifo_getoff = io_begin;                          /* get */
++                if (!tail_pending)
++                    s_fifo_getoff = io_begin;                      /* get */
+                 put = io_begin;
+                 static int n = 0;
+                 if (n++ < 8)
+                     fprintf(stderr, "[cellGcmSys] recycled the title's own ring "
+-                            "(ctx=0x%08X begin=0x%08X end=0x%08X) -- its callback "
+-                            "does not%c", ctx, begin, end, 10);
++                            "(ctx=0x%08X begin=0x%08X end=0x%08X%s) -- its callback "
++                            "does not%c", ctx, begin, end,
++                            tail_pending ? ", walker drains the tail first" : "", 10);
+             }
+         }
+     }
+-- 
+2.55.0
+
