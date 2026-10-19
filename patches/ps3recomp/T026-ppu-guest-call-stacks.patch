@@ -1,0 +1,569 @@
+From dde554a7455a0174ef90175b295663475200474e Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Mon, 19 Oct 2026 10:18:21 -0500
+Subject: [PATCH] ppu_guest_call: a callback stack per host thread and nesting
+ depth
+
+ppu_guest_call and ppu_guest_call_ct ran every guest callback with r1 at
+the fixed address 0xCFFE0000, on every host thread and at every nesting
+depth. Two callbacks at once on different host threads (a GCM handler on
+an interrupt thread while a guest thread pumps it from an HLE call), or a
+callback whose HLE call delivers another callback, built their frames on
+the same bytes. 0xCFFE0000 is also inside RSX local memory (0xC0000000,
+localSize 256 MB).
+
+Each (host thread, depth) pair now gets its own stack (PPU_CB_STACK_SIZE,
+default 256 KB, guard page at the bottom), carved from the top of the PPU
+stack region by moving g_vm_stack_alloc.region_end down while thread
+stacks keep growing up from VM_STACK_BASE. A host thread that ends gives
+its stacks back to a pool. Both entry points share one body.
+
+tools/test_ppu_guest_call_stacks.py builds the real ppu_loader.cpp with
+two threads inside a callback at once, a nested callback, placement and
+recycling checks. On the old code 6 checks fail (both threads' frames at
+0xCFFDFC00, outer and inner frames the same); now all pass.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ runtime/ppu/ppu_loader.cpp                    | 228 +++++++++++++-----
+ .../ppu/tests/test_ppu_guest_call_stacks.cpp  | 207 ++++++++++++++++
+ tools/test_ppu_guest_call_stacks.py           |  48 ++++
+ 3 files changed, 421 insertions(+), 62 deletions(-)
+ create mode 100644 runtime/ppu/tests/test_ppu_guest_call_stacks.cpp
+ create mode 100644 tools/test_ppu_guest_call_stacks.py
+
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index b1b08fb..8e6ea8f 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -25,6 +25,8 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <vector>
++#include <mutex>     /* the guest-callback stack pool */
++#include <atomic>
+ #ifdef _WIN32
+ #  include <windows.h>
+ #else
+@@ -3638,8 +3640,165 @@ extern "C" void ppu_install_thread_trampoline(void)
+     g_ppu_thread_entry_trampoline = ppu_thread_entry_trampoline;
+ }
+ 
+-/* Call a guest function by OPD with up to 4 integer args, on a private scratch
+- * stack, and return r3. Used by the HLE runtime to deliver callbacks into
++/* ---------------------------------------------------------------------------
++ * Guest-callback stacks
++ *
++ * ppu_guest_call / ppu_guest_call_ct run a callback in a fresh ppu_context, so
++ * it needs an r1 that nothing else is using. That used to be the fixed address
++ * 0xCFFE0000 on every host thread and at every nesting depth, which broke in
++ * three ways:
++ *   - two callbacks running at once on different host threads (a GCM handler
++ *     on the interrupt thread while a guest thread pumps the same handler from
++ *     an HLE call; a sysutil callback while the vblank ticker runs a handler)
++ *     built their frames on the same bytes;
++ *   - a callback that makes an HLE call which delivers another callback (the
++ *     GCM pump runs at HLE calls) restarted r1 at the same address and wrote
++ *     over its caller's live frames;
++ *   - 0xCFFE0000 is RSX local memory (0xC0000000, localSize 256 MB), so the
++ *     frames also landed on whatever the title kept at the top of VRAM.
++ *
++ * Now every (host thread, nesting depth) pair has a stack of its own. They are
++ * carved from the TOP of the PPU stack region, by moving g_vm_stack_alloc's
++ * region_end down, while the thread-stack allocator keeps bumping up from the
++ * bottom (VM_STACK_BASE): the two never meet, and no address is fixed. Each
++ * stack has an inaccessible guard page at its bottom, like a thread stack, so
++ * an overflow faults instead of corrupting the next one. A host thread that
++ * ends returns its stacks to a pool, so short-lived threads do not use up the
++ * region.
++ *
++ * PPU_CB_STACK_SIZE (bytes, decimal or 0x hex, default 256 KB) sets the size of
++ * every callback stack. It is read once, so pooled stacks are interchangeable.
++ *
++ * Carving stores region_end while sys_ppu_thread_create may read it under its
++ * own lock (sys_ppu_thread.c's table lock, not visible here). The store is a
++ * single aligned 32-bit word that only ever moves down, and a carve refuses to
++ * come within PPU_CB_HEADROOM of next_addr, so a thread stack allocated at the
++ * same moment still ends well below the new region_end. */
++#define PPU_CB_STACK_DEFAULT  0x40000u          /* 256 KB */
++#define PPU_CB_MAX_DEPTH      32
++#define PPU_CB_POOL_MAX       512
++#define PPU_CB_HEADROOM       0x01000000u       /* 16 MB kept for thread stacks */
++#define PPU_CB_TOP_PAD        0x100u            /* the callee stores LR/CR/params above r1 */
++
++extern "C" vm_stack_alloc g_vm_stack_alloc;     /* syscalls/sys_ppu_thread.c */
++
++static std::mutex s_cb_mu;
++static uint32_t   s_cb_pool[PPU_CB_POOL_MAX];   /* stack bases (lowest usable byte) */
++static int        s_cb_pool_n;
++static uint32_t   s_cb_floor;                   /* lowest byte carved so far, 0 = none */
++static std::atomic<unsigned> s_cb_assigned{0};  /* (thread, depth) slots filled, for the log */
++
++static uint32_t ppu_cb_stack_size(void)
++{
++    static uint32_t s_size = 0;
++    if (!s_size) {
++        uint32_t v = PPU_CB_STACK_DEFAULT;
++        if (const char* e = getenv("PPU_CB_STACK_SIZE")) {
++            unsigned long x = strtoul(e, nullptr, 0);
++            if (x >= 0x4000u && x <= 0x01000000u) v = (uint32_t)x;
++        }
++        s_size = VM_ALIGN_UP(v, vm_host_page_size());
++    }
++    return s_size;
++}
++
++/* A stack's base, from the pool or freshly carved; 0 when the region is full. */
++static uint32_t ppu_cb_stack_take(void)
++{
++    std::lock_guard<std::mutex> lk(s_cb_mu);
++    if (s_cb_pool_n) return s_cb_pool[--s_cb_pool_n];
++
++    const uint32_t size = ppu_cb_stack_size(), pg = vm_host_page_size();
++    vm_stack_alloc* sa = &g_vm_stack_alloc;
++    if (!sa->region_end) vm_stack_alloc_init(sa);   /* a host that never ran sys_ppu_thread_init */
++    uint32_t end = sa->region_end;
++    /* A second vm_stack_alloc_init() (a host test harness does one) puts
++     * region_end back at the top, over stacks already handed out: carve below. */
++    if (s_cb_floor && end > s_cb_floor) end = s_cb_floor;
++    const uint32_t total = size + pg;
++    if (end < sa->next_addr || end - sa->next_addr < total + PPU_CB_HEADROOM) {
++        fprintf(stderr, "[ppu] guest_call: no room for a %u KB callback stack (thread stacks "
++                        "end 0x%08X, region end 0x%08X)\n", size >> 10, sa->next_addr, end);
++        return 0;
++    }
++    const uint32_t base = end - total;
++    *(volatile uint32_t*)&sa->region_end = base;
++    s_cb_floor = base;
++    vm_protect(base, pg, 0, 0, 0);                   /* guard page at the bottom */
++    return base + pg;
++}
++
++/* This host thread's stacks, one per nesting depth, given back to the pool when
++ * the thread ends. A C++ thread_local for the destructor: PPU_THREAD_LOCAL is a
++ * plain __thread / __declspec(thread), which has none. */
++struct PpuCbStacks {
++    uint32_t base[PPU_CB_MAX_DEPTH] = {};
++    uint32_t code[PPU_CB_MAX_DEPTH] = {};   /* the callback running at each depth (diagnostics) */
++    unsigned depth = 0;
++    ~PpuCbStacks() {
++        std::lock_guard<std::mutex> lk(s_cb_mu);
++        for (unsigned i = 0; i < PPU_CB_MAX_DEPTH; i++)
++            if (base[i] && s_cb_pool_n < PPU_CB_POOL_MAX) s_cb_pool[s_cb_pool_n++] = base[i];
++    }
++};
++static thread_local PpuCbStacks t_cb_stacks;
++
++/* The shared body of ppu_guest_call / ppu_guest_call_ct: run fn on this host
++ * thread's stack for the next nesting depth and return r3. */
++static uint64_t ppu_guest_call_run(ppu_fn fn, uint32_t code, uint32_t toc, const uint64_t a[8])
++{
++    PpuCbStacks& st = t_cb_stacks;
++    const unsigned d = st.depth;
++    if (d >= PPU_CB_MAX_DEPTH) {
++        fprintf(stderr, "[ppu] guest_call: callbacks nested %u deep, refusing code 0x%08X\n", d, code);
++        return 0;
++    }
++    if (!st.base[d]) {
++        if (!(st.base[d] = ppu_cb_stack_take())) return 0;
++        /* The first 32 (thread, depth) slots. A depth > 0 line names a callback
++         * delivered from inside another one: the case a shared stack corrupted. */
++        if (s_cb_assigned.fetch_add(1, std::memory_order_relaxed) < 32)
++            fprintf(stderr, "[ppu] guest_call: tid 0x%llX depth %u -> stack 0x%08X..0x%08X "
++                            "for code 0x%08X (inside 0x%08X)\n",
++                    (unsigned long long)(g_active_ctx ? g_active_ctx->thread_id : 0), d,
++                    st.base[d], st.base[d] + ppu_cb_stack_size(), code, d ? st.code[d - 1] : 0u);
++    }
++    st.code[d] = code;
++
++    ppu_context ctx;
++    memset(&ctx, 0, sizeof(ctx));
++    ctx.gpr[1]  = (st.base[d] + ppu_cb_stack_size() - PPU_CB_TOP_PAD) & ~0xFu;
++    ctx.gpr[2]  = toc;
++    for (int i = 0; i < 8; i++) ctx.gpr[3 + i] = a[i];
++    ctx.gpr[13] = PPU_TLS_TP;
++    ctx.cia     = code;
++    /* Save/restore g_active_ctx: this scratch ctx lives on the stack, so leaving
++     * g_active_ctx pointing at it after we return leaves a DANGLING pointer once the
++     * frame is reused -- corrupting the crash handler / any diagnostic that reads the
++     * current-thread ctx. Restore the caller's. */
++    ppu_context* saved_active = g_active_ctx;
++    /* Thread identity: a zeroed scratch ctx used to run callbacks as thread_id 0
++     * -- aliasing the main thread in every owner-tracking primitive. Inherit the
++     * calling guest thread's id; host-only threads (ticker) get a per-host-thread
++     * sentinel far above the thread table's range. */
++#ifdef _WIN32
++    ctx.thread_id = saved_active ? saved_active->thread_id
++                                 : (0x7FFF0000ull | (GetCurrentThreadId() & 0xFFFFu));
++#else
++    ctx.thread_id = saved_active ? saved_active->thread_id : 0x7FFF0000ull;
++#endif
++    st.depth = d + 1;
++    g_active_ctx = &ctx;
++    fn(&ctx);
++    while (g_trampoline_fn) { void (*tf)(void*) = g_trampoline_fn; g_trampoline_fn = 0; tf(&ctx); }
++    g_active_ctx = saved_active;
++    st.depth = d;
++    return ctx.gpr[3];
++}
++
++/* Call a guest function by OPD with up to 8 integer args, on this host thread's
++ * callback stack for the current nesting depth (see "Guest-callback stacks"
++ * above), and return r3. Used by the HLE runtime to deliver callbacks into
+  * recompiled code (cellSysutil events, GCM vblank/flip handlers, ...) -- the
+  * mechanism behind g_ps3_guest_caller (ps3emu/guest_call.h). */
+ /* OPD fixups: some title OPDs (the GCM flip/vblank handlers at 0x530D70/78/80)
+@@ -3682,45 +3841,14 @@ extern "C" uint64_t ppu_guest_call(uint32_t opd_addr,
+                 vm_read32(opd_addr + 8), vm_read32(opd_addr + 12));
+         return 0; }
+ 
+-    /* Private scratch stack high in the guest stack region, distinct from the
+-     * main + ppu_thread stacks. One callback at a time per caller thread. */
+-    static PPU_THREAD_LOCAL uint32_t s_cb_sp = 0;
+-    if (!s_cb_sp) s_cb_sp = 0xCFFE0000u;
+-
+-    ppu_context ctx;
+-    memset(&ctx, 0, sizeof(ctx));
+-    ctx.gpr[1]  = s_cb_sp;
+-    ctx.gpr[2]  = toc;
+-    ctx.gpr[3]  = a0; ctx.gpr[4] = a1; ctx.gpr[5] = a2; ctx.gpr[6] = a3;
+-    ctx.gpr[7]  = a4; ctx.gpr[8] = a5; ctx.gpr[9] = a6; ctx.gpr[10] = a7;
+-    ctx.gpr[13] = PPU_TLS_TP;
+-    ctx.cia     = code;
+-    /* Save/restore g_active_ctx: this scratch ctx lives on the stack, so leaving
+-     * g_active_ctx pointing at it after we return leaves a DANGLING pointer once the
+-     * frame is reused -- corrupting the crash handler / any diagnostic that reads the
+-     * current-thread ctx. Restore the caller's. */
+-    ppu_context* saved_active = g_active_ctx;
+-    /* Thread identity: a zeroed scratch ctx used to run callbacks as thread_id 0
+-     * -- aliasing the main thread in every owner-tracking primitive. Inherit the
+-     * calling guest thread's id; host-only threads (ticker) get a per-host-thread
+-     * sentinel far above the thread table's range. */
+-#ifdef _WIN32
+-    ctx.thread_id = saved_active ? saved_active->thread_id
+-                                 : (0x7FFF0000ull | (GetCurrentThreadId() & 0xFFFFu));
+-#else
+-    ctx.thread_id = saved_active ? saved_active->thread_id : 0x7FFF0000ull;
+-#endif
+-    g_active_ctx = &ctx;
+-    fn(&ctx);
+-    while (g_trampoline_fn) { void (*tf)(void*) = g_trampoline_fn; g_trampoline_fn = 0; tf(&ctx); }
+-    g_active_ctx = saved_active;
+-    return ctx.gpr[3];
++    const uint64_t a[8] = {a0, a1, a2, a3, a4, a5, a6, a7};
++    return ppu_guest_call_run(fn, code, toc, a);
+ }
+ 
+ /* Call a guest function by an already-resolved {code, toc} pair. Used for
+  * callbacks whose OPD is captured at registration time and may later be
+  * clobbered in guest memory (e.g. the GCM flip/vblank handler OPDs). Same
+- * scratch-stack + trampoline-drain behaviour as ppu_guest_call. */
++ * callback-stack + trampoline-drain behaviour as ppu_guest_call. */
+ extern "C" uint64_t ppu_guest_call_ct(uint32_t code, uint32_t toc,
+                                       uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
+                                       uint64_t a4, uint64_t a5, uint64_t a6, uint64_t a7)
+@@ -3729,32 +3857,8 @@ extern "C" uint64_t ppu_guest_call_ct(uint32_t code, uint32_t toc,
+     ppu_fn fn = ppu_lookup(code);
+     if (!fn) { fprintf(stderr, "[ppu] guest_call_ct: code 0x%08X not registered\n", code); return 0; }
+ 
+-    static PPU_THREAD_LOCAL uint32_t s_cb_sp = 0;
+-    if (!s_cb_sp) s_cb_sp = 0xCFFE0000u;
+-
+-    ppu_context ctx;
+-    memset(&ctx, 0, sizeof(ctx));
+-    ctx.gpr[1]  = s_cb_sp;
+-    ctx.gpr[2]  = toc;
+-    ctx.gpr[3]  = a0; ctx.gpr[4] = a1; ctx.gpr[5] = a2; ctx.gpr[6] = a3;
+-    ctx.gpr[7]  = a4; ctx.gpr[8] = a5; ctx.gpr[9] = a6; ctx.gpr[10] = a7;
+-    ctx.gpr[13] = PPU_TLS_TP;
+-    ctx.cia     = code;
+-    /* Save/restore g_active_ctx (see ppu_guest_call): the scratch ctx is stack-local,
+-     * so a dangling g_active_ctx after return corrupts the crash handler / diagnostics. */
+-    ppu_context* saved_active = g_active_ctx;
+-    /* Inherit the caller's thread identity (see ppu_guest_call above). */
+-#ifdef _WIN32
+-    ctx.thread_id = saved_active ? saved_active->thread_id
+-                                 : (0x7FFF0000ull | (GetCurrentThreadId() & 0xFFFFu));
+-#else
+-    ctx.thread_id = saved_active ? saved_active->thread_id : 0x7FFF0000ull;
+-#endif
+-    g_active_ctx = &ctx;
+-    fn(&ctx);
+-    while (g_trampoline_fn) { void (*tf)(void*) = g_trampoline_fn; g_trampoline_fn = 0; tf(&ctx); }
+-    g_active_ctx = saved_active;
+-    return ctx.gpr[3];
++    const uint64_t a[8] = {a0, a1, a2, a3, a4, a5, a6, a7};
++    return ppu_guest_call_run(fn, code, toc, a);
+ }
+ 
+ extern "C" ppu_context* volatile g_ppu_main_ctx = nullptr;
+diff --git a/runtime/ppu/tests/test_ppu_guest_call_stacks.cpp b/runtime/ppu/tests/test_ppu_guest_call_stacks.cpp
+new file mode 100644
+index 0000000..41be8f2
+--- /dev/null
++++ b/runtime/ppu/tests/test_ppu_guest_call_stacks.cpp
+@@ -0,0 +1,207 @@
++// ppu_guest_call runs every callback on a stack of its own.
++//
++// The runtime delivers guest callbacks (cellSysutil events, GCM vblank/flip/
++// user handlers, PRX start_module, ...) through ppu_guest_call. Each call gets
++// a fresh ppu_context, and its r1 used to be the fixed address 0xCFFE0000 on
++// every host thread and at every nesting depth -- inside RSX local memory, too.
++// Two callbacks running at once on different host threads (a GCM handler on
++// the interrupt thread while a guest thread pumps the same handler from an HLE
++// call), or a callback that makes an HLE call which delivers another callback,
++// then built their frames on the same bytes.
++//
++// The guest functions below do what a lifted prologue does: drop r1 by a frame
++// and fill the frame. Then they wait (for the other thread, or for a nested
++// callback) and check that their frame still holds what they wrote.
++//
++//   1. two host threads, each inside a callback at the same time;
++//   2. a callback that calls ppu_guest_call again from inside itself;
++//   3. the stacks come from the PPU stack region, above what the thread-stack
++//      allocator may still hand out, and not from RSX local memory;
++//   4. host threads that end give their stacks back (no growth over 64 threads).
++//
++// Built by tools/test_ppu_guest_call_stacks.py against the real ppu_loader.cpp.
++#include "ppu_recomp.h"
++#include <atomic>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <cstdint>
++#include <thread>
++#include "win32_compat.h"
++#include "../../memory/vm.h"
++
++extern "C" {
++uint8_t* vm_base;
++// No SPUs, RSX or guest threads in this fixture: using any of them fails it.
++uint32_t ppu_hle_inject_base = 0x20000000;
++int spu_coh_is_reserved(uint32_t) { return 0; }
++void spu_coh_notify_write(uint32_t) { std::abort(); }
++void spu_lockline_lock(void) { std::abort(); }
++void spu_lockline_unlock(void) { std::abort(); }
++int spu_raw_reg_load(uint32_t, uint32_t*) { std::abort(); }
++void spu_raw_reg_store(uint32_t, uint32_t, unsigned) { std::abort(); }
++void cellGcm_ref_on_poll(void) { std::abort(); }
++HANDLE CreateThread(void*, SIZE_T, PS3_THREAD_FN, LPVOID, DWORD, DWORD*) { std::abort(); }
++BOOL CloseHandle(HANDLE) { std::abort(); }
++DWORD GetFileAttributesA(const char*) { return INVALID_FILE_ATTRIBUTES; }
++uint64_t ppu_thread_register_main(void) { return 1; }
++void (*g_ppu_thread_entry_trampoline)(uint32_t, uint64_t, uint32_t, uint64_t);
++vm_stack_alloc g_vm_stack_alloc;   // sys_ppu_thread.c's, the PPU stack region allocator
++void ppu_register_function(uint64_t addr, void (*fn)(ppu_context*));
++uint64_t ppu_guest_call(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t,
++                        uint64_t, uint64_t, uint64_t, uint64_t);
++}
++
++enum : uint32_t {
++    FRAME = 0x400,                       // bytes each fake guest frame fills
++    CODE_PAIR = 0x10000, CODE_OUTER = 0x10100, CODE_INNER = 0x10200, CODE_SP = 0x10300,
++    OPD_PAIR = 0x20000, OPD_OUTER = 0x20010, OPD_INNER = 0x20020, OPD_SP = 0x20030,
++    TOC = 0x80000,
++};
++
++static std::atomic<unsigned> s_fail{0};
++static void check(bool ok, const char* what)
++{
++    if (!ok) { std::fprintf(stderr, "  FAIL: %s\n", what); s_fail++; }
++}
++
++// A lifted prologue: stdu r1,-FRAME(r1), then fill the frame with `tag`.
++static uint32_t push_frame(ppu_context* ctx, uint32_t tag)
++{
++    uint32_t sp = (uint32_t)ctx->gpr[1] - FRAME;
++    ctx->gpr[1] = sp;
++    for (uint32_t off = 0; off < FRAME; off += 4) vm_write32(sp + off, tag ^ off);
++    return sp;
++}
++static bool frame_intact(uint32_t sp, uint32_t tag)
++{
++    for (uint32_t off = 0; off < FRAME; off += 4)
++        if (vm_read32(sp + off) != (tag ^ off)) return false;
++    return true;
++}
++
++static bool sp_in_stack_region(uint32_t sp)
++{
++    return sp >= g_vm_stack_alloc.region_end && sp < VM_STACK_BASE + VM_STACK_REGION;
++}
++
++// ---- 1: two threads inside a callback at once ------------------------------
++static std::atomic<int> s_arrived{0};
++static uint32_t s_pair_sp[2];
++static bool s_pair_ok[2];
++
++static void cb_pair(ppu_context* ctx)
++{
++    const int who = (int)ctx->gpr[3];
++    const uint32_t tag = 0xA0000000u + (uint32_t)who * 0x01000000u;
++    const uint32_t sp = push_frame(ctx, tag);
++    s_pair_sp[who] = sp;
++    // Both callbacks hold a live frame here before either looks at its own.
++    s_arrived++;
++    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
++    while (s_arrived.load() < 2 && std::chrono::steady_clock::now() < until)
++        std::this_thread::yield();
++    std::this_thread::sleep_for(std::chrono::milliseconds(20));
++    s_pair_ok[who] = frame_intact(sp, tag);
++    ctx->gpr[1] += FRAME;
++    ctx->gpr[3] = who;
++}
++
++// ---- 2: a callback that delivers another callback --------------------------
++static uint32_t s_outer_sp, s_inner_sp;
++
++static void cb_inner(ppu_context* ctx)
++{
++    s_inner_sp = push_frame(ctx, 0xBB000000u);
++    ctx->gpr[1] += FRAME;
++    ctx->gpr[3] = 7;
++}
++static void cb_outer(ppu_context* ctx)
++{
++    s_outer_sp = push_frame(ctx, 0xAA000000u);
++    // An HLE import called from here that runs a guest handler (the GCM pump does).
++    const uint64_t r = ppu_guest_call(OPD_INNER, 0, 0, 0, 0, 0, 0, 0, 0);
++    check(r == 7, "nested callback ran and returned r3");
++    check(frame_intact(s_outer_sp, 0xAA000000u), "outer callback's frame survives a nested callback");
++    ctx->gpr[1] += FRAME;
++    ctx->gpr[3] = 1;
++}
++
++// ---- helpers ---------------------------------------------------------------
++static void cb_sp(ppu_context* ctx) { ctx->gpr[3] = ctx->gpr[1]; }
++
++extern "C" const func_entry function_table[1] = {{0, nullptr, nullptr}};   // registered by hand below
++extern "C" const uint64_t function_table_count = 0;
++
++static void opd(uint32_t at, uint32_t code) { vm_write32(at, code); vm_write32(at + 4, TOC); }
++
++int main()
++{
++    if (vm_init() != CELL_OK) { std::fprintf(stderr, "vm_init failed\n"); return 2; }
++    // RSX local memory, mapped as a title's cellGcmInit leaves it, so a callback
++    // stack placed there corrupts instead of faulting.
++    vm_commit(0xC0000000u, 0x10000000u);
++    vm_stack_alloc_init(&g_vm_stack_alloc);
++    ppu_register_function(CODE_PAIR, cb_pair);  ppu_register_function(CODE_OUTER, cb_outer);
++    ppu_register_function(CODE_INNER, cb_inner); ppu_register_function(CODE_SP, cb_sp);
++    opd(OPD_PAIR, CODE_PAIR); opd(OPD_OUTER, CODE_OUTER);
++    opd(OPD_INNER, CODE_INNER); opd(OPD_SP, CODE_SP);
++
++    std::printf("[1] two host threads inside a callback at the same time\n");
++    {
++        std::thread a([] { ppu_guest_call(OPD_PAIR, 0, 0, 0, 0, 0, 0, 0, 0); });
++        std::thread b([] { ppu_guest_call(OPD_PAIR, 1, 0, 0, 0, 0, 0, 0, 0); });
++        a.join(); b.join();
++        std::printf("    frames at 0x%08X and 0x%08X\n", s_pair_sp[0], s_pair_sp[1]);
++        check(s_arrived.load() == 2, "both callbacks reached the rendezvous");
++        check(s_pair_sp[0] + FRAME <= s_pair_sp[1] || s_pair_sp[1] + FRAME <= s_pair_sp[0],
++              "the two threads' frames do not overlap");
++        check(s_pair_ok[0], "thread 0's frame survives thread 1's callback");
++        check(s_pair_ok[1], "thread 1's frame survives thread 0's callback");
++    }
++
++    std::printf("[2] a callback nested in a callback\n");
++    {
++        const uint64_t r = ppu_guest_call(OPD_OUTER, 0, 0, 0, 0, 0, 0, 0, 0);
++        std::printf("    outer frame 0x%08X, inner frame 0x%08X\n", s_outer_sp, s_inner_sp);
++        check(r == 1, "outer callback returned r3");
++        check(s_inner_sp + FRAME <= s_outer_sp || s_outer_sp + FRAME <= s_inner_sp,
++              "outer and inner frames do not overlap");
++    }
++
++    std::printf("[3] where the stacks are\n");
++    {
++        const uint32_t sp0 = (uint32_t)ppu_guest_call(OPD_SP, 0, 0, 0, 0, 0, 0, 0, 0);
++        const uint32_t sp1 = (uint32_t)ppu_guest_call(OPD_SP, 0, 0, 0, 0, 0, 0, 0, 0);
++        std::printf("    depth-0 sp 0x%08X, thread-stack allocator ends at 0x%08X\n",
++                    sp0, g_vm_stack_alloc.region_end);
++        check(sp0 == sp1, "the nesting depth unwinds (same stack for the next call)");
++        check((sp0 & 15) == 0, "callback sp is 16-byte aligned");
++        check(!(sp0 >= 0xC0000000u && sp0 < 0xD0000000u), "callback stack is not in RSX local memory");
++        check(sp_in_stack_region(sp0) && sp_in_stack_region(s_pair_sp[0]) &&
++              sp_in_stack_region(s_pair_sp[1]) && sp_in_stack_region(s_inner_sp),
++              "callback stacks lie in the PPU stack region, above the thread-stack allocator");
++        const uint32_t t = vm_stack_allocate(&g_vm_stack_alloc, 0x10000);
++        check(t && t + 0x10000 <= g_vm_stack_alloc.region_end,
++              "a thread stack allocated afterwards stays below the callback stacks");
++    }
++
++    std::printf("[4] host threads give their callback stacks back\n");
++    {
++        uint32_t end_before = g_vm_stack_alloc.region_end, lowest = 0xFFFFFFFFu;
++        for (int i = 0; i < 64; i++) {
++            uint32_t sp = 0;
++            std::thread th([&] { sp = (uint32_t)ppu_guest_call(OPD_SP, 0, 0, 0, 0, 0, 0, 0, 0); });
++            th.join();
++            if (sp < lowest) lowest = sp;
++        }
++        const uint32_t used = end_before - g_vm_stack_alloc.region_end;
++        std::printf("    64 short-lived threads moved the region end by 0x%X bytes\n", used);
++        check(used <= 0x100000u, "64 short-lived threads reuse a stack instead of carving 64");
++    }
++
++    const unsigned f = s_fail.load();
++    std::printf("%s: %u check(s) failed\n", f ? "FAIL" : "PASS", f);
++    return f ? 1 : 0;
++}
+diff --git a/tools/test_ppu_guest_call_stacks.py b/tools/test_ppu_guest_call_stacks.py
+new file mode 100644
+index 0000000..718b36c
+--- /dev/null
++++ b/tools/test_ppu_guest_call_stacks.py
+@@ -0,0 +1,48 @@
++#!/usr/bin/env python3
++"""ppu_guest_call gives every host thread and nesting depth its own stack.
++
++Builds the real runtime/ppu/ppu_loader.cpp with
++runtime/ppu/tests/test_ppu_guest_call_stacks.cpp: two host threads sit inside
++a guest callback at the same time, a callback delivers a nested callback, and
++each checks that its frame still holds what it wrote. The stacks must come
++from the PPU stack region (above the thread-stack allocator, not from RSX
++local memory), and threads that end must give theirs back.
++"""
++import os
++import subprocess
++import sys
++import tempfile
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++from check_ppu_scaffold import stub_header  # noqa: E402
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++def main():
++    if os.name == 'nt':
++        print('SKIP: standalone fixture uses the POSIX mmap/toolchain')
++        return
++    with tempfile.TemporaryDirectory(prefix='ppu-guest-call-stacks-') as tmp:
++        tmp = Path(tmp)
++        (tmp / 'ppu_recomp.h').write_text(stub_header())
++        binary = tmp / 'test'
++        flags = ['-Wl,-dead_strip'] if sys.platform == 'darwin' else ['-Wl,--gc-sections', '-pthread', '-ldl']
++        subprocess.run([os.environ.get('CXX', 'c++'), '-std=c++17', '-O1', '-w',
++                        '-ffunction-sections', '-fdata-sections',
++                        '-I' + str(tmp), '-I' + str(ROOT / 'include'), '-I' + str(ROOT / 'runtime/platform'),
++                        str(ROOT / 'runtime/ppu/ppu_loader.cpp'),
++                        str(ROOT / 'runtime/ppu/tests/test_ppu_guest_call_stacks.cpp'),
++                        *flags, '-o', str(binary)], check=True)
++        env = {k: v for k, v in os.environ.items() if not k.startswith(('PPU_', 'PS3_', 'PS3RECOMP_', 'SPU_'))}
++        r = subprocess.run([str(binary)], env=env, capture_output=True, text=True, timeout=60)
++        print(r.stdout, end='')
++        sys.stderr.write(r.stderr[-4000:])
++        if r.returncode:
++            raise SystemExit('FAIL: guest callbacks share a stack')
++        print('PASS: guest callbacks run on per-thread, per-depth stacks')
++
++
++if __name__ == '__main__':
++    main()
+-- 
+2.55.0
+
