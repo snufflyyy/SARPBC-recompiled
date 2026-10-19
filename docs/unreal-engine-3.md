@@ -66,7 +66,18 @@ Boot order after the first packages, 01.02, 2026-10-18 (with the T001 memory pat
 → `GUIDCACHE.XXX` → `MAINMENU.XXX` → `cellGcmMapMainMemory` ×2 (1 MB each at
 `0x20A00000`, `0x20B00000`) → two `PPU PhysX thread`s (entry OPD `0x01C4F178`) →
 `RenderingThread` restarted → `cellSysmoduleLoadModule(OVIS)` → PhysX init fails (see
-debugging.md, T003) → the game exits through `sys_prx_exitspawn_with_level`.
+debugging.md, T003) → the game exits through `sys_prx_exitspawn_with_level`. 01.09 runs
+the same sequence (packages `PROJECTX`, `PSYNET`, `ONLINESUBSYSTEMPS3` instead of the
+GameSpy ones; `MultiStream Update Thread` and `SaveData` threads start before PhysX).
+
+**Game thread / rendering thread frame fence** **[seen]**: once per frame the game thread
+waits for the rendering thread with a virtual `Wait(100)` on an event (an lv2 event
+queue receive with a 100 ms timeout, retried until it reports success; 01.02
+`func_000D6300` → lr `0x000D66EC`). A stuck rendering thread shows up as a steady stream
+of `event_queue_receive(q=N timeout=100000) tid=1`, not as a block. The rendering thread
+in turn waits for the RHI's SPURS job chain: `cellSpursRunJobChain` and then an
+`appSleep` poll on a counter the jobs advance (01.02 `func_006DDFF0`, counter at
+`obj+0x21180`; `func_006C61F0` is `appSleep`: float seconds → `sys_timer_usleep`).
 
 ## Threads *(UE3, verify against `sys_ppu_thread_create` calls at boot)*
 
