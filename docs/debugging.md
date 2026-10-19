@@ -219,6 +219,14 @@ one boot_check under the boot lock with `perf record -F 499 --call-graph=fp -p <
 `analysis/spu_profile_<ts>.txt` (raw data in `analysis/spu_profile_<ts>.d/`, delete when done) and
 prints one summary line for task notes. Helper: `tools/spu_profile.py`. No perf or paranoid > 2:
 it prints the `sudo` command to run and falls back to /proc thread CPU only.
+A container can also deny `perf_event_open` when paranoid is 2. The report then
+names the recorder log and uses /proc samples over the requested window.
+The harness waits only the remaining time after a partial recorder failure.
+
+Regression test: `python3 tools/test_spu_profile.py` uses a fake boot and recorder.
+It covers immediate denial and denial after 2 seconds. Before the fix, an 8-second
+run sampled CPU for 0.04 or 2.04 seconds instead of 5 seconds. Both cases now keep
+the 5-second sample window. The test needs no game files or performance counters.
 ```bash
 tools/spu_profile.sh 60 --version 0109 --build-dir build-0109 -- GCM_INTR_THREAD=1 GCM_PARK_GRACE_MS=600000
 ```
