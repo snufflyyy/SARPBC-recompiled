@@ -208,3 +208,24 @@ thread's registers through the TLS `g_active_ctx`, e.g.
 `gpr[i]` is at `+8*i`. To find who writes a FIFO word, start the game under gdb,
 `break cellGcmMapMainMemory`, then `watch -l *(unsigned int*)(vm_base+EA)` with `bt` as
 the command. That is how the flip handler `func_000DC144` was caught releasing the park.
+
+## Profiling
+
+`tools/spu_profile.sh <secs> [--version 0109] [--build-dir DIR] [-- VAR=val ...]` (T029) runs
+one boot_check under the boot lock with `perf record -F 499 --call-graph=fp -p <game pid>`
+(PID taken from boot_check's output, never by name), then writes
+`analysis/spu_profile_<ts>.txt` (raw data in `analysis/spu_profile_<ts>.d/`, delete when done) and
+prints one summary line for task notes. Helper: `tools/spu_profile.py`. No perf or paranoid > 2:
+it prints the `sudo` command to run and falls back to /proc thread CPU only.
+```bash
+tools/spu_profile.sh 60 --version 0109 --build-dir build-0109 -- GCM_INTR_THREAD=1 GCM_PARK_GRACE_MS=600000
+```
+Reading the report: host CPU% (100 = one core) and top threads from /proc; on-CPU sample shares by
+category (lifted SPU, interpreter, SPU runtime helpers, locks/spin, PPU lifted, GCM/Vulkan, other;
+leaf frame, user space only, blocked time is not sampled); lifted SPU per image hash with top
+functions; top symbols per category. `spu_lockline_lock` (reservation line spin) counts as lock.
+`perf script` needs `--no-inline` (else ~2 min and it was killed); done in the script.
+Baseline 01.09, 60 s, the env above (2026-10-19, before the lock reclassification): 1331% host CPU,
+167 threads; 375k samples; lifted SPU 0.8% (image 5af85a31 0.6%), PPU 0.2%, GCM/VK 0.2%,
+`spu_lockline_lock` 83% of all samples, rwlock unlock/rdlock 6.8%, mfc_for 4.1%. So SPU time is
+almost all spinning on the line lock, not computing.
