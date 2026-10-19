@@ -192,6 +192,8 @@ Example summary (01.02, 2026-10-18):
 | Past PhysX (reached only with that local cellOvis test, 2026-10-18): frames stop; the game thread loops on a 100 ms event wait (01.02: q=7, `func_000D6300` lr `0x000D66EC`; 01.09: q=8, lr `0x000ABA24`), the rendering thread sleeps in a poll, the presented frame stays "Loading..." | The RHI's SPURS job chain (01.02 `jc=0x01D53900`, 01.09 chain `0x012B6F00`) has jobs with `eaBinary=0 size=0`, which cellSpurs skips as "implausible binary". 01.02: the rendering thread (`func_006DDFF0`) calls `cellSpursRunJobChain(obj+0x21200)` and then sleep-polls until u32 `[obj+0x21180]` reaches its fence, which only the jobs advance. The FIFO also holds an old-style JUMP to itself (`w=0x20104708` at io `0x00104708`), a placeholder the jobs overwrite; cellGcmSys "resyncs" past it. 01.09 also logs `guard 0x0133AA80 still closed after 20 s -- chain gives up` and unresolved `cellSpursQueuePopBody` | The job binaries are presumably SPUJOBS.SPRX's (Edge Geometry), which is not loaded: T002. Find the poll in a new build from the callers of the `cellSpursRunJobChain` stub (01.02 `0x0194EC60`, 01.09 `0x00F8D4C0`) and the RenderingThread stack |
 | **01.09**, past PhysX (T022, 2026-10-19, with `SPU_INTERP_UNLIFTED=1`): frames stop at the "Loading..." screen. RenderingThread sleeps in `func_000DD014` (called from `func_000E7B70`/`func_000DD214`), polling GPU fence label 255. The main thread loops on `event_queue_receive(q=15, 100 ms)` at lr `0x000ABA24` | Three causes, stacked. **(1)** The game reserves 256 MB with raw `sys_mmapper_allocate_address` (`sc` at `0x000DFA68`), which the runtime puts at `0x20000000`. That is the default `ppu_hle_inject_base` (GCM labels, control register at +0x2000, offset tables). The RHI's fence object sits at `0x20000000` (+0xFA4 next fence, +0xC80 an 18-entry table), on the same page as label 255 at +0xFF0. **(2)** The PPU parks the FIFO with a JUMP-to-self before each `SET_SHADER_PROGRAM` (`0x08E4`). A job of the ShaderPatching chain `0x012B6F00` (SPUJOBS, fp `83BD7B3A22EDAF27`; dispatch HIT, rc 0) releases it. cellSpurs dropped a `RunJobChain` that arrived during a walk, so that job never ran. **(3)** A second kind of park follows `GET_REPORT` + user command `0xEB00`. Its release comes from the flip handler `func_000DC144`, reached through user handler `0xDC390` → `cellGcmSetFlipImmediate`. `ppu_gcm_pump` runs only at HLE imports, so the release comes late. Meanwhile cellGcmSys's `stuck-get` watchdog (8 drains, about 32 ms) or `jump-park` grace (50 ms) resyncs `get` to `put`. That drops the label writes in between, and the fence never arrives | (1) `src/overrides/gcm_inject_base.cpp` (inject base `0x1FF00000`). (2) `T022-spurs-job-chain-rewalk-resume-guard.patch`. (3) **Not fixed (GCM task)**. A local experiment that skipped both resyncs while `get` sits on a self-JUMP reached the legal/ESRB screen with a 3D car, `TEXTURES.TFC` opened, 106 flips: `PROGRESSING | last open TEXTURES.TFC@6.1s ... flips 106`. Pumping in `lv2_syscall` was not needed |
 | **01.09**, after (1)-(3): the ESRB screen stops after ~8-25 s, parked again before `SET_SHADER_PROGRAM` | The ShaderPatching job blocks in `mfc_for` → `pthread_rwlock_wrlock` (`s_mfc_claim_lock`, runtime/spu/spu_channels.c). Dozens of PhysX SPU task threads (image `39119073A3F69512`, `spu-spin pc=0x32B44 GETLLAR ea=0x0133B880`, `HALT-ASSERT heqi pc=0x24884`) take the read lock in a loop. glibc rwlocks prefer readers, so the writer starves (Windows SRWLOCK does not). Making the `win32_compat.h` SRWLOCK writer-preferring (`PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP`) got frames to 21-25 s | Runtime task (Linux SRWLOCK fairness) plus PhysX task (why the tasks assert and spin) |
+| **01.09**, past ESRB (T028, 2026-10-19, `GCM_INTR_THREAD=1 GCM_PARK_GRACE_MS=100000000`, writer-preferring SRW locks): the screens advance (ESRB, "Powered by Unreal", Psyonix, safe-area) but frames fall from ~10/s at 20 s to ~0.4/s after 60 s. The ShaderPatching job rate falls from ~700/s to 20-80/s. RenderingThread sits in the label-255 fence wait `func_000DD014` or the job-counter wait `func_000E2660` (`[obj+0x21180]`, `appSleep` = `func_000D8FA8`), and the main thread loops on `event_queue_receive(q=15)` at lr `0x000ABA24` | PhysX SPU task threads accumulate without limit (gdb: 123 at 45 s, ~350 at 90 s, 561 at 300 s). All of them spin in `spu_lockline_lock`: Dynamics (image `5af85a31`) LS `0x32B44` re-reads line `0x0133B880` and only leaves when the word at EA+0x1C is 2; image `7bde2a3f` LS `0x68E0`/`0x6ACC` spins on line `0x0133AF00`. The game creates 16 tasks per frame. On POSIX `spu_lockline_lock` is a bare test-and-set loop (no pause, no yield; the MSVC branch has both), so ~100+ spinners starve the job-chain thread and the FIFO. **Hard stop at ~297 s:** all 128 task ids of taskset `0x01335080` are held, `cellSpursCreateTask` returns `0x80410904` (NOMEM), the game prints `PhysX: Error starting spurs task: -2143221500`, then NULL reads | **Not fixed (T030).** A local TTAS + pause + `sched_yield` lockline on POSIX doubled flips (183 vs 97 in 180 s) and ShaderPatching to ~400/s, but the tasks still pile up. Why they never exit is open. Guess (unproven): each `HALT-ASSERT heqi pc=0x24884` (next row) strands the peers of its step |
+| **01.09** `[spu] HALT-ASSERT heqi pc=0x24884 img=363824547` (50-150 per run) | Dynamics `func 0x24758` (called from `0x2565C` in `0x254E8`) reads a record at LS `r82` (seen: `0x37690`, the heap past `.bss`) as `{u32 ea @+0x10, u32 count @+0x14}`, calls `memalign(128, 2*count+2)` (`0x34258`), and asserts that the result and `ea` are 16-byte aligned before a DMA. The record really holds `00000041 00000001 41FE72D4 418F6130 41FE7308 418F6164 41943BA0 4193FBF0` (pairs of main-memory pointers). So size = `0x831EC2CA`, memalign returns 0, and ea `0x41FE7308` is only 8-aligned. The values were the same on 4 hits, caught with a gdb breakpoint on `spu_halt` (recipe below) | Open (T030). The record was DMA'd from the wrong EA, with the wrong layout, or the caller chose the wrong record type. On hardware this halt would fire too, so the input is wrong on our side |
 | 01.09 without `SPU_INTERP_UNLIFTED=1` (main after T007): the main thread waits in `sys_cond_wait` (`func_00882698`), and PPU PhysX waits in `cellSpursQueuePop` | `[spu] img=363824547 branched into unlifted LS 0x20180 (lr=0x20148) -- ending the job`: PhysX's LargeIsland overlay region is not lifted (see subsystems.md, PhysX) | PhysX overlay lift (T003 follow-up) |
 
 **Job guard `0x0133AA80` is not a blocker (T022).** Its chain `0x0133AC00` is GUARD →
@@ -208,3 +210,51 @@ thread's registers through the TLS `g_active_ctx`, e.g.
 `gpr[i]` is at `+8*i`. To find who writes a FIFO word, start the game under gdb,
 `break cellGcmMapMainMemory`, then `watch -l *(unsigned int*)(vm_base+EA)` with `bt` as
 the command. That is how the flip handler `func_000DC144` was caught releasing the park.
+
+## From ESRB to the safe-area screen (T028, 2026-10-19)
+
+**Setup that gets past ESRB on 01.09:** main with patch 0029 (SRW locks prefer writers),
+`GCM_INTR_THREAD=1 GCM_PARK_GRACE_MS=100000000`, no `SPU_INTERP_UNLIFTED`. Run boot checks under the
+shared boot lock (one game at a time; with several agents' games the host load reached 100-160 on
+16 cores and every timing stretched):
+```bash
+GCM_INTR_THREAD=1 GCM_PARK_GRACE_MS=100000000 BUILD_DIR=build-0109 \
+  tools/task.sh lock boot tools/boot_check.sh 180 --version 0109 --every 30
+```
+Screens in order: "Loading..." (drawn upside down), legal/ESRB with a 3D car, "Powered by Unreal
+Technology", the Psyonix logo, then the **safe-area screen** ("Use the Left Stick to adjust the
+screen ... Then press X"), reached at 35-95 s depending on load. Before it the SaveData thread runs
+`cellSaveDataAutoLoad2('NPUB30035-PROFILE')`: new profile, `funcStat` returns 1, LOAD complete. It
+is not a blocker. There are no Bink movies (see unreal-engine-3.md).
+
+**Pressing X at that screen.** The game asks for a press, so a boot without input stops there.
+- `PAD_AUTOPRESS=1` pulses CROSS in 12 of every 240 `cellPadGetData` polls. At ~0.4 fps that
+  is one pulse every few minutes.
+- `PAD_SCRIPT` holds each press for 40 polls (latched). At ~0.4 fps that is ~100 s, so presses
+  30 s apart merge into one long hold and X is never released. Seven presses from 80 s to 260 s
+  left the screen up.
+- `PAD_FILE=<file>` with `echo "0x4000 3" > <file>` presses for 3 polls. Drive it from a
+  background loop next to boot_check (that is how T028 tested it). **This reached the main menu**
+  (New Game / Play Online / Split Screen / Options / Extras, "Profile: Guest1") with CROSS for 3
+  polls every 25 s from 70 s. Later presses picked New Game, and `MP_SOCCARARENA.XXX` opened at
+  164 s. After that the log went silent (`boot_check 2026-10-19 11:15 v01.09 240s: HUNG | last open
+  MP_SOCCARARENA.XXX@164.1s | pkgs 14 | zlib 3532 | dumps 22 lit 22 distinct 13 | flips 178`, with
+  the lockline experiment from the table above applied locally). The arena hang is not analysed yet.
+
+**Catch an SPU halt with its registers.** The lifter turns `heqi`/`hgti`/... into
+`spu_halt(ctx)` after the `[spu] HALT-ASSERT` line (`tools/spu_lifter.py`). The Release build has
+no debug info, so read the context by offset: `gpr[r]` is 16 bytes at `ctx + 16*r` (`_u32[0]` =
+preferred slot, host order), and the `ls` pointer is at `ctx + 0x40800` (after the 128 registers
+and the 256 KB `ls_store`). Run the game under `gdb -batch -x halt.py --args build-0109/sarpbc ...`
+with a Python `gdb.Breakpoint("spu_halt")` whose `stop()` reads `$rdi`, keeps only hits whose
+caller frame name contains the image hash (`5af85a31`), prints the registers and LS words, and
+returns True after N hits. Other `spu_halt` calls (normal job ends through `spu_indirect_branch`)
+also hit that breakpoint, so the caller filter is needed.
+
+**SPU disassembly at an LS address:** `spu_disasm.py` takes file offsets, so pass the segment:
+`python external/ps3recomp/tools/spu_disasm.py <spu_gen>/spu_<hash>/image.elf --offset 0x180
+--length 0x16bf0 --base 0x20080` (Dynamics `.text`; `readelf -l image.elf` gives offset/vaddr).
+
+**Count threads by what they do:** `gdb -p <pid> -batch -ex 'thread apply all bt 10'`, then group
+the threads by their top 6 frames. Three hundred threads in `spu_lockline_lock` mean the spinning
+PhysX tasks described in the table above.
