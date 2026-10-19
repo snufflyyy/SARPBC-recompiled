@@ -3,21 +3,26 @@
 Living document. Update the phase table, "Next steps" and the log at the end of each
 work session. Newest log entry first. Use absolute dates.
 
-## Resume here (paused 2026-10-19 for usage)
+## Resume here (running again 2026-10-19, max 3 agents)
 
-**State:** `main` builds both versions with **15 ps3recomp patches** (`tools/apply_patches.sh`).
+**State:** `main` builds both versions with **17 ps3recomp patches** (`tools/apply_patches.sh`).
 01.09 boots past the loading screen, package loading and PhysX init (SPURS queues work), then
-hangs on job guard `0x0133AA80` / event flag `0x01372000` (MultiStream). No agents are running.
+hangs on job guard `0x0133AA80` / event flag `0x01372000` (MultiStream).
 
-**Unmerged WIP branches** (git worktrees under `.claude/worktrees/`; their HANDOFF notes are on the tasks):
-- `worktree-agent-ab345549dd2d5074c`: **T008** controls (dod3 cellPad port + racing fixes, SDL test
-  passes; `src/overrides/input_config.cpp` was never compiled, so build it before merging).
-- `worktree-agent-acc9f9ae8ed145a97`: **T007** audio (Linux cellAudio pacing at 187.5 blocks/s with 0 underruns on PipeWire; /dev_flash default; dod3 stand-in flashMP3.pic + native MP3 decoder). Still silent: the MultiStream DSP plugin block at LS 0x37000 is not lifted (`SPU_INTERP_UNLIFTED=1` works around it). Next: port dod3 `tools/make_spu_overlays.py` plus a relift.sh step.
+**Merged 2026-10-19:** T008 controls: dod3 cellPad port (0016), racing fixes (0017),
+`src/overrides/input_config.cpp` + `input_kbm.cpp` (keyboard/mouse as pad 0, car defaults in
+config.toml). R2=128 seen in the game's pad buffer (0x0FEFF360). Held keys and rumble are
+unverified until the loading stall is fixed. Note: `PAD_TRIGGERS` times from the first
+GetData (~4.0 s on 01.09), not from launch.
 
-**Open tasks, by priority:** T022 (01.09 frontier), T007 (audio, resume from HANDOFF), T008
-(controls, resume from HANDOFF), T023 (fork fixes), T020 (remaining: unresolved-NID reporting,
+**Running:** T022 (01.09 frontier, agent-frontier2), T007 (audio, agent-audio, resumed from
+`worktree-agent-acc9f9ae8ed145a97`).
+
+**Open tasks, by priority:** T023 (fork fixes), T020 (remaining: unresolved-NID reporting,
 hle-coverage.md), T017 (saves), T021 (rest of the dod3 inventory), T012, T009, T018, T005,
 T010, T011, T013, T014. T015 multiplayer stays **blocked** (user permission needed).
+Follow-ups proposed by T008 (after the stall): windowed key/rumble check, mouse camera, button
+prompts by pad type.
 
 **To restart:** see docs/agents-workflow.md "Pausing and resuming"; spawn agents with
 docs/agent-brief.md. Before building `main`: `tools/apply_patches.sh`, then reconfigure CMake.

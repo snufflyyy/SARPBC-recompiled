@@ -1,7 +1,7 @@
 # T007: Audio — MultiStream on SPU through cellAudio/SDL2
 
-Status: open
-Owner: -
+Status: claimed
+Owner: agent-audio
 Touches: tools/make_spu_overlays.py + its relift.sh step (coordinator-approved 2026-10-19), src/overrides/audio_*.cpp (new), patches/ps3recomp/T007-*.patch (libs/audio/**, runtime/spu/** only for audio), docs/subsystems.md (Audio section only)
 Reads: analysis/spu_EBOOT_elf/ (images 12-14 mstream_dsp_*), docs/reference-ports.md (dod3 src/apu/)
 
@@ -36,3 +36,4 @@ in docs/subsystems.md.
 - 2026-10-18 23:57 agent-audio: Merged main (0001-0008), dropped local cellOvis workaround. Plan per user directive: port dod3 src/apu (mp3dec.c, mp3_native.c stand-in flashMP3.pic, msdsp) with attribution. NEED (outside my Touches): the DSP plugin block that MultiStream DMAs to LS 0x37000 (images 12-14 packed) must be lifted as an overlay at 0x37000 like dod3 tools/make_spu_overlays.py + a relift.sh step. Until granted I run it through SPU_INTERP_UNLIFTED=1 (works: flag 0x01372000 no longer blocks).
 - 2026-10-19 00:08 agent-audio: HANDOFF: done=cellAudio port runs on a real device (PipeWire, SDL pulseaudio) at 187.5 blocks/s, 0 underruns, 0 dropped (patch T007-audio-pacing-devflash-sig-region: POSIX pacing + AUDIO_RATE/PEAK/WAV, /dev_flash default off Windows, spu_overlay_register_sig_region); stand-in flashMP3.pic + native decodeFrame at LS 0x1A910 ported from dod3 (src/overrides/audio_mp3*.cpp, MIT): the file opens, the 'mp3 failed' error is gone. state=the mixer (SPU image 0, fp C1759183E2FF7448) calls the DSP plugin block DMA'd to LS 0x37000 (0x37018 lr 0x03930), which is not lifted, so the task ends and flag 0x01372000 blocks; SPU_INTERP_UNLIFTED=1 works around it (flag no longer blocks), but every block is still silent (100%) and decodeFrame has not been called yet (no MP3 stream starts before the Loading... stall). next=(1) port dod3 tools/make_spu_overlays.py wrap/register to lift the DSP block (images 12-14 packed as dod3 PLUGINS, check the offsets with SPU_DUMP_OVL=<dir>,0x37000) at 0x37000 + a relift.sh step (needs tools/ in Touches); (2) port msdsp_hooks.c; (3) once the boot gets past Loading, verify with SARPBC_MP3_TRACE=20 AUDIO_RATE=1 AUDIO_PEAK=1 SDL_AUDIODRIVER=pulseaudio; (4) check the drain-resume host depth under SPU_INTERP_UNLIFTED over long runs. branch=worktree-agent-acc9f9ae8ed145a97
 - 2026-10-19 00:08 agent-audio: RELEASED: paused for usage; see HANDOFF note
+- 2026-10-19 08:58 agent-audio: claimed

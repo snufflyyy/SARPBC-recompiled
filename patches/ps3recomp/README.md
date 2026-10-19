@@ -45,6 +45,8 @@ order we expect to need them (details in `docs/reference-ports.md`):
 | `0013-ppu-fs-open-flags.patch` | T021 (from the dod3 fork): ppu_fs uses the Cell SDK open flags (O_CREAT 0x40, O_TRUNC 0x200) | to offer (fork author's fix) |
 | `0014-sys-fs-h-open-flags-test.patch` | T021 (from the dod3 fork): sys_fs.h octal open flags; cellFsOpen flag test | to offer (fork author's fix) |
 | `0015-spurs-queue-ppu.patch` | T019: real PPU side of SPURS Queue (PopBody/PushBody, attach/detach) and LFQueue init in the task-side layout | to offer |
+| `0016-dod3-cellpad-sdl2-port.patch` | T008: Drakengard 3 fork's 13 libs/input commits (SDL pad thread, pads by instance id, rumble held, `cellPad_set_host_input`, host kind, PAD_NO_HOST); soyjxck, MIT, authors kept | fork author's work: offer with them |
+| `0017-cellpad-racing-fixes.patch` | T008: press-mode trigger pressure (a half pull read 255), small motor on/off at 0xFFFF, empty ports' sticks centred at 128, `PAD_TRIGGERS`/`PAD_TRACE`; test `libs/input/tests/test_cellpad_sdl.py` | to offer |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `git -C external/ps3recomp format-patch -1 -o ../../patches/ps3recomp/ --start-number N`.
