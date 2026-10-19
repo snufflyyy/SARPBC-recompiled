@@ -1,0 +1,108 @@
+# AGENTS.md — SARPBC-recomp
+
+Static recompilation of **Supersonic Acrobatic Rocket-Powered Battle-Cars** (PS3 / PSN,
+`NPUB30035`, Psyonix, 2008, Unreal Engine 3) into a native PC executable, built on
+[ps3recomp](https://github.com/sp00nznet/ps3recomp). No emulator at run time: PPU (and SPU)
+machine code is lifted ahead of time to C/C++ and linked against ps3recomp's runtime and
+HLE system libraries.
+
+This file is the **core**: read it every session. Read the `docs/` file for whatever area
+you are touching instead of re-scanning the tree or the game files.
+
+## Current state (keep this line true)
+
+**Phase 3: analysed, not yet lifted.** Git repo + ps3recomp submodule set up; PKG
+extracted to `vfs/`; EBOOT and SPUJOBS decrypted to `game/`; `ppu_loader` output in
+`analysis/`. No port code or lift yet. Live status and next steps:
+[docs/status.md](docs/status.md).
+
+## Key facts
+
+| | |
+|---|---|
+| Title / ID | Supersonic Acrobatic Rocket-Powered Battle-Cars — `NPUB30035` (PSN, USA) |
+| Content ID | `UP2002-NPUB30035_00-SARBATTLECARS001` |
+| Version | APP_VER `01.02`, built for firmware 2.40 |
+| Engine | Unreal Engine 3, package version 539 (`0x21B`), game module `TAGame` |
+| Executable | NPDRM SELF → `game/EBOOT.elf`: stripped PPC64, 47,602 functions, 274 imports from 20 libraries |
+| SPU code | 15 SPU ELFs in the EBOOT (Edge zlib, PhysX, MultiStream DSP) + Edge Geometry jobs in `game/SPUJOBS.prx` |
+| Host | Linux (Fedora), clang + CMake + Ninja; Vulkan is the render backend |
+| Toolkit | `external/ps3recomp` = upstream `sp00nznet/ps3recomp` v0.15.0 (`39a3629`), pinned. Features from the Drakengard 3 fork are brought over as patches ("middle path", see `patches/ps3recomp/README.md`) |
+| Closest reference | Drakengard 3 ([soyjxck/dod3-recomp](https://github.com/soyjxck/dod3-recomp)), a playable UE3 port on ps3recomp |
+
+## Hard rules
+
+1. **Never commit or publish game data**: the PKG, RAP, EBOOT (encrypted or decrypted),
+   SPRX, extracted assets, lifted C/C++ from the game, or SPU dumps. They are all
+   derived from copyrighted code. Only our own sources, configs, scripts and notes go
+   into git. Keys/klicensees never go anywhere.
+2. **Do not commit changes inside `external/ps3recomp`.** It is a pinned upstream
+   submodule. Changes to it, including features ported from the Drakengard 3 fork, live
+   as patches in `patches/ps3recomp/` (see its README) and are offered upstream. Shared
+   runtime code must stay title-agnostic (upstream ratchets this with `tools/title_hacks.py`).
+3. **Generated code is never hand-edited.** `src/recomp/`, `src/spu_gen/`, `src/gen/` are
+   rebuilt by `tools/relift.sh`. Game-specific behaviour goes in `src/overrides/` or
+   `src/stubs.cpp`, keyed by guest address or NID.
+4. **Record what you learn.** A new fact about the binary (an address, a subsystem, a
+   hang and its cause) goes into the matching doc in the same change. Update
+   [docs/status.md](docs/status.md) at the end of a work session. Mark guesses as guesses.
+5. Linux is not yet a proven boot platform upstream (see
+   [docs/build-linux.md](docs/build-linux.md)); expect to fix POSIX/Vulkan gaps and keep
+   those fixes upstreamable.
+
+## Repo layout (planned — create as you go, update here if it changes)
+
+```
+AGENTS.md  CLAUDE.md         agent entry points (CLAUDE.md just imports this file)
+docs/                        technical docs, one topic per file (index below)
+Supersonic Acrobatic ... (USA)/   original .pkg + .rap — read-only, git-ignored
+external/ps3recomp/          git submodule, pinned; override with $PS3RECOMP
+patches/ps3recomp/           our patches against the pinned upstream (+ README: how/why)
+vfs/dev_hdd0/game/NPUB30035/ extracted install (PARAM.SFO, USRDIR/...) — git-ignored
+game/                        decrypted EBOOT.elf, SPUJOBS.prx — git-ignored
+analysis/                    ppu_loader / imports / SPU image output — git-ignored
+tools/rpcs3/                 RPCS3 AppImage + isolated config, used only by decrypt.sh — git-ignored
+.venv/                       Python venv for ps3recomp tools — git-ignored
+src/main.cpp src/stubs.cpp   from the ps3recomp project template
+src/overrides/               per-address / per-NID game fixes
+src/recomp/ src/spu_gen/ src/gen/   GENERATED — git-ignored
+tools/                       extract.sh, relift.sh, run.sh, helper scripts
+CMakeLists.txt  config.toml
+```
+
+## Pipeline in one screen
+
+```bash
+git submodule update --init   # external/ps3recomp, then apply patches/ps3recomp/*.patch
+tools/extract.sh      # PKG -> vfs/dev_hdd0/game/NPUB30035/   (ps3recomp tools/pkg_extract.py)
+tools/decrypt.sh      # RAP + RPCS3 --decrypt (headless) -> game/EBOOT.elf, game/SPUJOBS.prx
+tools/relift.sh       # (not written yet) ppu_loader -> ppu_lifter --hle-stubs -> gen_hle_nids (+ SPU)
+cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+      -DPS3RECOMP_RSX_VULKAN=ON && cmake --build build
+tools/run.sh          # PS3_HDD0_ROOT=vfs/dev_hdd0 ./build/sarpbc game/EBOOT.elf
+```
+Details and every flag: [docs/pipeline.md](docs/pipeline.md).
+
+## Docs index — read the one you need
+
+| Doc | Read it when |
+|---|---|
+| [docs/status.md](docs/status.md) | Always, at session start: where things stand, what is next, open problems |
+| [docs/game-profile.md](docs/game-profile.md) | You need facts about the game files, PKG contents, PARAM.SFO, configs |
+| [docs/ps3recomp-primer.md](docs/ps3recomp-primer.md) | You need to know what ps3recomp provides, where things live in it, its limits |
+| [docs/pipeline.md](docs/pipeline.md) | Extracting, decrypting, lifting, regenerating, or building |
+| [docs/build-linux.md](docs/build-linux.md) | Toolchain, CMake options, Vulkan, Linux-specific gaps |
+| [docs/unreal-engine-3.md](docs/unreal-engine-3.md) | Reasoning about the game's own code: threads, file I/O, renderer, UnrealScript |
+| [docs/reference-ports.md](docs/reference-ports.md) | Before solving a UE3 problem: Drakengard 3 (dod3-recomp) is a finished UE3 port on ps3recomp |
+| [docs/subsystems.md](docs/subsystems.md) | Working on graphics, audio, input, SPU/SPURS, saves, video, network, trophies |
+| [docs/debugging.md](docs/debugging.md) | Something hangs, crashes or draws wrong; env vars and triage recipes |
+
+## Working conventions
+
+- Match ps3recomp's style in code we write (C17 for runtime-style code, C++20 for the
+  boot scaffold); keep comments explaining *why*, with guest addresses in hex.
+- Prefer a general fix in an HLE module (as an upstreamable patch) over a per-title hack;
+  if a hack is unavoidable, put it in `src/overrides/` with the reason and the address.
+- RPCS3 is a behavioural reference only — never copy its (GPL) code into this tree.
+- Long-running steps (full PKG extract, a full lift, a full build) take minutes; run them
+  in the background and do not repeat them without cause.
