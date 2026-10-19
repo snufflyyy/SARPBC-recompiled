@@ -95,3 +95,89 @@ elsewhere. Without glslang the Vulkan backend still builds but stays fixed-funct
 - Fibers use ucontext on POSIX; thread-local storage, `SIGPIPE`, and path separators are
   the usual POSIX trouble spots.
 - Keep every Linux fix generic and file it as a patch in `patches/ps3recomp/` + an upstream PR.
+
+## SRW locks prefer writers on glibc (T027)
+
+ps3recomp's runtime is written against Win32 primitives, and `runtime/platform/win32_compat.h`
+maps them onto pthreads on POSIX. An `SRWLOCK` becomes a lazily allocated `pthread_rwlock_t`.
+The two do not schedule the same way:
+
+- A **Windows SRW lock** lets a waiting writer in ahead of readers that arrive after it.
+- **glibc's default rwlock prefers readers.** While read sections overlap, the lock never goes
+  idle, and a writer waits for as long as readers keep coming.
+
+**How it hit SARPBC (01.09, found by T022).** Every SPU channel access goes through `mfc_for`
+(`runtime/spu/spu_channels.c`), which takes the shared side of `s_mfc_claim_lock` to find the
+context's MFC engine. A context seen for the first time takes the exclusive side to register
+itself. Dozens of PhysX SPU task threads spin on the shared side (`spu-spin pc=0x32B44 GETLLAR
+ea=0x0133B880`). The ShaderPatching job (chain `0x012B6F00`) then blocked in
+`pthread_rwlock_wrlock` for good. The FIFO park before `SET_SHADER_PROGRAM` was never released, and
+the legal/ESRB screen stopped after 8-25 s.
+
+**Fix:** patch `T027-win32-compat-srw-writer-preference.patch`. On glibc (`#ifdef __GLIBC__`),
+`ps3__rwl_init` sets `PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP`. Only the `NONRECURSIVE`
+kind changes anything: glibc treats plain `PTHREAD_RWLOCK_PREFER_WRITER_NP` as reader preference.
+Windows is unchanged. Other POSIX libcs have no setkind call and keep their default. As far as
+we know musl also prefers readers, so a writer could still starve there. Darwin and the BSDs
+have their own policies. Neither has been tested.
+
+**The rule this imposes (it is SRW's own rule too):** code must not take the shared side twice
+on one thread. It also must not wait, while holding the shared side, for another thread that
+needs the same lock. With a writer queued in between, either one deadlocks. Every shared-side
+user in the tree was checked on 2026-10-19 and is a leaf table lookup that takes no other lock
+and waits for nothing:
+
+| Site | Lock |
+|---|---|
+| `mfc_for`, runtime/spu/spu_channels.c | `s_mfc_claim_lock` |
+| `spurs_port_queue`, libs/spurs/cellSpurs.c | `s_spurs_queue_lock` |
+| `sq_spurs_of`, libs/spurs/cellSpursQueue.c | `s_sq_lock` |
+| SPU `send_event` port lookup, runtime/syscalls/lv2_register.c | `s_spu_port_lock` |
+| `SleepConditionVariableSRW(..., CONDITION_VARIABLE_LOCKMODE_SHARED)` | drops and re-takes once; only the shim's own test uses it |
+
+The guest's `sys_rwlock_*` (runtime/syscalls/sys_rwlock.c) uses its own `pthread_rwlock_t` with
+default attributes on POSIX, so this patch does not affect it. If a guest writer ever starves
+behind spinning guest readers, look there next (it is still reader-preferring on glibc).
+When you add a new `AcquireSRWLockShared` call, keep it a leaf.
+
+**Test:** `test_srw_writer_progress` in `runtime/platform/tests/test_win32_compat.c` (built
+as the upstream CI does: `cc -std=gnu17 -Wall -Wextra -I runtime/platform
+runtime/platform/tests/test_win32_compat.c runtime/platform/win32_compat.c -lpthread`). Four
+readers re-take the shared lock in overlapping 50 us sections while a writer needs it 20
+times, with a 3 s deadline. Without the fix: `writer starved: 0/20 writes in 3001 ms`. With
+it: `343 passed, 0 failed` (clang and gcc, glibc 2.43, also pinned to 1, 2 and 4 cores with
+`taskset`). It asserts only on glibc and prints the result elsewhere.
+
+**Boot evidence (01.09, 2026-10-19, main relifted, no `SPU_INTERP_UNLIFTED`).** Every run had
+`GCM_INTR_THREAD=1 GCM_PARK_GRACE_MS=600000 GCM_PARK_LOG=1`. The large grace stands in for the
+"never skip a park" GCM experiment: with the default 50 ms grace, one `FIFO resync (jump-park)`
+dropped a fence, and the run stayed on "Loading..." whatever the lock did. Each run was 90 s,
+under `tools/task.sh lock boot`, with `--gdb`. The control is the **same binary** with
+`LD_PRELOAD` of a 1-line shim that turns `pthread_rwlockattr_setkind_np` into a no-op, which
+gives the glibc default. That shim makes the unit test fail again, `0/20 writes`. The boot order
+of the screens is legal/ESRB, then the Psyonix logo, then the Unreal logo, then the safe-area screen.
+
+| Run | Lock | Screens reached (time of the frame dump) | gdb at 90 s, `s_mfc_claim_lock` |
+|---|---|---|---|
+| L1 | writer-pref | ESRB, then **Psyonix @33.8 s** | 1 writer and 55 readers queued (congested; jobs and parks still logged to 98 s) |
+| L3 | writer-pref | ESRB @6.6 s, then **Unreal logo @39.7 s** | readers flowing, a writer just released |
+| L2 | glibc default | ESRB @10.7 s, then nothing new until Psyonix fading in @86.3 s | a writer (`spu_mfc_release`) starved in `wrlock` |
+| L4 | glibc default | **stuck on ESRB** from 6.6 s to the end | ShaderPatching job (`jc_thread` → `spu_prxjob_0caea65c...` → `spu_wrch` → `mfc_for`) starved in `wrlock` |
+
+boot_check first lines: L1 `STALLED since 70.1s | last open TEXTURES.TFC@25.2s | ... dumps 15
+lit 15 distinct 2 | flips 58`. L3 `STALLED since 75.9s | last open TEXTURES.TFC@5.6s | ... dumps
+7 lit 7 distinct 3 | flips 103`. L2 `STALLED since 71.2s (frames still presented) | ... TEXTURES.TFC@9.7s
+| ... flips 69`. L4 `STALLED since 68.1s | ... TEXTURES.TFC@5.6s | ... dumps 6 lit 6 distinct 2 |
+flips 80`. ("STALLED" means no new kinds of log line. Parks were still being patched at the
+end of every run.) An earlier unlocked run, with the same settings and the fix, reached the
+**safe-area screen** ("Use the Left Stick to adjust the screen...") at 76.2 s.
+
+**What this shows.** With writer preference, both runs left the ESRB screen within about 35 s.
+With reader preference, one control sat on ESRB for the whole run with the job starved, and the
+other needed 75 s. It is **not enough on its own.** Dozens of PhysX SPU task threads (image
+`363824547`, spinning at `0x32B44` on `GETLLAR 0x0133B880`, see debugging.md) all go through
+`mfc_for` on every channel access. L1 had 91 threads and L3 had 172. That many threads on one
+rwlock congest it whatever the policy, so the frame rate falls after the logos. The real fixes:
+(1) take the hot path of `mfc_for` off the lock, for example by caching the engine in
+`spu_context` (runtime/spu, proposed as a follow-up task); (2) find why the PhysX tasks spin and
+assert (T028).
