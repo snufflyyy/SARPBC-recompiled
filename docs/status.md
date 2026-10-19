@@ -20,6 +20,11 @@ Psyonix logo, the safe-area screen (needs X), then the menu. New Game opens MP_S
 ~164 s, then the log goes silent (T037). There's no Bink anywhere in 01.09. Pressing X needs a
 `PAD_FILE` loop for now (T036 will make it `boot_check --pad`).
 
+**Verified on `main` as merged (f2b5baf, no env overrides, under the boot lock):**
+`boot_check 2026-10-19 11:23 v01.09 f2b5baf 90s: STALLED since 73.3s (frames still presented) | last open TEXTURES.TFC@6.1s | pkgs 13 | zlib 3291 | dumps 25 lit 25 distinct 21 | flips 1119 | threads 13/9 alive | unresolved 0 | alerts assert,blocked`.
+The last frame is the safe-area screen, waiting for X. That's 1119 flips, against 100-514 in
+the agents' runs. "STALLED" only means no new kinds of log line.
+
 **State of `main`:** 36 patch files (54 commits on 39a3629). Merged this session: 0028 + 0031
 (SPU ctor seeding + test), 0029 (SRW writer preference), 0030 (per-thread callback stacks), 0032
 (SSE2 SPU float helpers) + CMake `-march=x86-64-v2` for lifted SPU code (mixer 15% -> 53% of real
