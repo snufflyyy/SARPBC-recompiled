@@ -1,0 +1,70 @@
+From e3a0c7945f6dafe3ebfe91823c79921f4a8e2999 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Mon, 19 Oct 2026 09:15:30 -0500
+Subject: [PATCH] cellSpurs.h: the task errors are 0x804109xx
+
+CELL_SPURS_TASK_ERROR_* were CELL_ERROR_BASE_SPURS | 0x21..0x32, i.e.
+0x80410721..0x80410732: values no SDK library returns. The task, taskset,
+event flag, queue and semaphore errors are their own facility, 0x804109xx
+(AGAIN 0x80410901 ... NULL_POINTER 0x80410911), which is what the
+literals elsewhere in libs/spurs already use (0x8041090F STAT, 0x80410911
+NULL_POINTER, cellSpursQueue.c's SQ_ERR_*). A title's own code compares
+against those: a non-blocking SPURS queue pop wrapper treats 0x80410901
+(AGAIN) as "empty", and would have taken 0x80410721 for a failure.
+
+Adds NOEXEC (0x07), ALIVE (0x0E); FAULT is 0x0D (was 0x32). The core
+errors (0x804107xx) were right and are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/spurs/cellSpurs.h | 34 ++++++++++++++++++++++------------
+ 1 file changed, 22 insertions(+), 12 deletions(-)
+
+diff --git a/libs/spurs/cellSpurs.h b/libs/spurs/cellSpurs.h
+index 0be3106..c58ce11 100644
+--- a/libs/spurs/cellSpurs.h
++++ b/libs/spurs/cellSpurs.h
+@@ -30,18 +30,28 @@ extern "C" {
+ #define CELL_SPURS_CORE_ERROR_NULL_POINTER      (CELL_ERROR_BASE_SPURS | 0x11)
+ #define CELL_SPURS_CORE_ERROR_PERM              (CELL_ERROR_BASE_SPURS | 0x09)
+ 
+-#define CELL_SPURS_TASK_ERROR_AGAIN             (CELL_ERROR_BASE_SPURS | 0x21)
+-#define CELL_SPURS_TASK_ERROR_INVAL             (CELL_ERROR_BASE_SPURS | 0x22)
+-#define CELL_SPURS_TASK_ERROR_NOSYS             (CELL_ERROR_BASE_SPURS | 0x23)
+-#define CELL_SPURS_TASK_ERROR_NOMEM             (CELL_ERROR_BASE_SPURS | 0x24)
+-#define CELL_SPURS_TASK_ERROR_SRCH              (CELL_ERROR_BASE_SPURS | 0x25)
+-#define CELL_SPURS_TASK_ERROR_NOENT             (CELL_ERROR_BASE_SPURS | 0x26)
+-#define CELL_SPURS_TASK_ERROR_BUSY              (CELL_ERROR_BASE_SPURS | 0x2A)
+-#define CELL_SPURS_TASK_ERROR_STAT              (CELL_ERROR_BASE_SPURS | 0x2F)
+-#define CELL_SPURS_TASK_ERROR_ALIGN             (CELL_ERROR_BASE_SPURS | 0x30)
+-#define CELL_SPURS_TASK_ERROR_NULL_POINTER      (CELL_ERROR_BASE_SPURS | 0x31)
+-#define CELL_SPURS_TASK_ERROR_FAULT             (CELL_ERROR_BASE_SPURS | 0x32)
+-#define CELL_SPURS_TASK_ERROR_PERM              (CELL_ERROR_BASE_SPURS | 0x29)
++/* The task (and taskset / event flag / queue / semaphore) errors are their own
++ * facility, 0x804109xx, not CELL_ERROR_BASE_SPURS (0x804107xx, the core's).
++ * These were 0x80410721..0x80410732, which no SDK code returns or tests for:
++ * a title's own code compares against the real values (one non-blocking
++ * SPURS queue pop wrapper treats 0x80410901, AGAIN, as "empty"), and the
++ * literals already written elsewhere in libs/spurs (0x8041090F STAT,
++ * 0x80410911 NULL_POINTER, cellSpursQueue.c's SQ_ERR_*) are these. */
++#define CELL_SPURS_TASK_ERROR_BASE              0x80410900u
++#define CELL_SPURS_TASK_ERROR_AGAIN             (CELL_SPURS_TASK_ERROR_BASE | 0x01)
++#define CELL_SPURS_TASK_ERROR_INVAL             (CELL_SPURS_TASK_ERROR_BASE | 0x02)
++#define CELL_SPURS_TASK_ERROR_NOSYS             (CELL_SPURS_TASK_ERROR_BASE | 0x03)
++#define CELL_SPURS_TASK_ERROR_NOMEM             (CELL_SPURS_TASK_ERROR_BASE | 0x04)
++#define CELL_SPURS_TASK_ERROR_SRCH              (CELL_SPURS_TASK_ERROR_BASE | 0x05)
++#define CELL_SPURS_TASK_ERROR_NOENT             (CELL_SPURS_TASK_ERROR_BASE | 0x06)
++#define CELL_SPURS_TASK_ERROR_NOEXEC            (CELL_SPURS_TASK_ERROR_BASE | 0x07)
++#define CELL_SPURS_TASK_ERROR_PERM              (CELL_SPURS_TASK_ERROR_BASE | 0x09)
++#define CELL_SPURS_TASK_ERROR_BUSY              (CELL_SPURS_TASK_ERROR_BASE | 0x0A)
++#define CELL_SPURS_TASK_ERROR_FAULT             (CELL_SPURS_TASK_ERROR_BASE | 0x0D)
++#define CELL_SPURS_TASK_ERROR_ALIVE             (CELL_SPURS_TASK_ERROR_BASE | 0x0E)
++#define CELL_SPURS_TASK_ERROR_STAT              (CELL_SPURS_TASK_ERROR_BASE | 0x0F)
++#define CELL_SPURS_TASK_ERROR_ALIGN             (CELL_SPURS_TASK_ERROR_BASE | 0x10)
++#define CELL_SPURS_TASK_ERROR_NULL_POINTER      (CELL_SPURS_TASK_ERROR_BASE | 0x11)
+ 
+ /* ---------------------------------------------------------------------------
+  * Constants
+-- 
+2.55.0
+
