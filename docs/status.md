@@ -3,6 +3,24 @@
 Living document. Update the phase table, "Next steps" and the log at the end of each
 work session. Newest log entry first. Use absolute dates.
 
+## Running now (2026-10-19, resumed)
+
+Step 1 below is done: T025's patch is merged as 0028, both versions are relifted, and
+01.09's `spu_func_00020180` (PhysX static ctor) is lifted (15/15 images complete). T022 is closed.
+Agents running: T025 (agent-spuperf: verify without `SPU_INTERP_UNLIFTED`, x86 SIMD), T024
+(agent-gcm: park reconcile, `gcm_config.cpp`), T027 (agent-rwlock), T026 (agent-cbstack),
+T028 (agent-frontier3: ESRB to menus, new). T027 merged as 0029 (10:50); T030 (agent-spinwait) started early by the user because one boot spins ~15 of 16 cores.
+
+**User plan (2026-10-19), in order:**
+1. Menus first (T024-T028 as above).
+2. Once the menus are reached, every slot moves to **SPU performance, easy wins only**:
+   T029 (profiling harness on Sonnet; it may take the first free slot even before the menus, since it is tooling only), T030 (busy-wait loops), T031 (lifter codegen),
+   T032 (DMA/MFC), T033 (host threads), and T025's SIMD helpers. Measured, bit-exact, nothing deep;
+   bigger ideas become proposed tasks.
+3. When the easy wins are done: wrap up and stop all agents.
+4. The coordinator audits the project (read-only sweeps on Sonnet agents, fixes by the coordinator) for cleanliness, tidiness and extensibility: docs vs.
+   reality, the patch stack, scripts, overrides, the task board, stale worktrees and branches.
+
 ## Resume here (paused 2026-10-19 for usage)
 
 **Priority (user): get 01.09 into the menus.** Every agent slot goes to the boot until then.

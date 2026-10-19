@@ -128,3 +128,12 @@ Details and every flag: [docs/pipeline.md](docs/pipeline.md).
 - RPCS3 is a behavioural reference only — never copy its (GPL) code into this tree.
 - Long-running steps (full PKG extract, a full lift, a full build) take minutes; run them
   in the background and do not repeat them without cause.
+- **Claude Code: hand work to a smaller model wherever it fits.** Use **Sonnet 5.5**
+  (`model: "sonnet"` on the Agent tool) for real work, and **Haiku 5.5** (`model: "haiku"`) only
+  for read-only code and doc searches ("where is X", "list every Y"), never for edits or
+  judgement calls. Sonnet fits well-scoped, easily checked work: tooling scripts, audit
+  sweeps, mechanical ports and compile fixes, tests for behaviour already understood. Keep frontier
+  debugging (GCM/SPURS stalls), SPU or runtime concurrency and lifter codegen on the main
+  model. A task file's `Model: sonnet` line marks it; the coordinator reviews every diff the
+  same way whatever the model. Details: [docs/agents-workflow.md](docs/agents-workflow.md)
+  "Coordinator procedure".
