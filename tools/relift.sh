@@ -75,4 +75,10 @@ rm -rf "$SPU"
     --lifted "$SPU" --out "$SPU/spu_workloads.c" \
     --constructor --allow-partial
 
+# SPUJOBS.SPRX's two SPURS job binaries (Edge Geometry + ShaderPatching), found by
+# evaluating the module's module_start offline (T002; runtime side: patch 0004).
+# jobmods_register.c is a name CMakeLists already compiles from SPU_DIR.
+"$PY" "$ROOT/tools/lift_prx_jobs.py" "$GAME_DIR/SPUJOBS.prx" \
+    --lifted "$SPU" --register "$SPU/jobmods_register.c"
+
 echo "lifted -> $RECOMP ($(ls "$RECOMP" | wc -l) files, $(du -sh "$RECOMP" | cut -f1))"
