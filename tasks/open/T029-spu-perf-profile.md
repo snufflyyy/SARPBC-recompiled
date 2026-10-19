@@ -15,3 +15,6 @@ Build the measuring stick for the other SPU perf tasks. `tools/spu_profile.sh <s
 Before/after numbers in docs/subsystems.md (SPU/SPURS section, your own subsection), tests green, patches apply in the stack.
 
 ## Log
+- 2026-10-19 10:59 agent-profile: claimed
+- 2026-10-19 11:13 agent-profile: 01.09 60s GCM_INTR_THREAD=1: spu_profile 2026-10-19 | host 1331% CPU, 167 threads | 375k samples | SPU lifted 0.8% interp 0.0% rt 6.6% | lock/spin 90.1% (spu_lockline_lock 83%, rwlock unlock/rdlock 6.8%) | PPU 0.2% | GCM/VK 0.2% | top image 5af85a31=0.6%. HANDOFF: done=tools/spu_profile.sh+.py+docs Profiling, one real run; state=works (final rerun of the shell script after adding --no-inline not repeated, report regenerated from saved perf.data); next=rerun once end-to-end, T030 targets spu_lockline_lock; branch=worktree-agent-a7309d44b142f11e0
+- 2026-10-19 11:13 agent-profile: RELEASED: paused; see HANDOFF

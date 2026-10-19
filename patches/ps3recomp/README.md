@@ -60,6 +60,8 @@ order we expect to need them (details in `docs/reference-ports.md`):
 | `0028-spu-seed-ctors-dtors.patch` | T025: `find_spu_functions.py` seeds `.ctors/.dtors/.init_array/.fini_array` entries (and `-1..0` framed lists in stripped images); PhysX LS 0x20180 is a static ctor | to offer |
 | `0029-win32-compat-srw-writer-preference.patch` | T027: SRW-lock emulation prefers writers on glibc (`PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP`); fixes the ShaderPatching job starving on `mfc_for` with 01.09 at the ESRB screen. Test `test_srw_writer_progress` | to offer |
 | `0030-ppu-guest-call-stacks.patch` | T026: `ppu_guest_call`/`_ct` run each callback on a per-(host thread, nesting depth) stack carved from the top of the PPU stack region (256 KB + guard page, pooled; `PPU_CB_STACK_SIZE`), not the shared 0xCFFE0000 that also sat in RSX local memory. Test `test_ppu_guest_call_stacks.py` | to offer |
+| `0031-spu-ctor-dtor-seed-test.patch` | T025: unit test for `collect_ctor_dtor_targets` (0028) | with 0028 |
+| `0032-spu-sse2-float-helpers.patch` | T025: SSE2 port of the NEON `fa/fs/fm/fma/fms/fnms` fast path in `spu_helpers.h`, bit-exact (`test_spu_float_sse.c`); fma+fm 12 ns vs 33 ns | to offer |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `git -C external/ps3recomp format-patch -1 -o ../../patches/ps3recomp/ --start-number N`.

@@ -232,7 +232,30 @@ if(SPU_SOURCES)
         INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/runtime/spu"
         COMPILE_DEFINITIONS SPU_USE_DISPATCH_MT)
     if(NOT MSVC OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2")
+        set(SPU_COMPILE_OPTIONS "-O2")
+        # x86 ISA level for the lifted SPU code (T025). The runtime library already
+        # builds with -msse4.1 (ps3recomp's CMakeLists); the lifted images, built
+        # here, did not, so their inlined spu_shufb was the byte loop: 37% of the
+        # MultiStream mixer in perf. x86-64-v2 = SSE4.2/SSSE3/POPCNT (any x86-64
+        # CPU since ~2009). The float helpers' SSE2 path needs no flag. Empty
+        # disables it; probed, so a non-x86 host or a compiler without the flag
+        # just skips it. clang-cl takes -m flags directly; real cl.exe does not
+        # build the SPU sources (see the SDK CMakeLists).
+        set(SARPBC_SPU_X86_ARCH "x86-64-v2" CACHE STRING
+            "-march level for lifted SPU sources on x86 (empty: compiler default)")
+        if(SARPBC_SPU_X86_ARCH AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+            include(CheckCCompilerFlag)
+            if(CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+                set(_spu_arch_flag "-msse4.2")         # clang-cl: no -march levels
+            else()
+                set(_spu_arch_flag "-march=${SARPBC_SPU_X86_ARCH}")
+            endif()
+            check_c_compiler_flag("${_spu_arch_flag}" SARPBC_HAS_SPU_ARCH_FLAG)
+            if(SARPBC_HAS_SPU_ARCH_FLAG)
+                list(APPEND SPU_COMPILE_OPTIONS "${_spu_arch_flag}")
+            endif()
+        endif()
+        set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "${SPU_COMPILE_OPTIONS}")
     endif()
 endif()
 
