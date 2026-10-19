@@ -1,7 +1,7 @@
 # T002: Load SPUJOBS.SPRX (sys_prx_load_module / sys_prx_start_module are unresolved)
 
-Status: open
-Owner: -
+Status: claimed
+Owner: agent-prx
 Touches: src/overrides/prx_*.cpp (new), docs/subsystems.md (SPU section), docs/game-profile.md (SPU code section), tools/ (new scripts only)
 Reads: game/SPUJOBS.prx, external/ps3recomp/tools/lift_prx.py, prx_exports.py, runtime/ppu/ppu_sysprx.cpp
 
@@ -22,3 +22,4 @@ images so cellSpurs job chains can dispatch them (SPU_DUMP_MISS, find_spu_functi
 plan for them. Documented in docs/subsystems.md.
 
 ## Log
+- 2026-10-18 23:12 agent-prx: claimed

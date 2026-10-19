@@ -1,7 +1,7 @@
 # T001: Find and fix the stall after UE3 package loading (boot frontier)
 
-Status: open
-Owner: -
+Status: claimed
+Owner: agent-frontier
 Touches: src/overrides/ (new files only; edgezlib.cpp is shared with T002/T004 — note before editing), src/main.cpp, docs/unreal-engine-3.md, docs/debugging.md
 Reads: everything
 
@@ -25,3 +25,4 @@ fix is committed with its evidence, and docs/debugging.md "Hangs found so far" h
 per cause. Report the new frontier.
 
 ## Log
+- 2026-10-18 23:12 agent-frontier: claimed

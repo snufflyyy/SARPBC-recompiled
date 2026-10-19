@@ -1,7 +1,7 @@
 # T006: One-command boot check that reports how far the game got
 
-Status: open
-Owner: -
+Status: claimed
+Owner: agent-harness
 Touches: tools/boot_check.sh (new), tools/boot_report.py (new), docs/debugging.md (a "boot_check" section only)
 Reads: analysis/run*.log, docs/debugging.md
 
@@ -20,3 +20,5 @@ new files). Optionally `--gdb` to attach and dump guest stacks at the end. Outpu
 the coordinator can paste its summary line into status.md.
 
 ## Log
+- 2026-10-18 23:12 agent-harness: claimed
+- 2026-10-18 23:12 agent-harness: claimed; worktree set up; first build running

@@ -1,7 +1,7 @@
 # T003: PhysX on SPU — cellOvis overlay table and SPU image #7
 
-Status: open
-Owner: -
+Status: claimed
+Owner: agent-physx
 Touches: patches/ps3recomp/T003-*.patch (external/ps3recomp/libs/** for cellOvis, tools/build_spu_workloads.py / spu_program_pipeline.py), docs/subsystems.md (PhysX bullets only, coordinate with T002 via notes)
 Reads: analysis/spu_EBOOT_elf/, src/spu_gen/inventory.json, external/ps3recomp/runtime/spu/
 
@@ -23,3 +23,4 @@ reason it can't be yet, plus the plan). Patches exported as T003-*.patch with te
 upstream has a test pattern for the area.
 
 ## Log
+- 2026-10-18 23:12 agent-physx: claimed

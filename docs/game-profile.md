@@ -145,3 +145,23 @@ decoder from console firmware that a port has to replace — check whether we hi
 inside; its strings are **Edge Geometry** errors (vertex/index decompression, blend
 shapes, skinning). So it carries raw SPURS job images for Edge Geometry, run through
 job chains. Capture them with `SPU_DUMP_MISS` or carve them from the PRX.
+
+## Versions and updates (researched 2026-10-18)
+
+| Version | Source | What | Status here |
+|---|---|---|---|
+| **01.02** | the user's PSN package (base install) | 30.2 MB EBOOT, 3 arenas, GameSpy online | **what is ported today** |
+| 01.04 | community-archived patch (not on Sony's server any more) | base of the community online mod | not obtained |
+| SARPBC Online Mod 1.15 | community patch by kuxir97 (distributed via the SARPBC+ Discord; documented at [eiddor/sarpbc-online](https://github.com/eiddor/sarpbc-online)) | online play through **RPCN** (open-source PSN replacement): "Play Online" → Unranked Match / Join A Friend; installed as 1.02 → 1.04 → 1.15 | not obtained; this is the multiplayer route the user chose |
+| **01.09** | official title update, still on Sony's update server: `https://a0.ww.np.dl.playstation.net/tpl/np/NPUB30035/NPUB30035-ver.xml` | 205,355,568 bytes, needs FW 4.60; SHA-1 (file minus its last 32 bytes) `9cc78619...a7cb3c235`, verified. Downloaded to `updates/` (git-ignored) | downloaded, not ported |
+
+What 01.09 changes (from its file table, 108 entries): a new **19.2 MB EBOOT** (a different
+build: every address differs from 01.02), a new SPUJOBS.SPRX (53 KB), **three new arenas**
+(`MP_COSMIC`, `MP_GALLEON`, `MP_STADIUM`), replays (`SAVE/REPLAY/*.PNG`), `DEMOSCREEN`,
+and **GameSpy replaced** by `ONLINESUBSYSTEMPS3` + `PSYNET` (the Psyonix server list that
+was shut down on 2023-01-24). An update installs over the base under the same
+`/dev_hdd0/game/NPUB30035/`.
+
+Known issues the community reports under RPCS3 with the online mod (worth checking in
+our port): scoring on Galleon crashes ("fails to allocate memory"), saving replays crashes,
+and the frame rate is uncapped in the engine.
