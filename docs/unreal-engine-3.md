@@ -100,6 +100,22 @@ GCM label/report or flip event did not fire. See [debugging.md](debugging.md).
   render-to-texture and MRT, which the ps3recomp draw engine supports.
 - `LOADSCREEN.FPO/VPO` are the boot loading-screen programs **[seen]** — the first
   thing that should draw.
+- **GPU fences (01.09, T022) [seen].** Each RHI fence is a back-end label write to label
+  255 (`0x1D6C 0xFF0`, `0x1D70 value`). The CPU waits in `func_000DD014`, which sleeps 250 µs
+  (`sys_timer_usleep`) until label ≥ target, with wrap-around compare; the last value seen is
+  kept at `0x01295480`. The fence bookkeeping object is at the base of the title's RSX heap
+  (`0x20000000`: +0xFA4 next fence, +0xFA0 count, +0xC80 table).
+- **RSX heap:** one `sys_mmapper_allocate_address(0x10000000, align 0x10000000)` via raw `sc`
+  at `0x000DFA68`, of which `cellGcmMapMainMemory(0x20000000, 0xA00000)` is RSX-visible.
+- **FIFO parks [seen].** The PPU writes a JUMP-to-self and keeps writing after it. Two
+  kinds: (a) after `GET_REPORT` + user command `0xEB00`, released by the **flip handler**
+  `func_000DC144` (OPD `0x012025A0`) through the user handler `func_000DC390` (OPD `0x012025B0`)
+  → `cellGcmSetFlipImmediate`; vblank handler OPD `0x012025A8`. (b) Before
+  `SET_SHADER_PROGRAM`, released by a **ShaderPatching** SPU job (chain `0x012B6F00`, command
+  ring `0x01295D00`: 512 slots, a JOB per patched draw, LWSYNC (`0x12`) every 64 slots,
+  NEXT back to the start at slot 512; descriptors 256 B from `0x01296D80`; job binary
+  `0x0C000100` in SPUJOBS). The game appends by overwriting the END slot and calls
+  `cellSpursRunJobChain` each time.
 
 ## Subsystems in the engine build
 
