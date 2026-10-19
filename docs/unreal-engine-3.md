@@ -117,10 +117,34 @@ GCM label/report or flip event did not fire. See [debugging.md](debugging.md).
   `0x0C000100` in SPUJOBS). The game appends by overwriting the END slot and calls
   `cellSpursRunJobChain` each time.
 
+## Boot screens after loading (01.09, T028) **[seen]**
+
+- **No intro movies.** The 01.09 install has no `.bik` files (and no `MOVIES` folder); only the
+  three `BINARIES/PS3/BINK/BINKPS3_*.BIN` shader programs. The "intro" is rendered by the engine
+  from `MAINMENU.XXX`/`STARTUP_INT` content: legal/ESRB with a 3D car → "Powered by Unreal
+  Technology" → Psyonix logo → **safe-area screen** → (CROSS) **main menu** (New Game, Play Online,
+  Split Screen, Options, Extras; profile "Guest1"; reached 2026-10-19, T028) ("Use the Left Stick to adjust the screen to
+  fit your television. Then press X"). Bink HLE is not needed to reach the menus.
+- The safe-area screen waits for **CROSS**, so a run without input stops there (see
+  debugging.md "From ESRB to the safe-area screen" for the input tools that work at low frame rates).
+- Before it, the `SaveData` thread (created at ~10 s) calls `cellSaveDataAutoLoad2` on
+  `NPUB30035-PROFILE`; with no save it gets a new profile (`funcStat` result 1) and goes on.
+- Every frame on these screens creates **16 PhysX SPU tasks** (`cellSpursCreateTask` on taskset
+  `0x01335080`: entry `0x01130600` with argument `{0x0133B880, 1, 0x01345700, 0}`, entry
+  `0x011E3300` with `{0x0133AF00, 1, 0x01345100, 0x01345180}`). The workers share a 128-byte
+  work line at `0x0133B880` (Dynamics image `5af85a31` reads it with GETLLAR at LS `0x32B44`
+  and leaves only when the word at +0x1C is 2). Workers that never see the end pile up. See
+  debugging.md.
+- **RenderingThread waits (01.09):** `func_000E2660` sleep-polls (`appSleep` = `func_000D8FA8`,
+  float seconds → `sys_timer_usleep`, minimum 30 µs) until u32 `[obj+0x21180]` reaches its target
+  (wrap-safe compare). This is 01.02's `func_006DDFF0` counter wait. `func_000DD014` is the label-255
+  fence wait. Callers seen: `func_000E3684` → `func_00BF5400` → `func_000E2660`, and
+  `func_000EE334`/`func_000DD214` → `func_000DD014`.
+
 ## Subsystems in the engine build
 
 - **Bink** video (BinkPS3 shaders present **[seen]**): software decode on PPU and/or SPU,
-  YCrCb→RGB on RSX. It is game code, not an HLE module.
+  YCrCb→RGB on RSX. It is game code, not an HLE module. 01.09 ships no `.bik` files (above).
 - **PhysX** 2.x present (`bDisablePhysXHardwareSupport`) **[seen]**; on PS3 it may
   offload to SPU *(verify)* — likely heavy user of SPUJOBS or embedded SPU code.
 - **Audio**: `PS3Drv.PS3AudioDevice`, 32 channels, on **MultiStream** (SPU) → cellAudio
