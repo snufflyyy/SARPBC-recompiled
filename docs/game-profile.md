@@ -138,7 +138,7 @@ decoder from console firmware that a port has to replace — check whether we hi
 | 1 | `0x1A05480` | 37,708 | **Edge zlib** (package decompression) |
 | 2, 6, 11 | `0x1A0F000`, `0x1A65780`, `0x1B21D00` | 10–39 KB | **PhysX** SPU tasks (SPURS queue) |
 | 3–5, 8–10 | `0x1A11700`... | 42–163 KB | unknown, likely PhysX/engine tasks |
-| 7 | `0x1A6F000` | 323,840 | uses `CellStackAllocator` (PhysX?) |
+| 7 | `0x1A6F000` | 323,840 | **PhysX `SPU_DynamicsRelease.elf`**, entry `0x200F0`; two overlays at LS `0x3080` (`OverlaySmallIsland` code, LMA `0x40000`; `OverlayLargeIsland` zero scratch, LMA `0x5A480`) loaded via the cellOvis table, see [subsystems.md](subsystems.md#spu--spurs) |
 | 12–14 | `0x1CBC400`... | 2–11 KB | **MultiStream DSP**: `mstream_dsp_i3dl2`, `_filter`, `_para_eq` |
 
 **`SPUJOBS.SPRX`** → `game/SPUJOBS.prx`: a PPU PRX (`e_type 0xFFA4`) with no SPU ELFs

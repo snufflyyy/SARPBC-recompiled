@@ -61,7 +61,8 @@ work. Update the **Status** line of a section when you change it.
 
 - **Status (2026-10-18):** 14 of 15 embedded images are lifted and registered
   (`build_spu_workloads.py --input --allow-partial` in `tools/relift.sh`). Image #7 (324 KB,
-  PhysX) is refused because of overlapping PT_LOADs. The Edge zlib task (image 1, fp
+  PhysX Dynamics, an overlay image) lifts too once the T003 pipeline patch is in (see PhysX
+  below). The Edge zlib task (image 1, fp
   `4100F6EDD2441719`) is dispatched, runs, and then idles in `WAIT_SIGNAL`, because Edge
   zlib requests are now serviced natively on the PPU (`src/overrides/edgezlib.cpp`).
 - **`_cellSpursLFQueuePushBody` (NID `0x8A85674D`) has no HLE upstream.** The override
@@ -70,7 +71,52 @@ work. Update the **Status** line of a section when you change it.
   skips. This title passes counter 0 and flag `0x01DC8E00` bits `0x0001`.
 - `sys_prx_load_module` / `sys_prx_start_module` are unresolved NIDs: SPUJOBS.SPRX
   (Edge Geometry) is not loaded yet.
-- PhysX prints "Error allocating memory for overlay table: 0 0" after `cellOvis` loads.
+- **PhysX on SPU (T003, 2026-10-18).**
+  - Ten PhysX SPU programs, listed by a table at `0x1CCB8E0` of `{name EA, ELF EA, overlay
+    table EA}` x 10 (accessors `0x2245C8` = ELF, `0x224610` = table). ELF EA minus `0x10000`
+    is the EBOOT file offset, i.e. the image number in [game-profile.md](game-profile.md#spu-code):
+    11 `SPU_IslandGenerationRelease.elf`, **7 `SPU_DynamicsRelease.elf`**, 10/9/8
+    `SPU_NarrowPhase1/2/3Release.elf`, 6 `Cloth`, 5 `HeightField`, 4 `Raycast`,
+    2 `FluidSpatialHash`, 3 `FluidCollision`.
+  - **cellOvis (libovis)** builds the main-memory image an SPU overlay manager DMAs from.
+    Init loop `0x224F94` (function `0x224E58`, TOC `0x1C9E6CC`), right after
+    `cellSysmoduleLoadModule(CELL_SYSMODULE_OVIS)`: for each program,
+    `size = cellOvisGetOverlayTableSize(elf EA)`; skip on 0 or `0x80410402` (INVAL); else
+    allocate `size + 0x84` and align to 128 (original pointer at `t - 4`), then
+    `cellOvisInitializeOverlayTable(t, elf)`, and any non-zero result is fatal ("PhysX: Error
+    initializing overlay table: %i %i"). The table pointer goes verbatim into the SPU task
+    context: `struct + 0x4B4` at `0x5793C4`, i.e. offset `0x34` of the context at
+    `struct + 0x480`. The SPU checks it is 128-aligned (`0x80410410` = ALIGN otherwise).
+  - **Before T003** upstream's cellOvis was invented API: `GetOverlayTableSize(path, u32*)`
+    returned NOT_INITIALIZED (`0x80410701`, nothing calls its fake `cellOvisInit`), the
+    game asked the allocator for ~2 GB and printed "Error allocating memory for overlay
+    table: 0 0"; `cellOvisInitializeOverlayTable` (`0xA876C911`) was not registered at all.
+    Patch `T003-cellovis-overlay-table.patch` implements both real functions: size = highest
+    overlay `p_paddr + p_memsz` rounded to 128 (`0x77480` for image 7), INVAL for an ELF with
+    no overlay; init zeroes the table and copies each overlay to `t + p_paddr`. Overlay =
+    PT_LOAD with `p_paddr` >= 256 KiB and != `p_vaddr`. Boot now logs
+    `GetOverlayTableSize(elf=0x01A7F000) -> 0x77480` and `InitializeOverlayTable(table=0x40EF0080, ...)`
+    and no PhysX error; the other nine programs have no overlays and are skipped.
+    `cellOvisFixSpuSegments` / `InvalidateOverlappedSegments` are still missing (not imported).
+  - **Image 7 overlays.** PT_LOADs: `.SpuGUID` (16 B at `0x3000`), `.text`+`.rodata` at
+    `0x20080`, `.data`/`.bss` at `0x36C80`, and two overlays at VMA `0x3080`:
+    `OverlaySmallIsland` (code + inline strings, LMA `0x40000`, `0x1A470` B) and
+    `OverlayLargeIsland` (LMA `0x5A480`, `0x1D000` B, all zero: a scratch buffer). The SPU
+    manager (`0x33C00`, load-and-mark `0x33DC0`) walks `{vma, size, lma, loaded}` x 3 at LS
+    `0x36C80` (count at `0x36CB0`) and DMA-GETs `size` bytes from `table + lma`, clearing
+    `loaded` on overlays it overwrites. `0x20188` brings in LargeIsland, after which a stack
+    allocator (`0x37120` cursor, `0x37130` end) hands out `0x3080..0x20080` as scratch;
+    `0x20338` brings SmallIsland back and resets the allocator to `0x164F0..0x1D4F0`
+    (the free tail of the code overlay). `.text` then calls straight into it (`brsl 0x9170`
+    at `0x236CC`, `0x23DC4`).
+  - **Lifting it** (patch `T003-spu-overlay-lift.patch`): only one overlay holds code, so the
+    pipeline lifts `.text` and SmallIsland together as one image (one LS image spanning both,
+    each at its own address; 1,463 functions, 495 in the overlay) and registers it by full-ELF
+    fingerprint `39119073A3F69512`. Same-address code overlays would need separate lifts and
+    are still refused. Ranges holding an undecodable word (inline strings seeded by `ila`) are
+    dropped as data; that also fixes the 01.09 images `e33837bb55e5` and `d08b1ad818d0`.
+  - **Not yet seen running:** the PhysX taskset is created (`CreateTaskset() ea=0x01CEE680`)
+    but no PhysX task starts before the boot stall, so image 7 has not been HIT at run time.
 - Confirmed sources ([game-profile.md](game-profile.md#spu-code)): 15 SPU ELFs embedded
   in the EBOOT — **Edge zlib** (package inflate), **PhysX** tasks, **MultiStream** DSP,
   several unidentified — and **Edge Geometry** job images inside `SPUJOBS.prx`
