@@ -68,8 +68,34 @@ work. Update the **Status** line of a section when you change it.
   handles only 32-byte (Edge zlib) queues and refuses others loudly.
   Request layout: in/out EA, in/out size, counter EA|inflate bit, flag EA, flag bits,
   skips. This title passes counter 0 and flag `0x01DC8E00` bits `0x0001`.
-- `sys_prx_load_module` / `sys_prx_start_module` are unresolved NIDs: SPUJOBS.SPRX
-  (Edge Geometry) is not loaded yet.
+- **SPUJOBS.SPRX loads (T002, 2026-10-18).** ps3recomp patch `T002-sys-prx-load-module`
+  adds general `sys_prx_load_module` / `_on_memcontainer` / `start` / `stop` /
+  `unload` (`runtime/prx/prx_runtime.c` + handlers in `runtime/ppu/ppu_sysprx.cpp`):
+  - The guest file is an NPDRM SELF the runtime cannot decrypt, so the loader looks
+    for a decrypted copy beside the booted ELF (`game/SPUJOBS.prx` next to
+    `game/EBOOT.elf`; tries `FOO.prx`, `foo.prx`, `FOO.PRX`, `FOO.elf`) or in
+    `$PS3_PRX_DIR`. No per-title table: everything comes from the module file.
+  - Segments go into a bump window at `0x0C000000..0x0D000000`
+    (`prx_runtime_window_base/end`, or `PS3_PRX_LOAD_BASE`). It must stay below
+    `0x10000000`: the job-chain walker skips binaries at or above it as implausible.
+  - module_start runs as lifted code if there is any at its address; otherwise a
+    strict leaf evaluator (loads, stores, immediates, `mr`, `blr`; nothing else)
+    runs it. That covers SPUJobs, whose module_start only copies four TOC words.
+  - Log of a run: `[prx] loaded 'SPUJobs' ... id=0x23001001 at 0x0C000000 size
+    0xFF20: 2 segment(s), 16 relocation(s), toc 0x0C017F10` then
+    `sys_prx_start_module(0x23001001 'SPUJobs') -> CELL_OK, modres=0, argp ...:
+    0C000100 0000FC00 0C00FD80 00000108`.
+- **Edge Geometry / ShaderPatching job binaries:** `tools/lift_prx_jobs.py <prx>
+  --lifted <SPU_DIR> --register <SPU_DIR>/jobmods_register.c` finds them by
+  evaluating module_start offline, lifts each at LS 0 (01.02: A 677 functions, 86
+  `.word`; B 6 functions; 01.09: A 714 / 143 `.word`, B 6), and writes a constructor
+  that registers them by fingerprint. `jobmods_register.c` is a name the
+  CMakeLists already compiles from `SPU_DIR` if present, so no CMake change is
+  needed. Verified with gdb on a running build: `spu_workload_fingerprint` of the
+  bytes at `0x0C000100` (0xFC00) and `0x0C00FD80` (0x110) both resolve through
+  `spu_workload_find`, and the game's globals at `0x01D32690` hold the four argp
+  words. Not yet seen dispatched: no job chain runs before the current boot stall.
+  Details of the module: [game-profile.md](game-profile.md#spu-code).
 - PhysX prints "Error allocating memory for overlay table: 0 0" after `cellOvis` loads.
 - Confirmed sources ([game-profile.md](game-profile.md#spu-code)): 15 SPU ELFs embedded
   in the EBOOT — **Edge zlib** (package inflate), **PhysX** tasks, **MultiStream** DSP,
@@ -83,7 +109,7 @@ work. Update the **Status** line of a section when you change it.
   queues, policy modules), interpreter fallback, `SPU_DUMP_MISS` capture.
 - Typical failure: a PPU thread waiting forever on an event flag / sync word an SPU job
   never set — see [debugging.md](debugging.md).
-- Status: not started.
+- Status: in progress (T002 done: SPUJOBS loads; job binaries lifted and registered).
 
 ## Video (Bink)
 
