@@ -1,7 +1,7 @@
 # T029: SPU perf: profiling harness (where SPU time goes, per image/function, spin share)
 
-Status: open
-Owner: -
+Status: claimed
+Owner: pi
 Priority: 3
 Touches: tools/spu_profile.sh (new), docs/debugging.md (a new "Profiling" section only)
 Reads: docs/tasks/*/T025*, docs/subsystems.md
@@ -25,3 +25,7 @@ Before/after numbers in docs/subsystems.md (SPU/SPURS section, your own subsecti
 - 2026-10-19 23:28 pi: Corrected real runs now report full 57s CPU windows: 1247%/263 threads; 1284%/961; 1278%/997; 1288%/270. All end-to-end boots completed with the expected frontier and zero unresolved calls. perf unavailable (container EPERM), so category percentages cannot be remeasured here. Remaining original goal: parse/report mixer metric (currently only raw diagnostics via EXTRA flags), not part of this fallback fix.
 - 2026-10-19 23:34 pi: HANDOFF: done=perf-denial fallback fix + mocked immediate/partial failure regressions + four real full-window profiles, committed b1d85a3 on pi/work; state=verified, being merged with T030; next=finish original mixer-metric requirement in tools/spu_profile.py/report (currently raw SPURS_EF_STATS/SPU_DMA_RANGE only), perf symbol-category rerun needs a host allowing perf_event_open; branch=pi/work.
 - 2026-10-19 23:34 pi: RELEASED: Verified fallback fix; remaining mixer-report feature is documented in HANDOFF
+- 2026-10-19 23:36 pi: claimed
+- 2026-10-19 23:36 pi: User target is now at least 60 FPS in the main menu. Resuming profiler to establish steady-state menu FPS (distinguish guest flips/unique frames from presentation duplicates), finish mixer reporting, and identify next non-overlapping optimization. Claude still owns T033; no worker-pool edits.
+- 2026-10-19 23:39 pi: Need scope extension: src/main.cpp adds a call on the existing frame-clock thread, new src/overrides/frame_stats.cpp logs cumulative guest-boundary frame count once/s, tools/spu_profile.py + tests add exact counter/window analysis and mixer stats, --warmup separates menu timing from intro. No claimed task owns these paths. Existing ppu_boot_frames_presented excludes pre-first-flip backend presents; backend dump counts do not, and the 500ms dump sampler can miss writes. Impact: diagnostic-only, env gated, no scheduling/guest/ABI changes; tests must reject stale/reset frame counters rather than manufacture FPS.
+- 2026-10-19 23:41 pi: User hardware constraint: RTX 2070 SUPER is installed in a bottom PCIe slot and is slower than normal. All acceptance measurements target this configuration; do not compare to normal full-bandwidth 2070 SUPER expectations. Will query negotiated current/max link under load rather than assume lane count.
