@@ -32,6 +32,27 @@ work. Update the **Status** line of a section when you change it.
   used as render-thread fences, tiled surfaces, zcull, post-FX render-to-texture, DXT
   textures from TFC, Bink YCrCb shaders.
 - First milestone: `LOADSCREEN` program draws the splash/loading screen.
+- **FIFO parks (T024, 2026-10-19).** The RHI ends command segments with a JUMP-to-self
+  ("park") and patches it later. Two writers, seen with `GCM_PARK_LOG=1` (01.09,
+  `SPU_INTERP_UNLIFTED=1`, run `20261019-093854`):
+  1. **The flip handler.** Before the park the FIFO has `GCM_SET_USER_COMMAND` (0xEB00).
+     The walker queues it, the user handler (OPD `0x012025B0`, code `0xDC390`) calls
+     `cellGcmSetFlipImmediate`, and the flip handler `func_000DC144` rewrites the park as
+     JUMP park+4. This takes about 5 ms once the handler is delivered (T022 found the chain).
+  2. **The ShaderPatching SPURS chain `0x012B6F00`.** It rewrites the park word to `0`
+     (a NOP). This takes 12-21 ms, and each time the log shows `chain 0x012B6F00: END after N job(s)`.
+  The park at io `0x8B144` from T023 is one of these. With the pin's code, the stuck-get
+  watchdog resynced ~30 ms after a park, before either writer ran. It also pumped handlers
+  only at HLE imports, but the render thread polls in `sys_timer_usleep` (an lv2 call).
+  T024 patches: fork 0018 (user-command queue) + 0139, `GCM_INTR_THREAD=1` (handlers on a
+  host interrupt thread), the stuck-get watchdog skips self-JUMP parks, `GCM_PARK_GRACE_MS`,
+  and `GCM_PARK_LOG`. With these, every park up to io `0xD3C64` is patched and nothing is
+  dropped (`ref` reaches `0x417C8`). The park at io `0xD494C` (after vertex arrays
+  0x1740/0x1680/0x1FC0) is never patched. The chain ran 227 jobs after it was set but did
+  not patch it, so the jump-park grace resyncs past it. That is T022's cause 2 (a `Run`
+  during an in-flight walk is dropped; libs/spurs). Without `SPU_INTERP_UNLIFTED`
+  (after T007), PhysX stalls first (`cellSpursQueuePopBody`, T025): the FIFO goes idle at
+  get==put≈`0x6FF0C` and never gets that far.
 - Status: not started. Linux/Vulkan is the least-proven upstream path.
 
 ## Audio
