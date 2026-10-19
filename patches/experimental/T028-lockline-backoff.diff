@@ -1,0 +1,60 @@
+diff --git a/runtime/platform/win32_compat.h b/runtime/platform/win32_compat.h
+index 30538f1..f6e7d90 100644
+--- a/runtime/platform/win32_compat.h
++++ b/runtime/platform/win32_compat.h
+@@ -459,7 +459,15 @@ typedef void*  SRWLOCK;
+ typedef SRWLOCK* PSRWLOCK;
+ #define SRWLOCK_INIT NULL
+ 
+-static inline void ps3__rwl_init(void* p) { pthread_rwlock_init((pthread_rwlock_t*)p, NULL); }
++static inline void ps3__rwl_init(void* p) {
++#ifdef __GLIBC__
++    pthread_rwlockattr_t a; pthread_rwlockattr_init(&a);
++    pthread_rwlockattr_setkind_np(&a, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
++    pthread_rwlock_init((pthread_rwlock_t*)p, &a); pthread_rwlockattr_destroy(&a);
++#else
++    pthread_rwlock_init((pthread_rwlock_t*)p, NULL);
++#endif
++}
+ static inline pthread_rwlock_t* ps3_srw(SRWLOCK* l)
+ { return (pthread_rwlock_t*)ps3_lazy_obj((void**)l, sizeof(pthread_rwlock_t), ps3__rwl_init); }
+ 
+diff --git a/runtime/spu/spu_coherency.c b/runtime/spu/spu_coherency.c
+index 923d8bd..4bd964d 100644
+--- a/runtime/spu/spu_coherency.c
++++ b/runtime/spu/spu_coherency.c
+@@ -51,9 +51,31 @@ void spu_lockline_lock(void)
+ void spu_lockline_unlock(void) { _InterlockedExchange(&g_lockline, 0); }
+ #else
+ #include <stdatomic.h>
+-static atomic_flag g_lockline = ATOMIC_FLAG_INIT;
+-void spu_lockline_lock(void)   { while (atomic_flag_test_and_set_explicit(&g_lockline, memory_order_acquire)) { } }
+-void spu_lockline_unlock(void) { atomic_flag_clear_explicit(&g_lockline, memory_order_release); }
++#include <sched.h>
++#if defined(__x86_64__) || defined(__i386__)
++#include <immintrin.h>
++#define SPU_CPU_RELAX() _mm_pause()
++#elif defined(__aarch64__)
++#define SPU_CPU_RELAX() __asm__ __volatile__("yield")
++#else
++#define SPU_CPU_RELAX() ((void)0)
++#endif
++static atomic_int g_lockline = 0;
++/* Same test-and-test-and-set as the MSVC path above. The bare test-and-set
++ * loop has no pause and never yields: with more spinning SPU task threads than
++ * host cores, a preempted holder kept every other GETLLAR/PUTLLC waiting for a
++ * whole scheduler slice. */
++void spu_lockline_lock(void)
++{
++    unsigned spins = 0;
++    while (atomic_exchange_explicit(&g_lockline, 1, memory_order_acquire)) {
++        do {
++            SPU_CPU_RELAX();
++            if (++spins >= 4096) { spins = 0; sched_yield(); }
++        } while (atomic_load_explicit(&g_lockline, memory_order_relaxed));
++    }
++}
++void spu_lockline_unlock(void) { atomic_store_explicit(&g_lockline, 0, memory_order_release); }
+ #endif
+ 
+ /* ===========================================================================
