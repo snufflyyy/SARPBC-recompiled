@@ -77,6 +77,12 @@ rm -rf "$SPU"
     --lifted "$SPU" --out "$SPU/spu_workloads.c" \
     --constructor --allow-partial
 
+# MultiStream's DSP plugin block: the mixer copies the i3dl2 + para_eq plugin text
+# into one heap block and runs it at LS 0x37000, an address no image is lifted at.
+# Rebuild that block from the lifted plugin images, lift it there and register it by
+# its first 16 bytes (T007; docs/subsystems.md "Audio"). Must run after the line above.
+"$PY" "$ROOT/tools/make_spu_overlays.py" --spu "$SPU" --ps3recomp "$PS3RECOMP"
+
 # SPUJOBS.SPRX's two SPURS job binaries (Edge Geometry + ShaderPatching), found by
 # evaluating the module's module_start offline (T002; runtime side: patch 0004).
 # jobmods_register.c is a name CMakeLists already compiles from SPU_DIR.
