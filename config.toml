@@ -10,6 +10,48 @@ elf_path = "game/EBOOT.elf"
 # Optional: path to the game's PARAM.SFO for metadata
 sfo_path = "vfs/dev_hdd0/game/NPUB30035/PARAM.SFO"
 
+# --- Controls (read by the game at start, src/overrides/input_config.cpp) ---
+# Every UPPER-CASE key here becomes the environment variable of that name,
+# unless the environment already has it (KEY_R2=F tools/run.sh wins over this).
+# A gamepad works without any of this (SDL2, any number of pads).
+#
+# Keyboard and mouse -> pad port 0 (src/overrides/input_kbm.cpp). Each value is
+# a list of keys, "none" for no key. Keys are places on the keyboard (SDL
+# scancodes): WASD stays WASD on AZERTY. Names: A-Z 0-9 F1-F12 Space Enter Tab
+# Esc Backspace Shift Ctrl Alt LShift RShift LCtrl RCtrl LAlt RAlt Up Down Left
+# Right Insert Delete Home End PageUp PageDown CapsLock Minus Equals LBracket
+# RBracket Semicolon Quote Comma Period Slash Backslash Grave Num0-Num9
+# Mouse1 (left) Mouse2 (right) Mouse3 (middle) Mouse4 Mouse5 WheelUp WheelDown.
+# A key on R2/L2 is a full trigger pull (throttle / brake).
+KEY_R2         = "W"                       # throttle
+KEY_L2         = "S"                       # brake / reverse
+KEY_MOVE_UP    = "W"                       # left stick: air pitch
+KEY_MOVE_DOWN  = "S"
+KEY_MOVE_LEFT  = "A"                       # left stick: steer
+KEY_MOVE_RIGHT = "D"
+KEY_CROSS      = "Space Mouse2"            # jump
+KEY_CIRCLE     = "Shift Mouse1 Backspace"  # boost
+KEY_SQUARE     = "Ctrl"                    # powerslide
+KEY_TRIANGLE   = "R"
+KEY_L1         = "Q"
+KEY_R1         = "E"
+KEY_L3         = "C"
+KEY_R3         = "V"
+KEY_START      = "Esc Enter"               # Esc no longer closes the window while bound
+KEY_SELECT     = "Tab"
+KEY_UP         = "Up"                      # d-pad
+KEY_DOWN       = "Down"
+KEY_LEFT       = "Left"
+KEY_RIGHT      = "Right"
+KEY_LOOK_UP    = "I"                       # right stick
+KEY_LOOK_DOWN  = "K"
+KEY_LOOK_LEFT  = "J"
+KEY_LOOK_RIGHT = "L"
+# SARPBC_KEYBOARD = 0   # no keyboard/mouse at all
+# SARPBC_KBM_LOG  = 1   # log what the keys hold whenever it changes
+# PAD_NO_HOST     = 1   # no pad or key of the host reaches the game (scripted runs)
+# PAD_TRACE       = 1   # log what reaches the game's pad buffer whenever it changes
+
 [output]
 # Directory for generated recompiled C/C++ source files
 output_dir = "src/recomp/"

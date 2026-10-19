@@ -77,12 +77,88 @@ work. Update the **Status** line of a section when you change it.
   gamepad, 36 checks).
 - **Desk pads:** the SDL thread reads pads even without window focus, so a pad on the desk
   feeds headless runs. Use `PAD_NO_HOST=1` for hands-off runs.
-- **Esc** closes the Vulkan window (`rsx_vulkan_backend_pump_messages`) and is not
-  available as a binding unless it is filtered.
+- **Esc** closes the Vulkan window in `rsx_vulkan_backend_pump_messages`. While Esc is
+  bound (it is START by default), `input_kbm.cpp` installs an `SDL_SetEventFilter` that
+  drops the Esc key-down before the pump sees it. SDL updates its key state before it
+  filters, so the key still reads as held. The window's close button still quits.
 - `src/overrides/input_config.cpp`: UPPER-CASE keys in config.toml `[input]` become
-  environment variables (the environment wins). The keyboard -> pad binding override
-  (a port of dod3 `src/input/kbm.cpp` with an SDL key source) is **not written yet**.
-- Status: in progress (T008), paused. See the task's HANDOFF note.
+  environment variables, and the environment wins (`KEY_R2=F tools/run.sh`). The file
+  is `$SARPBC_CONFIG`, else `config.toml` beside the executable or one folder up
+  (`build-0109/../config.toml`), else `./config.toml`. It runs from a static
+  constructor, before main, so `PAD_*` switches can also live there. The run log
+  prints `[input] <path>: N control setting(s)`.
+- `src/overrides/input_kbm.cpp`: keyboard and mouse into pad port 0. Ported from
+  dod3-recomp `96df4c3 src/input/kbm.cpp` (MIT): the binding table, the key parser and
+  the 4-way sticks come from there. The key source is new: SDL2 `SDL_GetKeyboardState`
+  by **scancode** (a physical key position, so WASD stays WASD on AZERTY),
+  `SDL_GetMouseState` for the buttons, and the wheel counted in the event filter. It
+  only acts while an SDL window has keyboard focus. It registers through
+  `cellPad_set_host_input` (patch T008-1) and is merged with any real pad. The run
+  log prints `[keyboard] keyboard and mouse on pad port 0`. `SARPBC_KEYBOARD=0` turns
+  it off, and `SARPBC_KBM_LOG=1` logs every change. Not built on Windows or macOS (no
+  SDL window there), where ps3recomp's own keyboard fallback stays. Mouse look (dod3
+  `camera.cpp`) is not ported, because it patches Drakengard 3's own camera addresses.
+- **sdl2-compat quirk (measured):** Fedora's SDL2 is sdl2-compat 2.32.74 on top of SDL3.
+  A wheel notch reaches an SDL2 event filter as `wheel.y = 0, preciseY = 1.0`, so the
+  filter also reads `preciseY`.
+
+**Default bindings** (config.toml `[input]`; each value is a list of keys, `none` = unbound):
+
+| PS3 | Car action (guess from RL conventions) | Gamepad (SDL, by position) | Keyboard / mouse | Setting |
+|---|---|---|---|---|
+| R2 (analog) | throttle | right trigger (0-255 pressure) | W (full pull) | `KEY_R2` |
+| L2 (analog) | brake / reverse | left trigger | S | `KEY_L2` |
+| left stick | steer, air pitch/yaw | left stick | W A S D | `KEY_MOVE_UP/_DOWN/_LEFT/_RIGHT` |
+| right stick | camera | right stick | I K J L | `KEY_LOOK_UP/_DOWN/_LEFT/_RIGHT` |
+| CROSS | jump | bottom face (A / Cross) | Space, right mouse | `KEY_CROSS` |
+| CIRCLE | boost | right face (B / Circle) | Shift, left mouse, Backspace | `KEY_CIRCLE` |
+| SQUARE | powerslide | left face (X / Square) | Ctrl | `KEY_SQUARE` |
+| TRIANGLE | (ball cam?) | top face (Y / Triangle) | R | `KEY_TRIANGLE` |
+| L1 / R1 | | shoulders | Q / E | `KEY_L1` / `KEY_R1` |
+| L3 / R3 | | stick clicks | C / V | `KEY_L3` / `KEY_R3` |
+| START | pause | Start / Options | Esc, Enter | `KEY_START` |
+| SELECT | | Back / Share | Tab | `KEY_SELECT` |
+| d-pad | menus | d-pad | arrow keys | `KEY_UP/_DOWN/_LEFT/_RIGHT` |
+
+Key names: A-Z 0-9 F1-F12 Space Enter Tab Esc Backspace Shift Ctrl Alt LShift RShift
+LCtrl RCtrl LAlt RAlt Up Down Left Right Insert Delete Home End PageUp PageDown CapsLock
+Minus Equals LBracket RBracket Semicolon Quote Comma Period Slash Backslash Grave Num0-Num9
+Mouse1 (left) Mouse2 (right) Mouse3 (middle) Mouse4 Mouse5 WheelUp WheelDown. The "car
+action" column is a guess until menus and a match run; check it against the game's own
+controls screen.
+
+- **Verified (01.09, build-0109, 2026-10-19):**
+  - The default command `PAD_TRACE=1 PAD_TRIGGERS=0,128,5 SPU_INTERP_UNLIFTED=1
+    BUILD_DIR=build-0109 tools/boot_check.sh 60 --version 0109` reaches
+    `SetPortSetting(port=0, setting=0x2)` (press mode) and the first `GetData` at about
+    4.0 s, just before `RenderingThread` is created. `PAD_TRIGGERS` counts its `from`
+    from the first GetData, though, so a 5 s start never meets a poll.
+  - With `PAD_NO_HOST=1 PAD_TRACE=1 PAD_TRIGGERS=0,128,0,1` the game's own buffer shows
+    the analog value:
+    `[cellPad] trace port 0 @0FEFF360 len=24 btn=0200 L=(128,128) R=(128,128) L2=0 R2=128`.
+    That is the R2 digital bit plus pressure word button[19] = 128, which the game
+    scales by 1/255 to a half throttle. About 1.7 s later (~5.7 s) a second poll reads
+    `R2=0`.
+  - With the window at 15-16 s after the first poll (`PAD_TRIGGERS=0,200,15,16`) there
+    is no trace line. The game stops polling once the main thread blocks in the
+    loading stall (`STALLED since 21.6s | last open GUIDCACHE.XXX`, 8 flips), so in-game
+    controls cannot be tested until that stall is fixed.
+  - Keyboard path: a scratch harness (SDL `offscreen` driver, which gives the window
+    keyboard focus) ran `input_kbm.cpp` and `input_config.cpp` with a fake
+    `cellPad_set_host_input`. All 9 checks passed: registration before main, config
+    file to env, env over file, lower-case keys ignored, nothing before SDL video,
+    neutral with no key, Esc key-down dropped while Q passes, a wheel notch giving a
+    70 ms stick press that then releases. A real key press cannot be injected
+    headless (no xdotool/ydotool here), so held keys still need a manual check in a
+    windowed run (`SARPBC_KBM_LOG=1`). boot_check runs with `PS3RECOMP_VK_WINDOW=0`,
+    so SDL video is never started and the keyboard reports nothing there.
+  - Rumble: `SetActDirect` goes to `SDL_GameControllerRumble` (patches T008-1/-2; the
+    small motor is on/off at 0xFFFF, the large one 0-255 scaled). It is covered by the
+    patch's test only. The game has not rumbled in a run yet because it does not reach
+    gameplay.
+- Status: T008 done for what the boot allows. Open: in-game check of the bindings and
+  rumble once menus run; mouse camera; button prompts by host kind
+  (`cellPad_host_kind`).
 
 ## SPU / SPURS
 
