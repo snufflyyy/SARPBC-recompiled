@@ -113,7 +113,9 @@ Details and every flag: [docs/pipeline.md](docs/pipeline.md).
 | [docs/reference-ports.md](docs/reference-ports.md) | Before solving a UE3 problem: Drakengard 3 (dod3-recomp) is a finished UE3 port on ps3recomp |
 | [docs/subsystems.md](docs/subsystems.md) | Working on graphics, audio, input, SPU/SPURS, saves, video, network, trophies |
 | [docs/debugging.md](docs/debugging.md) | Something hangs, crashes or draws wrong; `tools/boot_check.sh` (paste the first line of `analysis/boot_report.txt` into task notes), env vars, triage recipes |
-| [docs/agents-workflow.md](docs/agents-workflow.md) | Before any work in parallel: task board, claiming, worktrees, locks, merge flow |
+| [docs/agents-workflow.md](docs/agents-workflow.md) | Before any work in parallel: task board, claiming, worktrees, locks, merge flow, **pausing and resuming** |
+| [docs/agent-brief.md](docs/agent-brief.md) | The prompt every subagent is spawned with (fill in agent, task) |
+| [docs/hle-coverage.md](docs/hle-coverage.md) | Which firmware imports have HLE handlers (stub/impl), named NIDs, ranked gaps (`tools/hle_coverage.py`) |
 
 ## Working conventions
 

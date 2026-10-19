@@ -51,6 +51,23 @@ coordinator (the main session) creates tasks, spawns agents, reviews and merges.
 | `tools/rpcs3/` | Coordinator only |
 | The session scratchpad (`/tmp/claude-*/.../scratchpad`) | **Shared by all agents.** Put your files under a subdirectory named after your agent (e.g. `scratchpad/agent-physx/`), never at the top level (one agent's `msg1.txt` overwrote another's) |
 
+## Pausing and resuming (e.g. when usage runs low)
+
+**Pausing:** the coordinator sends each agent "WRAP UP". Each agent commits WIP on its branch,
+writes a `HANDOFF:` note on its task (done / state / next / branch), and releases the task back to
+`open/` (or marks it done). The coordinator then merges finished branches and lists the unmerged
+WIP branches in docs/status.md "Resume here".
+
+**Resuming:** start a session in the main checkout and say, for example:
+> Read AGENTS.md, docs/status.md "Resume here" and docs/agents-workflow.md. Merge any finished
+> agent branches, then show me which tasks you'd start; after I agree, spawn up to 5 agents
+> with docs/agent-brief.md.
+
+`tools/task.sh list` shows the board, and `tools/task.sh show <ID>` shows a task with its HANDOFF
+note. Every agent is spawned from **docs/agent-brief.md** (fill in `{AGENT}`, `{TASK_ID}`,
+`{TASK_TITLE}`). An agent resuming a released task merges the previous agent's branch, named in
+the HANDOFF note.
+
 ## Coordinator procedure
 
 - Create tasks with `tools/task.sh new <slug> <title>` and fill in **Touches** (exclusive
