@@ -57,7 +57,11 @@ mkdir -p "$RECOMP"
     --chunks "$CHUNKS" --jobs "$JOBS" \
     --output "$RECOMP/"
 
-"$PY" "$PS3RECOMP/tools/gen_hle_nids.py" --all --out "$RECOMP/ppu_hle_nids.cpp"
+# No ppu_hle_nids.cpp here on purpose: without one in RECOMP_DIR, CMake generates the
+# NID -> handler table inside each build dir from THAT build's ps3recomp checkout. The lift
+# is shared read-only between worktrees whose patched toolkits differ, and a table naming
+# handlers a worktree's runtime lacks fails to link there.
+rm -f "$RECOMP/ppu_hle_nids.cpp"
 
 # ---- SPU -------------------------------------------------------------------
 # The SPU ELFs embedded in the EBOOT (Edge zlib, PhysX, MultiStream DSP, ...),
