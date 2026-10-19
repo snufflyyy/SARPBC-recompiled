@@ -38,9 +38,16 @@ you where to look before you have symbols. Facts about *this* binary are marked
 - Huge C++ binary: virtual calls everywhere. On PS3 the vtable holds pointers to OPD
   descriptors, so targets are covered by `EBOOT.functions.json`; an unresolved indirect
   call usually means a corrupt object (bad memory/HLE value), not a missing function.
-- `appMalloc` → a custom allocator over large blocks from `sys_memory_allocate` /
-  `sys_mmapper` *(UE3, verify)*. Out-of-memory at boot = check the runtime's container
-  sizes vs what the game asks for.
+- `appMalloc` → a custom allocator over pages from `sys_memory_allocate` **[seen]**: almost
+  all requests use 64 KB pages (`flags=0x200`; 423 of 641 calls are exactly 0x10000), and
+  it **returns empty pages with `sys_memory_free` and asks for new ones** all through
+  package loading (323 frees in the first 60 s). Live use after MAINMENU is ~69 MB. The
+  runtime must reuse freed address ranges or the 256 MB window runs out (T001 patch).
+  One `sys_mmapper_allocate_memory(0x700000)` comes first (lands at `0x40000000`).
+- Out of memory shows up as `[null-write] guest wrote16 ... by guest-fn=0x005F8E38`: the
+  OOM handler formats the UTF-16 text "OOM 4064..." into a NULL buffer (01.02 address;
+  in 01.09 find it by the same null-write, or by a 2-byte store loop called from the
+  allocator's failure path). It is followed by `IO Failure detected, callstack is:`.
 - RTTI-free, exceptions off; `appErrorf`/`appFailAssert` paths print a message and halt —
   set a breakpoint/trace there to read asserts as text.
 - Big-endian serialization (`FArchive`) with byte swapping in game code: lifted, so no
@@ -52,6 +59,14 @@ you where to look before you have symbols. Facts about *this* binary are marked
 zlib completions), `RegisterTrophyContext` (0x684788), `AsyncIOSystem`,
 `RenderingThread` (started, joined and restarted once during init). The main thread polls
 `cellSysutilCheckCallback` from its loops.
+
+Boot order after the first packages, 01.02, 2026-10-18 (with the T001 memory patch):
+`ENGINE` → `../DLC` (opendir, ENOENT is fine) → `/dev_flash/sys/external/flashMP3.pic`
+(MultiStream's firmware MP3 decoder, not shipped: open fails) → `TAGAME/DEMOS` (opendir)
+→ `GUIDCACHE.XXX` → `MAINMENU.XXX` → `cellGcmMapMainMemory` ×2 (1 MB each at
+`0x20A00000`, `0x20B00000`) → two `PPU PhysX thread`s (entry OPD `0x01C4F178`) →
+`RenderingThread` restarted → `cellSysmoduleLoadModule(OVIS)` → PhysX init fails (see
+debugging.md, T003) → the game exits through `sys_prx_exitspawn_with_level`.
 
 ## Threads *(UE3, verify against `sys_ppu_thread_create` calls at boot)*
 

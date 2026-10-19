@@ -77,6 +77,13 @@ timeout -k 5 -s TERM 60 tools/run.sh > analysis/run.log 2>&1
 grep -v -E '^\s+(r[0-9]|rawstk|ARG)|timer_usleep\(30 us\)|opendir|CLEAR_SURFACE|SetFlipImmediate|SetPrepareFlip|GET_REPORT|label write|usercmd|sys_memory\] allocate|LWM-|DRAW_ARRAYS|port_send' analysis/run.log
 ```
 
+**Count what a log line hides.** Several runtime messages print only their first few
+occurrences: `[edgezlib] #n` shows requests 0–3 only (the total is in the atexit
+`[edgezlib] N requests` line, which a TERM kill skips), and `[null-read]` stops after a
+handful. "Only 4 zlib requests" was this limit, not a stall. For memory, count
+`grep -c 'sys_memory\] allocate('` against `grep -c 'sys_memory\] free('`; a failed
+allocation prints `allocate -> ENOMEM (<KB> in use)` (with the T001 patch).
+
 **Every thread's guest stack** (lifted functions are named `func_<guest addr>`):
 ```bash
 timeout 120 gdb -p <pid> -batch -ex 'set pagination off' -ex 'thread apply all bt 14' > analysis/stacks.txt
@@ -99,3 +106,5 @@ at the OPD in `game/EBOOT.elf`.
 | "Registering Trophy Information" stuck at 0% (intermittent) | Deferred `PROCESSING_COMPLETE` overwrote the game's -1 "done" marker | patch 0001 |
 | PoolThread `EventFlagWait BLOCKED ... flagEA=0x01DC8E00` after opening `CORE.XXX` | `_cellSpursLFQueuePushBody` missing, so Edge zlib never got work | `src/overrides/edgezlib.cpp` |
 | `[spu_workload] async dispatch MISS fp=0x4100F6EDD2441719` | SPU images not lifted | SPU step in `tools/relift.sh` |
+| After `ENGINE.XXX`: last `sys_memory allocate` near `0x4FFF0000` gets no `-> addr`, then `[null-write] guest wrote16 0x4F to 0x00000000 by guest-fn=0x005F8E38` (the UTF-16 text "OOM 4064...", UE3's out-of-memory message formatted into a NULL buffer) and `IO Failure detected` | ps3recomp's `sys_memory_allocate` was a one-way bump pointer over `0x40000000`–`0x50000000`; `sys_memory_free` never gave the range back. UE3 frees and re-asks for 64 KB pages all through loading (641 allocations, ~261 MB requested in total, while ~69 MB is live) | `patches/ps3recomp/T001-sys-memory-reuse-freed-ranges.patch` (range table, first fit). Runtime-level, no guest addresses: carries over to 01.09 |
+| After `MAINMENU.XXX`: `PhysX: Cannot load SPURS programs. ... Error allocating memory for overlay table: 0 1 ... Cannot run without SPURS.`, then `sys_prx_exitspawn_with_level() - no-op` (the game is quitting) and NULL reads in `0x006E73E0`/`0x006D3A88` during teardown | `cellOvisGetOverlayTableSize` HLE returns `CELL_OVIS_ERROR_NOT_INITIALIZED` (0x80410701); the game uses the result as a size, hence `allocate(size=0x80420000)` twice just before the message | Owned by T003 (cellOvis / PhysX SPU image #7). Open as of 2026-10-18 |

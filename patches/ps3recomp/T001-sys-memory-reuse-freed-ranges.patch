@@ -1,0 +1,264 @@
+From 372081a3cacb9a4da0c4ee20044a194008613909 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Sun, 18 Oct 2026 23:19:22 -0500
+Subject: [PATCH] sys_memory: reuse freed address ranges instead of a one-way
+ bump pointer
+
+sys_memory_allocate handed out the 0x40000000-0x50000000 window with a
+bump pointer that never moved back: sys_memory_free only cleared the
+bookkeeping, and sys_mmapper_free_address did nothing. A title whose
+allocator returns empty pools and asks for new ones therefore runs out of
+address space while using a fraction of it.
+
+Supersonic Acrobatic Rocket-Powered Battle-Cars (NPUB30035, Unreal
+Engine 3) does exactly that with 64 KB pages through package loading:
+641 allocations (~261 MB in total) hit ENOMEM at 0x50000000 while it had
+freed hundreds of them, its out-of-memory handler then wrote its message
+through a NULL buffer and the boot stopped with "IO Failure detected"
+right after ENGINE.XXX. With the ranges reused, the same 60 s run makes
+852 allocations and 323 frees with about 69 MB in use, and loads on
+through GUIDCACHE.XXX and MAINMENU.XXX.
+
+The window is now a table of the ranges in use, sorted by address, and
+allocations go first-fit into the gaps (sys_memory_allocate,
+sys_mmapper_allocate_address and sys_mmapper_allocate_memory share it).
+A reused range is zeroed again so new memory still reads as zero.
+g_sys_mem_bump_ptr stays as the high-water mark. A failed allocation and
+each free are logged next to the existing allocate line.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ runtime/syscalls/sys_memory.c | 143 +++++++++++++++++++++++-----------
+ 1 file changed, 98 insertions(+), 45 deletions(-)
+
+diff --git a/runtime/syscalls/sys_memory.c b/runtime/syscalls/sys_memory.c
+index bfbaac5..77c811a 100644
+--- a/runtime/syscalls/sys_memory.c
++++ b/runtime/syscalls/sys_memory.c
+@@ -13,8 +13,9 @@ sys_mem_alloc_info       g_sys_mem_allocs[SYS_MEMORY_ALLOC_MAX];
+ sys_mem_container_info   g_sys_mem_containers[SYS_MEMORY_CONTAINER_MAX];
+ sys_mmapper_shared_info  g_sys_mmapper_shared[SYS_MMAPPER_SHARED_MAX];
+ 
+-/* Bump allocator for main memory pool.
+- * Starts after a reasonable offset to avoid the low addresses used by ELF. */
++/* High-water mark of the allocation window (the end of the highest range
++ * ever handed out). Kept under its old name for anything that reads it; the
++ * allocator itself is the range table below. */
+ uint32_t g_sys_mem_bump_ptr = 0;
+ 
+ /* Total user memory size (default 213 MB, after kernel reservation) */
+@@ -41,6 +42,76 @@ static void bump_lock(void)   { pthread_mutex_lock(&s_bump_mtx); }
+ static void bump_unlock(void) { pthread_mutex_unlock(&s_bump_mtx); }
+ #endif
+ 
++/* ---------------------------------------------------------------------------
++ * The allocation window's address space
++ *
++ * This used to be a bump pointer that never moved back: sys_memory_free only
++ * dropped the bookkeeping, so the address range of a freed block was lost for
++ * good. A title whose allocator returns empty pools to the system and asks
++ * for new ones (Unreal Engine 3 does this with 64 KB pages all through
++ * package loading) then walks off the end of the 256 MB window and gets
++ * ENOMEM while it is actually using far less than that. So: a table of the
++ * ranges in use, sorted by address, and first-fit into the gaps. Called with
++ * the bump lock held.
++ * -----------------------------------------------------------------------*/
++#define SYS_MEM_RANGE_MAX  4096
++
++typedef struct sys_mem_range {
++    uint32_t addr;
++    uint32_t size;
++} sys_mem_range;
++
++static sys_mem_range s_ranges[SYS_MEM_RANGE_MAX];
++static int           s_range_count = 0;
++
++/* Returns the start of a free, aligned range of `size` bytes, or 0. A range
++ * below the high-water mark was used before, so it is zeroed again: fresh
++ * lv2 memory reads as zero and titles rely on that. */
++static uint32_t range_alloc(uint32_t size, uint32_t alignment)
++{
++    if (s_range_count >= SYS_MEM_RANGE_MAX)
++        return 0;
++    uint32_t cur = SYS_MEM_ALLOC_BASE;
++    for (int i = 0; i <= s_range_count; i++) {
++        uint32_t start = VM_ALIGN_UP(cur, alignment);
++        uint32_t limit = (i < s_range_count) ? s_ranges[i].addr : SYS_MEM_ALLOC_END;
++        if (start <= limit && limit - start >= size) {
++            memmove(&s_ranges[i + 1], &s_ranges[i],
++                    (size_t)(s_range_count - i) * sizeof(s_ranges[0]));
++            s_ranges[i].addr = start;
++            s_ranges[i].size = size;
++            s_range_count++;
++            if (start < g_sys_mem_bump_ptr)
++                memset(vm_to_host(start), 0, size);
++            if (start + size > g_sys_mem_bump_ptr)
++                g_sys_mem_bump_ptr = start + size;
++            return start;
++        }
++        if (i < s_range_count)
++            cur = s_ranges[i].addr + s_ranges[i].size;
++    }
++    return 0;
++}
++
++/* Releases the range that starts at addr; returns its size, 0 if none does. */
++static uint32_t range_free(uint32_t addr)
++{
++    int lo = 0, hi = s_range_count - 1;
++    while (lo <= hi) {
++        int mid = (lo + hi) / 2;
++        if (s_ranges[mid].addr == addr) {
++            uint32_t size = s_ranges[mid].size;
++            memmove(&s_ranges[mid], &s_ranges[mid + 1],
++                    (size_t)(s_range_count - mid - 1) * sizeof(s_ranges[0]));
++            s_range_count--;
++            return size;
++        }
++        if (s_ranges[mid].addr < addr) lo = mid + 1;
++        else                           hi = mid - 1;
++    }
++    return 0;
++}
++
+ static void write_be32(uint32_t addr, uint32_t val)
+ {
+     uint32_t* p = (uint32_t*)vm_to_host(addr);
+@@ -82,31 +153,18 @@ int64_t sys_memory_allocate(ppu_context* ctx)
+ 
+     bump_lock();
+ 
+-    /* Initialize bump pointer on first call */
+-    if (g_sys_mem_bump_ptr == 0)
+-        g_sys_mem_bump_ptr = SYS_MEM_ALLOC_BASE;
+-
+-    /* Align bump pointer */
+-    g_sys_mem_bump_ptr = VM_ALIGN_UP(g_sys_mem_bump_ptr, alignment);
+-
+-    /* Check if we have room */
+-    if (g_sys_mem_bump_ptr + size > SYS_MEM_ALLOC_END) {
+-        bump_unlock();
+-        return (int64_t)(int32_t)CELL_ENOMEM;
+-    }
+-
+     /* Find a free allocation slot */
+     int slot = -1;
+     for (int i = 0; i < SYS_MEMORY_ALLOC_MAX; i++) {
+         if (!g_sys_mem_allocs[i].active) { slot = i; break; }
+     }
+-    if (slot < 0) {
++    uint32_t alloc_addr = (slot < 0) ? 0 : range_alloc(size, alignment);
++    if (alloc_addr == 0) {
++        uint32_t in_use = s_total_allocated;
+         bump_unlock();
++        fprintf(stderr, "[sys_memory] allocate -> ENOMEM (%u KB in use)\n", in_use >> 10);
+         return (int64_t)(int32_t)CELL_ENOMEM;
+     }
+-
+-    uint32_t alloc_addr = g_sys_mem_bump_ptr;
+-    g_sys_mem_bump_ptr += size;
+     s_total_allocated += size;
+ 
+     sys_mem_alloc_info* a = &g_sys_mem_allocs[slot];
+@@ -121,7 +179,11 @@ int64_t sys_memory_allocate(ppu_context* ctx)
+     /* Commit the pages (window is outside the pre-committed main region);
+      * fresh commits are already zeroed by the OS */
+     if (vm_commit(alloc_addr, size) != CELL_OK) {
++        bump_lock();
++        range_free(alloc_addr);
++        s_total_allocated -= size;
+         a->active = 0;
++        bump_unlock();
+         return (int64_t)(int32_t)CELL_ENOMEM;
+     }
+ 
+@@ -143,13 +205,18 @@ int64_t sys_memory_free(ppu_context* ctx)
+ {
+     uint32_t addr = LV2_ARG_U32(ctx, 0);
+ 
++    bump_lock();
+     for (int i = 0; i < SYS_MEMORY_ALLOC_MAX; i++) {
+         if (g_sys_mem_allocs[i].active && g_sys_mem_allocs[i].addr == addr) {
+             s_total_allocated -= g_sys_mem_allocs[i].size;
+             g_sys_mem_allocs[i].active = 0;
++            range_free(addr);
++            bump_unlock();
++            fprintf(stderr, "[sys_memory] free(0x%08X)\n", addr);
+             return CELL_OK;
+         }
+     }
++    bump_unlock();
+ 
+     return (int64_t)(int32_t)CELL_EINVAL;
+ }
+@@ -313,21 +380,10 @@ int64_t sys_mmapper_allocate_address(ppu_context* ctx)
+     size = VM_ALIGN_UP(size, alignment);
+ 
+     bump_lock();
+-
+-    if (g_sys_mem_bump_ptr == 0)
+-        g_sys_mem_bump_ptr = SYS_MEM_ALLOC_BASE;
+-
+-    g_sys_mem_bump_ptr = VM_ALIGN_UP(g_sys_mem_bump_ptr, alignment);
+-
+-    if (g_sys_mem_bump_ptr + size > SYS_MEM_ALLOC_END) {
+-        bump_unlock();
+-        return (int64_t)(int32_t)CELL_ENOMEM;
+-    }
+-
+-    uint32_t alloc_addr = g_sys_mem_bump_ptr;
+-    g_sys_mem_bump_ptr += size;
+-
++    uint32_t alloc_addr = range_alloc(size, alignment);
+     bump_unlock();
++    if (alloc_addr == 0)
++        return (int64_t)(int32_t)CELL_ENOMEM;
+ 
+     /* Commit the reserved region */
+     vm_commit(alloc_addr, size);
+@@ -346,9 +402,11 @@ int64_t sys_mmapper_allocate_address(ppu_context* ctx)
+  * -----------------------------------------------------------------------*/
+ int64_t sys_mmapper_free_address(ppu_context* ctx)
+ {
+-    /* uint32_t addr = LV2_ARG_U32(ctx, 0); */
+-    (void)ctx;
+-    /* In our bump allocator we don't actually free, just acknowledge */
++    uint32_t addr = LV2_ARG_U32(ctx, 0);
++
++    bump_lock();
++    range_free(addr);
++    bump_unlock();
+     return CELL_OK;
+ }
+ 
+@@ -421,16 +479,10 @@ int64_t sys_mmapper_allocate_memory(ppu_context* ctx)
+     size = VM_ALIGN_UP(size, VM_PAGE_SIZE);
+ 
+     bump_lock();
+-    if (g_sys_mem_bump_ptr == 0)
+-        g_sys_mem_bump_ptr = SYS_MEM_ALLOC_BASE;
+-    g_sys_mem_bump_ptr = VM_ALIGN_UP(g_sys_mem_bump_ptr, VM_PAGE_SIZE);
+-    if (g_sys_mem_bump_ptr + size > SYS_MEM_ALLOC_END) {
+-        bump_unlock();
+-        return (int64_t)(int32_t)CELL_ENOMEM;
+-    }
+-    uint32_t addr = g_sys_mem_bump_ptr;
+-    g_sys_mem_bump_ptr += size;
++    uint32_t addr = range_alloc(size, VM_PAGE_SIZE);
+     bump_unlock();
++    if (addr == 0)
++        return (int64_t)(int32_t)CELL_ENOMEM;
+ 
+     vm_commit(addr, size);
+ 
+@@ -498,6 +550,7 @@ void sys_memory_init(lv2_syscall_table* tbl)
+     memset(g_sys_mmapper_shared, 0, sizeof(g_sys_mmapper_shared));
+     g_sys_mem_bump_ptr = 0;
+     s_total_allocated  = 0;
++    s_range_count      = 0;
+ 
+     lv2_syscall_register(tbl, SYS_MEMORY_ALLOCATE,             sys_memory_allocate);
+     lv2_syscall_register(tbl, SYS_MEMORY_FREE,                 sys_memory_free);
+-- 
+2.55.0
+
