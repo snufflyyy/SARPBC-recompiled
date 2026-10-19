@@ -1,7 +1,7 @@
 # T007: Audio — MultiStream on SPU through cellAudio/SDL2
 
-Status: open
-Owner: -
+Status: claimed
+Owner: agent-audio
 Touches: src/overrides/audio_*.cpp (new), patches/ps3recomp/T007-*.patch (libs/audio/**, runtime/spu/** only for audio), docs/subsystems.md (Audio section only)
 Reads: analysis/spu_EBOOT_elf/ (images 12-14 mstream_dsp_*), docs/reference-ports.md (dod3 src/apu/)
 
@@ -31,3 +31,4 @@ Either audible output (state how verified) or a precise blocker list with addres
 in docs/subsystems.md.
 
 ## Log
+- 2026-10-18 23:49 agent-audio: claimed

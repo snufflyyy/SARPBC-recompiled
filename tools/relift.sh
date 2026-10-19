@@ -66,9 +66,10 @@ rm -f "$RECOMP/ppu_hle_nids.cpp"
 # ---- SPU -------------------------------------------------------------------
 # The SPU ELFs embedded in the EBOOT (Edge zlib, PhysX, MultiStream DSP, ...),
 # lifted and registered by content fingerprint; cellSpurs dispatches to them.
-# --allow-partial: every image lifts with no unsupported instructions but has a
-# few executable bytes outside any detected function (padding / literal pools),
-# which the strict mode refuses to register. The SPU interpreter covers a miss.
+# --allow-partial: with patch 0006 every image lifts with no unsupported
+# instructions (section-stripped 01.09 images used to lift their .rodata as code),
+# but some have executable bytes outside any detected function (padding / literal
+# pools), which strict mode refuses to register. The SPU interpreter covers a miss.
 # Images with overlapping PT_LOADs (PhysX, 01.02 image 7) are skipped for now (T003).
 rm -rf "$SPU"
 "$PY" "$PS3RECOMP/tools/build_spu_workloads.py" --input "$ELF" \
