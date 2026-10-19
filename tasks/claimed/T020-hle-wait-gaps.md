@@ -1,7 +1,7 @@
 # T020: HLE gaps that can cause infinite waits (dialogs, music, voice, unresolved reporting)
 
-Status: open
-Owner: -
+Status: claimed
+Owner: agent-hlegaps
 Touches: patches/ps3recomp/T020-*.patch (libs/system/cellMsgDialog*, libs/misc/cellMusic*, libs/audio/cellVoice*, runtime/ppu/ppu_hle.cpp unresolved reporting, libs/misc/cellVideoExport*/cellVideoUpload*/cellGameRecording* names), docs/hle-coverage.md
 Reads: docs/hle-coverage.md (T004's ranked gaps), analysis/imports_named.json (both versions)
 
@@ -22,3 +22,4 @@ Generic and title-agnostic; each with a test where the area has one.
 All five done or precisely documented; patches exported; docs/hle-coverage.md updated.
 
 ## Log
+- 2026-10-18 23:48 agent-hlegaps: claimed
