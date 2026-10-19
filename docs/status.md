@@ -34,16 +34,21 @@ PrepareFlip id, ring recycle fixes), `src/overrides/gcm_config.cpp` (defaults
 `GCM_PARK_GRACE_MS=5000`, `GCM_INTR_THREAD=1`; the env overrides them), and `tools/spu_profile.sh`
 (T029). Both versions are relifted. `SPU_INTERP_UNLIFTED` is no longer needed.
 
-**The bottleneck now is SPU host threads.** PhysX `CreateTask` gets one host thread per SPURS
-task, 16 per frame, and they never exit: 123 at 45 s, 561 at 300 s. All of them spin on lock line
-0x0133B880 (taskset 0x01335080's lock) through the one global `spu_lockline_lock`, which is 83% of
-all perf samples. The game runs at ~0.4 fps and uses ~1500% CPU. At ~297 s the taskset runs out of
-its 128 task ids ("PhysX: Error starting spurs task"). The fix is T033 (a ~6-thread SPURS worker
-pool, and why the tasks never exit). Boot one game at a time.
+**The SPU pile-up is fixed (T033, 2026-10-19 evening).** It was a race, not thread-per-task
+scheduling: `cellSpursCreateTask` published a task's ready bit before marking it running, so a
+sibling's exit started a second copy (542 per 90 s). The copies never returned, spun on line
+0x0133B880 and caused every `HALT-ASSERT 0x24884`. With patch `T033-spurs-task-runs-once`, a 90 s
+01.09 boot goes from 404 to 1920 flips, from 1532% to 96% CPU, and from 253 to 28 threads. The intro
+now runs at a steady 17-24 fps in 120/N steps on one core. The likely limit is the frame clock's
+4 ms FIFO drain (src/main.cpp `frame_clock`). Boot one game at a time.
+
+**This machine (since 2026-10-19 evening):** Debian 13 container, 16 threads, 15 GB RAM, ~16 GB free
+disk, RTX 2070 SUPER in a bottom PCIe slot (slower than usual for uploads and readbacks). perf is
+blocked. Builds use `-j10` with ccache off. Setup notes are in the T033 log.
 
 **User plan (2026-10-19), in order:**
 1. ~~Menus~~ reached.
-2. Now: **SPU performance, easy wins only.** Measured (`tools/spu_profile.sh`), bit-exact,
+2. Now: **performance; the goal is 60 fps in the main menu** (user, 2026-10-19). SPU easy wins: Measured (`tools/spu_profile.sh`), bit-exact,
    nothing deep; bigger ideas become proposed tasks.
 3. When the easy wins are done: audit the project for cleanliness, tidiness and extensibility
    (T039).
@@ -113,6 +118,14 @@ the board: `tools/task.sh list` (protocol: [workflow.md](workflow.md)). Highest 
 - Does the upstream POSIX boot scaffold get a UE3-sized title to `main` on Linux?
 
 ## Log
+
+### 2026-10-19 (session 9): new machine; SPURS tasks ran twice
+- New machine, fresh clone (claude): base PKG extracted, 01.09 downloaded from Sony and verified,
+  decrypted (hashes as in game-profile.md), both versions relifted. Debian needed gawk,
+  libopengl0, libsdl2-dev, glslang-dev, ccache and gdb (T033 log).
+- T033 (claude): the PhysX pile-up was a CreateTask race (duplicate task starts). Patch
+  `T033-spurs-task-runs-once`; numbers in subsystems.md "SPURS tasks started twice". The worker
+  pool isn't needed for this. User goal: 60 fps in the main menu.
 
 ### 2026-10-19 (session 8): agents the user starts, no subagents
 - T030 follow-up: private index for reservation-holder lookup, with no context ABI or guest

@@ -475,6 +475,9 @@ controls screen.
 
 ### SPU busy-waits and host CPU (T030, 2026-10-19, paused)
 
+- **Cause found (T033, below):** the PhysX tasks did not pile up because of thread-per-task
+  scheduling. A race started ~540 created tasks a second time, and those copies never returned.
+  The notes below describe the symptoms; the halt at `0x24884` came from the copies too.
 - **What spins.** PhysX tasks (image `363824547` = `spu_5af85a31…`, fingerprint
   `39119073A3F69512`, task entry EA `0x01130600`) get `arg = 0x0133B880` from `CreateTask`.
   That 128-byte line is a task-side sync object of taskset `0x01335080` (word 25 of the line).
@@ -596,6 +599,47 @@ Tests: `tools/test_spu_context_registries.py` with clang and GCC passes
 also passes AddressSanitizer and UndefinedBehaviorSanitizer. New cases cover
 300 contexts, repeated registration, collisions, exclusion of the writer,
 range cleanup, reverse-order removal, and reuse of the same addresses.
+
+### SPURS tasks started twice (T033, 2026-10-19)
+
+- **The race.** `cellSpursCreateTask` (libs/spurs/cellSpurs.c) sets the new task's enabled and
+  ready bits in the guest taskset (`spurs_taskset_add_task`), then spawns its host thread
+  (`spu_workload_dispatch_async`). The task was marked running in the runtime's run map
+  (`s_ts_run`, runtime/spu/spu_workload.c) only once that thread started. When any task of the
+  taskset returns, `spu_taskset_task_exited` starts every enabled task that is ready or pending
+  and not marked running. So an exit inside that window started the same task a second time.
+  The task id also came through the `g_ydkj_real_taskset_ea`/`g_ydkj_real_taskid` globals,
+  which the PPU (CreateTask) and SPU threads (the exit scan) both write before dispatching.
+- **Evidence** (01.09, 90 s boot, before the fix): 4390 `CreateTask` lines, 542
+  `[taskset] start task N of taskset 0x01335080 ... (after task M exited)` lines, and dispatches
+  = creates + restarts for both PhysX families (Dynamics entry `0x01130600`: 2193 + 456 = 2649;
+  `0x011E3300`: 2195 + 86 = 2281). All 2281 of the second family returned. Only 2362 of 2649
+  Dynamics runs returned, so 287 spun forever on the step's sync line `0x0133B880` (T030's
+  "What spins"), and there were 41 `HALT-ASSERT heqi pc=0x24884` (the copies share the task's
+  context). Count these with
+  `grep -o "async image=[0-9-]* RETURNED" run.log | sort | uniq -c` against
+  `grep -o "dispatch HIT (async) fp=0x[0-9A-F]*" run.log | sort | uniq -c`.
+- **Fix** (patch `T033-spurs-task-runs-once`): CreateTask marks the task running
+  (`spu_taskset_mark`, now exported) before `add_task` publishes it, and unmarks it if no thread
+  was started. Both dispatch sites pass the task explicitly (`spu_workload_dispatch_task_async`).
+- **Numbers.** 01.09, 90 s `boot_check`, same machine (16 threads, RTX 2070 SUPER), boot lock,
+  no env overrides. CPU = `/proc/<pid>/stat` utime+stime over a 20 s window after 40 s:
+
+  | | flips | dumps (distinct) | Dynamics dispatched / returned | restarts | halt-asserts | CPU | host threads |
+  |---|---|---|---|---|---|---|---|
+  | before (main 70d7773) | 404 | 12 (8) | 2649 / 2362 | 542 | 41 | 1532% | 253 at 62 s, 306 at 90 s |
+  | after | 1920 | 37 (33) | 5899 / 5899 | 1 | 0 | 96% | 28 at 65 s, 19 at 90 s |
+
+  Frame rate from `frames.jsonl` (one dump per 60 presented frames): before, 59 fps on Loading,
+  then 13-17 fps, then almost nothing after ~25 s. After, a steady 17-24 fps through the
+  intro and the safe-area screen. The values sit on 120/N (24, 20, 17.1). That looks like a
+  pacing quantum, not SPU work: the process now uses about one core.
+- **Not needed now:** the ~6-thread SPURS worker pool. Host threads stay at ~20, because tasks
+  return. Revisit it only if a title keeps more than a handful of tasks running at once.
+- Unrelated, found here: `tools/test_spurs_scheduler.py` no longer links. Its copy of
+  `spurs_line_committed` calls `spurs_queue_line_committed`, which patch T019 (`1d636ad`) added
+  to libs/spurs/cellSpursQueue.c, and the test does not compile that file. All 9 ctest tests
+  (`-DPS3RECOMP_BUILD_TESTS=ON`) and `tools/test_spu_context_registries.py` pass.
 
 ## Video (Bink)
 

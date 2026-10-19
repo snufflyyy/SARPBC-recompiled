@@ -19,6 +19,17 @@ One command for Fedora 44:
 sudo dnf install SDL2-devel vulkan-headers glslang-devel   # SDL2-devel = sdl2-compat-devel
 ```
 
+Debian 13 (the container used since 2026-10-19 evening):
+
+```bash
+apt-get install gawk libsdl2-dev libvulkan-dev glslang-dev glslang-tools ccache gdb libopengl0
+```
+
+`gawk` because `tools/relift.sh` uses `strtonum` (Debian's default mawk lacks it), and
+`libopengl0` because RPCS3's AppImage (`tools/decrypt.sh`) needs `libOpenGL.so.0`. In that
+container perf is denied even at `perf_event_paranoid=2` (no permission for `task-clock`), so
+`tools/spu_profile.sh` falls back to `/proc` sampling.
+
 | Need | Fedora package / note |
 |---|---|
 | C17/C++20 compiler | clang ≥ 15 or GCC ≥ 12. Prefer clang: upstream CI and most ports use it, and the lifted code leans on `__int128`, `__builtin_bswap*`, `__atomic_*` |
