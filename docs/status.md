@@ -26,7 +26,7 @@ Psyonix logo, the safe-area screen (needs X), then the menu. New Game opens MP_S
 The last frame is the safe-area screen, waiting for X. That's 1119 flips, against 100-514 in
 the agents' runs. "STALLED" only means no new kinds of log line.
 
-**State of `main`:** 36 patch files (54 commits on 39a3629). Merged this session: 0028 + 0031
+**State of `main`:** 37 patch files (55 commits on 39a3629). Merged this session: 0028 + 0031
 (SPU ctor seeding + test), 0029 (SRW writer preference), 0030 (per-thread callback stacks), 0032
 (SSE2 SPU float helpers) + CMake `-march=x86-64-v2` for lifted SPU code (mixer 15% -> 53% of real
 time), 0033 (mfc_for engine cache + POSIX lockline TTAS: flips 100 -> 514 in 90 s), 0034-0036 (GCM
@@ -49,7 +49,7 @@ pool, and why the tasks never exit). Boot one game at a time.
    (T039).
 
 **Queue:** the board's `Priority:` lines (`tools/task.sh list` / `next`). The order now: T033 (SPURS
-worker pool, biggest win), T030 (busy-waits), T029 (profiler rerun; measure every SPU change with
+worker pool, biggest win), T029 (remaining mixer metric in profiler; measure every SPU change with
 it), T032 (DMA/MFC), T031 (lifter codegen), T025 (SSE4.1 shufb, mixer to real time), T036
 (`boot_check --pad`), T035 (entry-args test), T024 (ShaderPatching chain throughput), T034
 (callback stacks), **T039 the audit** (alone), T037 (hang after New Game), T038 (upside-down
@@ -115,6 +115,15 @@ the board: `tools/task.sh list` (protocol: [workflow.md](workflow.md)). Highest 
 ## Log
 
 ### 2026-10-19 (session 8): agents the user starts, no subagents
+- T030 follow-up: private index for reservation-holder lookup, with no context ABI or guest
+  semantic changes. Clang/GCC registry tests and ASan/UBSan pass. Four controlled 01.09 boots
+  on the new Ryzen 7 3700X/RTX 2070 SUPER host produced 588–589 versus 320–374 flips in 60 s.
+  CPU and mixer throughput did not improve. Faster progress also increased host threads to
+  961–997 versus 263–270, so T033's worker pool remains critical. See subsystems.md.
+- T029 fallback fix: containers can deny perf counters even with paranoid=2. The profiler now
+  keeps /proc samples 57 s apart for a 60 s run, even after immediate or partial recorder
+  failure. Two mocked regressions fail on the old code and pass on the fix. Four real runs
+  validate the fallback. The remaining T029 work is a mixer metric in the report.
 - User: running many subagents used too much usage. The user now starts each agent themselves
   (Claude Code, pi, Antigravity), one or several, and they share the task board; no agent
   spawns subagents and there is no coordinator. `docs/agents-workflow.md` became

@@ -522,6 +522,81 @@ controls screen.
   registered context under the lock (O(n) with 200 contexts). Index them by line.
   (d) Contention-aware PUTLLC retry backoff.
 
+### Reservation registry lookup (T030, 2026-10-19)
+
+Every GETLLAR calls `spu_coh_reserve` under the global lock-line lock. The old
+membership lookup scans every registered virtual context. This adds work inside
+the critical section even when the reservation line does not change.
+
+The T030 follow-up adds a private pointer index with 256 buckets and chained
+collisions. The index does not limit the number of contexts. The existing list
+still controls notification order and reads the current reservation state.
+Both cleanup paths remove the index entry before they free the list node.
+There are no changes to the context ABI, guest values, reservation events, or
+wait timing. The index adds 2 KiB on a 64-bit host and one pointer per holder.
+
+Prior art: `soyjxck/ps3recomp` master `runtime/spu/spu_coherency.c`, checked on
+2026-10-19, still uses an eight-slot registry. That fixed limit cannot replace
+our registry of virtual contexts.
+
+The standalone benchmark calls the real locked `spu_coh_reserve` round-robin
+across contexts. Command from the toolkit root:
+
+```bash
+clang -O2 -std=gnu17 -Iinclude -Iruntime/spu \
+  runtime/spu/tests/bench_spu_coh_reserve.c -o /tmp/bench_spu_coh_reserve
+/tmp/bench_spu_coh_reserve
+```
+
+Measurements (CPU ns per call, median of three alternating pairs, Ryzen 7
+3700X, clang 19, `-O2`, under the CPU lock):
+
+| Registered contexts | List scan | Pointer index |
+|---|---:|---:|
+| 6 | 5.62 | 5.90 |
+| 64 | 34.87 | 5.93 |
+| 256 | 135.45 | 5.94 |
+
+This benchmark isolates membership lookup, not game throughput. The small
+registry regresses by 0.28 ns. Large registries improve by 6–23x.
+
+Four 60-second boots used 01.09 and an RTX 2070 SUPER. Both locks remained held
+during each measurement to exclude concurrent builds and games. The order was
+list, index, index, list. The first pair had another agent's boot between runs.
+
+| Run | Host CPU over 57 s | Threads at 57 s | Flips | Distinct dumps | Logged mixer PUT window |
+|---|---:|---:|---:|---:|---:|
+| List A1 | 1247% | 263 | 374 | 8 | 686 KB/s |
+| Index B1 | 1284% | 961 | 589 | 11 | 663 KB/s |
+| Index B2 | 1278% | 997 | 588 | 11 | 656 KB/s |
+| List A2 | 1288% | 270 | 320 | 7 | 641 KB/s |
+
+The index produced 57–84% more flips (about 1.7x on average). There is no CPU
+or mixer improvement. The mixer windows are event-driven, not whole-run averages.
+Faster progress also exposes the existing task accumulation sooner. The worker
+pool (T033) remains necessary. All runs opened 13 packages, completed 3285 zlib
+requests, and reported zero unresolved calls. The existing assert/blocked alerts
+remained.
+
+Command from the project worktree (hold `cpu` around the command as well):
+
+```bash
+tools/spu_profile.sh 60 --version 0109 --build-dir build-0109 -- \
+  GCM_INTR_THREAD=1 GCM_PARK_GRACE_MS=600000 PAD_NO_HOST=1 \
+  SPURS_EF_STATS=1 SPU_DMA_RANGE=58000000-58200000
+```
+
+The baseline used a saved binary from `70d7773`, before the index change. Reports:
+`spu_profile_20261019-{232023,232304,232505,232611}` in the pi worktree's `analysis/`.
+This container denies perf counters. The corrected T029 fallback measured /proc
+CPU over the full 57 seconds, but symbol percentages are unavailable.
+
+Tests: `tools/test_spu_context_registries.py` with clang and GCC passes
+558/634/2456/51 checks and both allocation-failure cases. The coherence fixture
+also passes AddressSanitizer and UndefinedBehaviorSanitizer. New cases cover
+300 contexts, repeated registration, collisions, exclusion of the writer,
+range cleanup, reverse-order removal, and reuse of the same addresses.
+
 ## Video (Bink)
 
 - BinkPS3 is statically linked game code; the three `BINKPS3_*.BIN` files are its RSX
