@@ -32,6 +32,68 @@ all of it + libps3recomp_runtime + per-game boot scaffold ──► native execu
   methods and drives a backend (D3D12 / Metal / Vulkan / null). With guest programs on,
   the game's own NV40 vertex/fragment microcode is translated at run time.
 
+## Guest callbacks: `ppu_guest_call` and its stacks (T026)
+
+The HLE runtime calls back into lifted code (sysutil callbacks, GCM vblank/flip/user
+handlers, NP trophy status callbacks, PRX `start_module`, `sys_ppu_thread_once` inits)
+through `ppu_guest_call(opd, a0..a7)` or `ppu_guest_call_ct(code, toc, ...)` in
+`runtime/ppu/ppu_loader.cpp`. Each call builds a fresh `ppu_context` and needs an r1.
+
+**Before T026** that r1 was the fixed address `0xCFFE0000` on every host thread and at
+every nesting depth (the Drakengard 3 fork has the same code). That address is inside RSX
+local memory (`0xC0000000`, `localSize` 256 MB in cellGcmSys), and two callbacks built
+their frames on the same bytes whenever they overlapped. The lifted code saves r14-r31 and
+locals in those guest frames, so the outer callback carried on with whatever the inner
+one left there. On 01.09 this happens all the time (boot of 2026-10-19 with
+`GCM_INTR_THREAD=1`, from the slot log below):
+- the **flip handler `0x000DC144`** (OPD `0x012025A0`) runs **inside the GCM user handler
+  `0x000DC390`** (OPD `0x012025B0`) at depth 1: on the main thread (tid 1), on
+  RenderingThread (tid 2) and on the host-only GCM interrupt thread (tid `0x7FFF0000`);
+- the **vblank handler `0x000DC2DC`** (OPD `0x012025A8`) runs at depth 0 on four other
+  threads (tids 0/4/6/8), at the same time as the above;
+- also seen: `0x00049D20` (trophy status callback, OPD `0x01201F38`) on tid 5,
+  `0x00B62784` (`sys_ppu_thread_once` init, OPD `0x01234598`) on tid 1, `0x000BC6F0`
+  (cellSaveData `funcStat`, OPD `0x01201DE0`, AutoLoad2 of `NPUB30035-PROFILE`) on
+  SaveData (tid 9).
+
+**Now (patch `T026-ppu-guest-call-stacks.patch`)** every (host thread, nesting depth)
+pair has its own stack:
+- Carved from the **top of the PPU stack region** (0xD0000000-0xE0000000) by moving
+  `g_vm_stack_alloc.region_end` down; thread stacks keep growing up from `VM_STACK_BASE`, so
+  the two never meet and no address is hard-coded. A carve keeps 16 MB of headroom above
+  the thread stacks. The first stack is `0xDFFC0000..0xE0000000`.
+- Default 256 KB each (`PPU_CB_STACK_SIZE=<bytes>` to change, read once), with a no-access
+  guard page at the bottom: an overflow faults instead of corrupting the next stack.
+- A thread-local `PpuCbStacks` (C++ `thread_local`, for its destructor) holds one stack
+  per depth (max 32) and the depth counter, which `ppu_guest_call_run` pushes and pops
+  around the call. When the host thread ends, its stacks go to a pool (512) that the
+  next thread takes from. 64 short-lived threads use one stack, not 64.
+- Log: the first 32 slot assignments print
+  `[ppu] guest_call: tid 0x.. depth N -> stack 0x..-0x.. for code 0x.. (inside 0x..)`.
+  A depth > 0 line is a nested callback; `inside` is the callback it runs in.
+- Locking caveat: the table lock that `sys_ppu_thread_create` holds around
+  `vm_stack_allocate` is static in `runtime/syscalls/sys_ppu_thread.c`, outside T026's
+  scope. A carve stores `region_end` as one aligned 32-bit word that only moves down, and
+  the headroom keeps a thread stack allocated at the same moment far below it. A
+  `ppu_stack_carve()` exported from sys_ppu_thread.c under its lock would be cleaner.
+- Effect on the 01.09 boot (`GCM_INTR_THREAD=1`, 60 s, 2026-10-19): **no visible change
+  yet.** Old code 3 runs: flips 53/56/66, ESRB screen in 2 of 3 (the miss loaded slowly:
+  TEXTURES.TFC opened at 26.6 s instead of ~6 s). New code 3 runs: flips 30/66/57, ESRB in
+  2 of 3 (the miss ran before the shared boot lock, under host load ~160: TEXTURES.TFC at
+  15.8 s). Every run stops presenting within ~8 s of the ESRB
+  screen (the rwlock stall, T027). The nested frames were being overwritten all along;
+  removing that is a correctness fix that this stage of the boot does not show.
+- Not changed: the callback still gets `r13 = PPU_TLS_TP` (the shared TLS block), not the
+  calling guest thread's r13. On the console, sysutil callbacks run on the calling thread
+  with its TLS. That is a separate fix if it ever matters.
+
+Test: `external/ps3recomp/tools/test_ppu_guest_call_stacks.py` builds the real
+`ppu_loader.cpp` with `runtime/ppu/tests/test_ppu_guest_call_stacks.cpp`: two host
+threads inside a callback at once, a nested callback, where the stacks are placed, and
+reuse after threads end. The old code fails 6 checks (both threads' frames at
+`0xCFFDFC00`, outer and inner frames identical, sp inside RSX memory); the new code
+passes all of them.
+
 ## Where things live (upstream tree)
 
 | Path | What |

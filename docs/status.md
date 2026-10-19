@@ -9,7 +9,7 @@ Step 1 below is done: T025's patch is merged as 0028, both versions are relifted
 01.09's `spu_func_00020180` (PhysX static ctor) is lifted (15/15 images complete). T022 is closed.
 Agents running: T025 (agent-spuperf: verify without `SPU_INTERP_UNLIFTED`, x86 SIMD), T024
 (agent-gcm: park reconcile, `gcm_config.cpp`), T027 (agent-rwlock), T026 (agent-cbstack),
-T028 (agent-frontier3: ESRB to menus, new). T027 merged as 0029 (10:50); T030 (agent-spinwait) started early by the user because one boot spins ~15 of 16 cores.
+T028 (agent-frontier3: ESRB to menus, new). T027 merged as 0029 (10:50); T030 (agent-spinwait) started early by the user because one boot spins ~15 of 16 cores. T026 merged as 0030 (11:05); T029 (Sonnet) takes its slot. New: T034 (callback follow-ups), T035 (broken entry-args test, Sonnet).
 
 **User plan (2026-10-19), in order:**
 1. Menus first (T024-T028 as above).
