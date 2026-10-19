@@ -210,7 +210,7 @@ and the frame rate is uncapped in the engine.
 | Entry OPD / TOC | `0x1BE8EC0` / `0x1C6EA28` | `0x12018A8` → `0xADB68` / `0x123C6D0` |
 | TOC-switch stub runs | 2 (4,242 stubs) | 0 |
 | Imports | 274 / 20 libs, 17 unnamed | 288 / 21 libs, 20 unnamed |
-| SPU images registered | 14/15 | 12/15 in the staged lift; 14/15 with the T016 detector fix |
+| SPU images registered | 14/15 (15/15 with T003) | 14/15 (patch 0006; 12/15 before) |
 
 Import changes in 01.09: **+cellGame** (BootCheck, DataCheck, ContentPermit,
 CreateGameData, GetParamString, GetSizeKB, ContentErrorDialog), **+cellPngDec** (7),
