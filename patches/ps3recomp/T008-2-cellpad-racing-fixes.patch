@@ -1,0 +1,400 @@
+From 3f2b0839d4e0fccb4e701648f82cf0331f5d0257 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Mon, 19 Oct 2026 00:04:33 -0500
+Subject: [PATCH] cellPad: analog triggers keep their pressure, small motor
+ on/off, empty ports centred; trace and test
+
+Fixes found bringing up a racing title (SARPBC, which reads L2/R2 as
+throttle and brake from the press-mode words and duty-cycles the small
+motor), on top of the SDL2 backend ported from soyjxck/ps3recomp:
+
+- Press mode: a set digital bit tops its pressure word up to 255 only when
+  that word is 0 (input injected as a bare bit). An analog trigger sets its
+  digital bit past ~10%, so the old "< 255" made any pull past that read as
+  a full pull.
+- Rumble: CELL_PAD_ACTUATOR_PARAM_SMALL is on/off (0 or 1). Scaled like the
+  large motor (x257) "on" was 257/65535, which no pad can feel. Now 0xFFFF
+  (SDL2 and XInput). The first rumble per port logs, with whether the pad
+  has a motor.
+- SDL2: an empty port's sticks rest at 128. Port 0 is reported present with
+  nothing plugged in, and its zeroed sticks read as both sticks held up-left.
+- PAD_TRIGGERS="l2,r2[,from,until]": scripted analog trigger pulls, the
+  counterpart of PAD_STICK (PAD_SCRIPT can only press the digital bit).
+- PAD_TRACE=1|N: a line whenever what a port hands the title changes, read
+  back from the title's own CellPadData.
+
+libs/input/tests/test_cellpad_sdl.{c,py}: an SDL virtual gamepad through
+the real cellPad.c into guest memory -- sticks, half-pulled R2 stays half,
+press mode on/off, rumble values and held past SDL's duration, the
+cellPad_set_host_input merge, unplug. Finds its own port, so a real pad on
+the desk does not matter.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/input/cellPad.c                 |  71 +++++++++-
+ libs/input/tests/test_cellpad_sdl.c  | 200 +++++++++++++++++++++++++++
+ libs/input/tests/test_cellpad_sdl.py |  26 ++++
+ 3 files changed, 294 insertions(+), 3 deletions(-)
+ create mode 100644 libs/input/tests/test_cellpad_sdl.c
+ create mode 100644 libs/input/tests/test_cellpad_sdl.py
+
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index cc6d7f0..6b2298d 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -406,6 +406,11 @@ static void pad_sdl_read(PadHostState* st)
+         SDL_GameController* gc = s_sdl_controllers[i];
+         PadHostState* hs = &st[i];
+         memset(hs, 0, sizeof *hs);
++        /* An empty port's sticks rest at the centre, not at 0: port 0 is
++         * reported present with nothing plugged in, and zeroed sticks there
++         * read as both sticks held fully up-left (a menu that scrolls by
++         * itself, a car that steers hard left). */
++        hs->analog_lx = hs->analog_ly = hs->analog_rx = hs->analog_ry = 128;
+         if (!gc) continue;
+ 
+         hs->connected = 1;
+@@ -472,8 +477,18 @@ static void pad_sdl_rumble_apply(void)
+         if (!s_sdl_rumble_new[i] && !(on && now - last[i] >= 50)) continue;
+         s_sdl_rumble_new[i] = 0;
+         last[i] = now;
++        /* The large motor is a speed (0-255); the small one is only on or off
++         * (CELL_PAD_ACTUATOR_PARAM_SMALL takes 0 or 1 -- a title wanting less
++         * switches it on and off from frame to frame). Scaled like the large
++         * one, "on" was 257/65535: no rumble at all. */
+         SDL_GameControllerRumble(gc, (Uint16)(s_sdl_rumble[i][0] * 257),
+-                                 (Uint16)(s_sdl_rumble[i][1] * 257), 100);
++                                 (Uint16)(s_sdl_rumble[i][1] ? 0xFFFF : 0), 100);
++        { static int said[PAD_MAX_HOST_PORTS];
++          if (on && !said[i]) { said[i] = 1;
++              printf("[cellPad] port %d: rumble large=%u small=%u%s\n", i,
++                     s_sdl_rumble[i][0], s_sdl_rumble[i][1],
++                     SDL_GameControllerHasRumble(gc) ? "" : " (this pad has no rumble)");
++              fflush(stdout); } }
+     }
+ }
+ 
+@@ -1121,6 +1136,29 @@ skip_inject: ;
+                 fprintf(stderr, "[PADSWEEP] step %d: l=(%u,%u) r=(%u,%u)%c", k,
+                         steps[k][0], steps[k][1], steps[k][2], steps[k][3], 10); } }
+         } } }
++    /* PAD_TRIGGERS="l2,r2[,from,until]" (0-255): hold the analog triggers at a
++     * partial pull, optionally only between two wall-clock seconds -- the
++     * analog counterpart of PAD_STICK. PAD_SCRIPT/PAD_FILE can only press a
++     * trigger's digital bit, which reads as a full pull; a racing title's
++     * throttle and brake are the pressure words, and a run that has to show a
++     * half-pulled R2 reaching the guest needs a value in between. The digital
++     * bit follows the value as a real trigger's does (set from about 10%). */
++    { static int s_tr = -1; static unsigned char s_tv[2];
++      static double s_tfrom = 0, s_tuntil = 1e30; static unsigned long long s_tt0 = 0;
++      if (s_tr < 0) { const char* e = getenv("PAD_TRIGGERS");
++        s_tr = (e && *e) ? 1 : 0; s_tt0 = GetTickCount64();
++        if (s_tr) { int a = 0, b = 0;
++                    sscanf(e, "%d,%d,%lf,%lf", &a, &b, &s_tfrom, &s_tuntil);
++                    s_tv[0] = (unsigned char)a; s_tv[1] = (unsigned char)b;
++                    printf("[cellPad] PAD_TRIGGERS: L2=%d R2=%d from %.1fs\n", a, b, s_tfrom); } }
++      if (s_tr && port_no == 0) {
++          const double t = (double)(GetTickCount64() - s_tt0) / 1000.0;
++          if (t >= s_tfrom && t < s_tuntil) {
++              if (s_tv[0] > hs->trigger_l2) hs->trigger_l2 = s_tv[0];
++              if (s_tv[1] > hs->trigger_r2) hs->trigger_r2 = s_tv[1];
++              if (s_tv[0] >= 24) data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] |= 0x01;   /* L2 */
++              if (s_tv[1] >= 24) data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] |= 0x02;   /* R2 */
++          } } }
+     data->button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_X] = hs->analog_rx;
+     data->button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_Y] = hs->analog_ry;
+     data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_X]  = hs->analog_lx;
+@@ -1158,8 +1196,12 @@ skip_inject: ;
+             { CELL_PAD_BTN_OFFSET_DIGITAL2, 0x08, CELL_PAD_BTN_OFFSET_PRESS_R1 },
+             { CELL_PAD_BTN_OFFSET_DIGITAL2, 0x01, CELL_PAD_BTN_OFFSET_PRESS_L2 },
+             { CELL_PAD_BTN_OFFSET_DIGITAL2, 0x02, CELL_PAD_BTN_OFFSET_PRESS_R2 } };
++        /* Only where there is no pressure at all, though: an analog trigger
++         * sets its digital bit past a small threshold, and topping it up to
++         * 255 there made a quarter-pulled L2/R2 read as fully pulled -- a
++         * throttle with two positions. */
+         for (unsigned k = 0; k < sizeof pm / sizeof pm[0]; k++)
+-            if ((data->button[pm[k].word] & pm[k].bit) && data->button[pm[k].off] < 255)
++            if ((data->button[pm[k].word] & pm[k].bit) && data->button[pm[k].off] == 0)
+                 data->button[pm[k].off] = 255;
+     }
+ 
+@@ -1212,6 +1254,29 @@ emit:
+         for (int _i = 0; _i < CELL_PAD_MAX_CODES; _i++)                    /* button[] u16 */
+             vm_write16((unsigned long long)ea + 4 + (unsigned int)_i * 2, data->button[_i]);
+     }
++    /* PAD_TRACE=1 (or a line budget, default 200): one line whenever what a
++     * port hands the title changes, read back from the title's own buffer
++     * rather than from what was meant to be written -- the evidence that a
++     * stick, a trigger's pressure or a button got as far as the guest. Reads
++     * with len = 0 (no new report) are not traced; the title keeps its last
++     * values for those. */
++    { static int s_tb = -1;
++      static u16 last[PAD_MAX_HOST_PORTS][24]; static int have[PAD_MAX_HOST_PORTS];
++      if (s_tb < 0) { const char* e = getenv("PAD_TRACE");
++                      s_tb = (e && *e) ? (atoi(e) > 1 ? atoi(e) : 200) : 0; }
++      if (s_tb > 0 && port_no < PAD_MAX_HOST_PORTS && data->len) {
++          const unsigned int ea = (unsigned int)(uintptr_t)data_guest;
++          u16 w[24];
++          for (int i = 0; i < 24; i++) w[i] = vm_read16(ea + 4 + (unsigned)i * 2);
++          if (!have[port_no] || memcmp(w, last[port_no], sizeof w)) {
++              have[port_no] = 1; memcpy(last[port_no], w, sizeof w); s_tb--;
++              printf("[cellPad] trace port %u @%08X len=%d btn=%02X%02X "
++                     "L=(%u,%u) R=(%u,%u) L2=%u R2=%u x=%u o=%u sq=%u tri=%u L1=%u R1=%u\n",
++                     port_no, ea, (int)vm_read32(ea), w[3] & 0xFF, w[2] & 0xFF,
++                     w[6], w[7], w[4], w[5], w[18], w[19], w[14], w[13], w[15], w[12],
++                     w[16], w[17]);
++              fflush(stdout);
++          } } }
+     return CELL_OK;
+ }
+ 
+@@ -1453,7 +1518,7 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
+     if (port_no < PAD_MAX_HOST_PORTS && s_host_state[port_no].connected) {
+         XINPUT_VIBRATION vib;
+         vib.wLeftMotorSpeed  = (WORD)(param->motor[CELL_PAD_ACTUATOR_PARAM_LARGE] * 257);
+-        vib.wRightMotorSpeed = (WORD)(param->motor[CELL_PAD_ACTUATOR_PARAM_SMALL] * 257);
++        vib.wRightMotorSpeed = (WORD)(param->motor[CELL_PAD_ACTUATOR_PARAM_SMALL] ? 0xFFFF : 0);   /* on/off */
+         XInputSetState((DWORD)port_no, &vib);
+     }
+ #endif
+diff --git a/libs/input/tests/test_cellpad_sdl.c b/libs/input/tests/test_cellpad_sdl.c
+new file mode 100644
+index 0000000..80cf6df
+--- /dev/null
++++ b/libs/input/tests/test_cellpad_sdl.c
+@@ -0,0 +1,200 @@
++/* cellPad over SDL2, end to end: an SDL virtual gamepad -> the pad thread ->
++ * cellPadGetData into guest memory, read back big-endian; cellPadSetActDirect
++ * -> SDL rumble; the port's host-input hook merged into port 0.
++ *
++ * The real implementation is included (no copy of the mapping, no test-only
++ * API). A virtual pad has no hardware behind it, so this runs anywhere SDL2
++ * >= 2.24 does, with or without a real controller on the desk: the test finds
++ * the port its own pad landed in. Run by libs/input/tests/test_cellpad_sdl.py. */
++#include "../cellPad.c"
++#include <assert.h>
++
++uint8_t* vm_base;
++uint32_t g_ww_lo, g_ww_hi;
++int g_resv_store_active;
++void ps3_ww_report_inline(uint32_t a, uint64_t v, int w) { (void)a; (void)v; (void)w; abort(); }
++void ppu_resv_break_store(uint64_t addr) { (void)addr; }
++int spu_coh_is_reserved(uint32_t addr) { (void)addr; return 0; }
++void spu_coh_notify_write(uint32_t addr) { (void)addr; }
++void spu_lockline_lock(void) {}
++void spu_lockline_unlock(void) {}
++
++static unsigned checks;
++#define CHECK(x) do { ++checks; if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); exit(1); } } while (0)
++
++#define BUF 0x1000u   /* guest EA of the CellPadData */
++#define ACT 0x2000u   /* guest EA of the CellPadActParam */
++
++static u16 word(int i) { return vm_read16(BUF + 4 + (unsigned)i * 2); }
++
++static volatile Uint16 s_low = 1, s_high = 1;
++static volatile int s_rumbles;
++/* What "done" is: 0 in SDL2's callback convention, but under sdl2-compat the
++ * SDL3 callback underneath is a bool, where 0 means failed -- and SDL then
++ * never records the rumble as on, so it drops the later stop as "no change".
++ * main() asks the SDL it runs on which one it is. */
++static int s_cb_ok;
++static int SDLCALL on_rumble(void* u, Uint16 low, Uint16 high)
++{
++    (void)u; s_low = low; s_high = high; s_rumbles++;
++    return s_cb_ok;
++}
++
++/* Wait for the pad thread's next sweeps, then read a fresh report. */
++static void get(u32 port)
++{
++    SDL_Delay(4 * PAD_POLL_INTERVAL_MS + 20);
++    for (int i = 0; i < 4; i++) {
++        CHECK(cellPadGetData(port, (CellPadData*)(uintptr_t)BUF) == CELL_OK);
++        if ((s32)vm_read32(BUF) != 0) return;
++        SDL_Delay(PAD_POLL_INTERVAL_MS + 2);
++    }
++    CHECK(!"no fresh report");
++}
++
++static int s_hook_on;
++static int hook(void* user, int focused, CellPadHostInput* out)
++{
++    (void)user; (void)focused;
++    if (!s_hook_on) return 0;
++    out->buttons |= CELL_PAD_CTRL_CROSS | CELL_PAD_CTRL_R2;
++    out->lx = 0;                 /* steer hard left */
++    out->r2 = 255;
++    return 1;
++}
++
++int main(void)
++{
++    vm_base = calloc(1, 0x10000);
++    CHECK(vm_base);
++    CHECK(cellPadInit(7) == CELL_OK);
++    for (int i = 0; i < 200 && !SDL_WasInit(SDL_INIT_GAMECONTROLLER); i++) SDL_Delay(10);
++    if (!SDL_WasInit(SDL_INIT_GAMECONTROLLER)) {
++        puts("SKIP: SDL could not start its game controller subsystem here");
++        return 0;
++    }
++
++    /* An empty port's sticks rest at the centre (port 0 is always reported
++     * present, so zeroed sticks there were a stick held up-left). */
++    SDL_Delay(50);
++    SDL_LockMutex(s_sdl_lock);
++    int empty = -1;
++    for (int i = PAD_MAX_HOST_PORTS - 1; i >= 0; i--) if (!s_sdl_state[i].connected) empty = i;
++    if (empty >= 0) {
++        CHECK(s_sdl_state[empty].analog_lx == 128 && s_sdl_state[empty].analog_ly == 128);
++        CHECK(s_sdl_state[empty].analog_rx == 128 && s_sdl_state[empty].analog_ry == 128);
++    }
++    SDL_UnlockMutex(s_sdl_lock);
++
++    SDL_VirtualJoystickDesc desc;
++    SDL_zero(desc);
++    desc.version  = SDL_VIRTUAL_JOYSTICK_DESC_VERSION;
++    desc.type     = SDL_JOYSTICK_TYPE_GAMECONTROLLER;
++    desc.naxes    = SDL_CONTROLLER_AXIS_MAX;
++    desc.nbuttons = SDL_CONTROLLER_BUTTON_MAX;
++    desc.name     = "cellPad test pad";
++    desc.Rumble   = on_rumble;
++    const int dev = SDL_JoystickAttachVirtualEx(&desc);
++    if (dev < 0) { printf("SKIP: no virtual joysticks in this SDL: %s\n", SDL_GetError()); return 0; }
++    SDL_Joystick* joy = SDL_JoystickOpen(dev);
++    CHECK(joy);
++    const SDL_JoystickID id = SDL_JoystickInstanceID(joy);
++    if (SDL_JoystickRumble(joy, 1, 1, 0) != 0) s_cb_ok = 1;   /* the callback ran: bool convention */
++    SDL_JoystickRumble(joy, 0, 0, 0);
++
++    /* The pad thread opens it into the lowest free port. */
++    int port = -1;
++    for (int t = 0; t < 200 && port < 0; t++) {
++        SDL_Delay(10);
++        for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
++            SDL_GameController* gc = s_sdl_controllers[i];
++            if (gc && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gc)) == id) port = i;
++        }
++    }
++    CHECK(port >= 0);
++    printf("virtual pad is on port %d\n", port);
++
++    /* Press mode, as SARPBC asks for (SetPortSetting 0x2). */
++    CHECK(cellPadSetPortSetting((u32)port, CELL_PAD_SETTING_PRESS_ON) == CELL_OK);
++
++    /* At rest: centred sticks, nothing pressed. */
++    get((u32)port);
++    CHECK((s32)vm_read32(BUF) == CELL_PAD_LEN_CHANGE_PRESS_ON);
++    CHECK(word(6) == 128 && word(7) == 128 && word(4) == 128 && word(5) == 128);
++    CHECK(word(2) == 0 && word(3) == 0 && word(18) == 0 && word(19) == 0);
++
++    /* Steer full left, stick down, camera half right, a half-pulled R2
++     * (throttle), a fully pulled L2, cross held. */
++    SDL_JoystickSetVirtualAxis(joy, SDL_CONTROLLER_AXIS_LEFTX, -32768);
++    SDL_JoystickSetVirtualAxis(joy, SDL_CONTROLLER_AXIS_LEFTY, 32767);
++    SDL_JoystickSetVirtualAxis(joy, SDL_CONTROLLER_AXIS_RIGHTX, 16384);
++    /* A trigger is a whole joystick axis to SDL's mapping: -32768 released,
++     * 32767 fully pulled, so 0 is half. */
++    SDL_JoystickSetVirtualAxis(joy, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, 0);
++    SDL_JoystickSetVirtualAxis(joy, SDL_CONTROLLER_AXIS_TRIGGERLEFT, 32767);
++    SDL_JoystickSetVirtualButton(joy, SDL_CONTROLLER_BUTTON_A, 1);
++    get((u32)port);
++    printf("LX=%u LY=%u RX=%u RY=%u L2=%u R2=%u cross=%u d1=%02X d2=%02X\n",
++           word(6), word(7), word(4), word(5), word(18), word(19), word(14), word(2), word(3));
++    CHECK(word(6) == 0 && word(7) == 255 && word(4) == 192 && word(5) == 128);
++    CHECK(word(3) & 0x40);                       /* CROSS bit */
++    CHECK(word(14) == 255);                      /* cross pressure */
++    CHECK((word(3) & 0x03) == 0x03);             /* L2, R2 digital bits */
++    CHECK(word(18) == 255);                      /* L2 pressure */
++    /* The half-pulled R2 must read as half, not be topped up to 255 because
++     * its digital bit is set. */
++    CHECK(word(19) >= 120 && word(19) <= 135);
++
++    /* Without press mode the pressure words stay zero (len 8). */
++    CHECK(cellPadSetPortSetting((u32)port, 0) == CELL_OK);
++    get((u32)port);
++    CHECK((s32)vm_read32(BUF) == CELL_PAD_LEN_CHANGE_DEFAULT && word(19) == 0);
++    CHECK(cellPadSetPortSetting((u32)port, CELL_PAD_SETTING_PRESS_ON) == CELL_OK);
++
++    /* Rumble: large motor is a speed, small one on/off. */
++    vm_base[ACT + CELL_PAD_ACTUATOR_PARAM_SMALL] = 1;
++    vm_base[ACT + CELL_PAD_ACTUATOR_PARAM_LARGE] = 200;
++    CHECK(cellPadSetActDirect((u32)port, (CellPadActParam*)(uintptr_t)ACT) == CELL_OK);
++    for (int t = 0; t < 100 && s_low != 200 * 257; t++) SDL_Delay(5);
++    printf("rumble low=%u high=%u\n", s_low, s_high);
++    CHECK(s_low == 200 * 257 && s_high == 0xFFFF);
++    /* Held until changed: SDL's rumble lasts 100 ms, a DS3's until told
++     * otherwise, so it must still be on well past that. */
++    SDL_Delay(400);
++    CHECK(s_low == 200 * 257 && s_high == 0xFFFF);
++    vm_base[ACT + CELL_PAD_ACTUATOR_PARAM_SMALL] = 0;
++    vm_base[ACT + CELL_PAD_ACTUATOR_PARAM_LARGE] = 0;
++    CHECK(cellPadSetActDirect((u32)port, (CellPadActParam*)(uintptr_t)ACT) == CELL_OK);
++    for (int t = 0; t < 100 && (s_low || s_high); t++) SDL_Delay(5);
++    CHECK(s_low == 0 && s_high == 0);
++
++    /* The port's own keyboard (cellPad_set_host_input) merges into port 0. */
++    cellPad_set_host_input(hook, NULL);
++    CHECK(cellPadSetPortSetting(0, CELL_PAD_SETTING_PRESS_ON) == CELL_OK);
++    s_hook_on = 1;
++    get(0);
++    CHECK(word(3) & 0x40);
++    CHECK(word(6) == 0);
++    CHECK(word(19) == 255 && (word(3) & 0x02));
++    s_hook_on = 0;
++    get(0);
++    CHECK(word(19) == 0 || port == 0);   /* port 0 may be the virtual pad, still at half R2 */
++    cellPad_set_host_input(NULL, NULL);
++
++    /* Unplugged: the port reports disconnected and its sticks centre. */
++    SDL_JoystickClose(joy);
++    SDL_JoystickDetachVirtual(dev);
++    int gone = 0;
++    for (int t = 0; t < 200 && !gone; t++) {
++        SDL_Delay(10);
++        SDL_LockMutex(s_sdl_lock);
++        gone = !s_sdl_state[port].connected && s_sdl_state[port].analog_lx == 128;
++        SDL_UnlockMutex(s_sdl_lock);
++    }
++    CHECK(gone);
++
++    CHECK(cellPadEnd() == CELL_OK);
++    printf("PASS: cellPad SDL2 -- sticks, analog L2/R2 pressure, press mode, rumble, host input, unplug (%u checks)\n", checks);
++    free(vm_base);
++    return 0;
++}
+diff --git a/libs/input/tests/test_cellpad_sdl.py b/libs/input/tests/test_cellpad_sdl.py
+new file mode 100644
+index 0000000..08941fc
+--- /dev/null
++++ b/libs/input/tests/test_cellpad_sdl.py
+@@ -0,0 +1,26 @@
++#!/usr/bin/env python3
++"""cellPad's SDL2 backend end to end with an SDL virtual gamepad (libs/input/tests/test_cellpad_sdl.c)."""
++import os
++from pathlib import Path
++import shutil
++import subprocess
++import sys
++import tempfile
++root = Path(__file__).resolve().parents[3]
++if os.name == 'nt':
++    print('SKIP: the fixture links with POSIX flags')
++    raise SystemExit(0)
++cfg = shutil.which('sdl2-config')
++if not cfg:
++    print('SKIP: SDL2 development files not found (sdl2-config)')
++    raise SystemExit(0)
++sdl = subprocess.run([cfg, '--cflags', '--libs'], capture_output=True, text=True, check=True).stdout.split()
++with tempfile.TemporaryDirectory(prefix='cellpad-sdl-') as tmp:
++    binary = Path(tmp) / 'test'
++    linker = ['-Wl,-dead_strip'] if sys.platform == 'darwin' else ['-Wl,--gc-sections', '-pthread', '-lm']
++    subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu17', '-D_GNU_SOURCE', '-O1', '-UNDEBUG',
++                    '-ffunction-sections', '-fdata-sections', '-I' + str(root / 'include'),
++                    str(root / 'libs/input/tests/test_cellpad_sdl.c'), *sdl, *linker, '-o', str(binary)], check=True)
++    # No window, no audio; PAD_TRACE shows what reached the guest buffer.
++    env = dict(os.environ, SDL_VIDEODRIVER='dummy', SDL_AUDIODRIVER='dummy', PAD_TRACE='1')
++    subprocess.run([str(binary)], check=True, timeout=30, env=env)
+-- 
+2.55.0
+
