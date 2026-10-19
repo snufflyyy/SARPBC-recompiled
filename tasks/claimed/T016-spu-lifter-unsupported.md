@@ -1,7 +1,7 @@
 # T016: SPU lifter — unsupported instructions in two 01.09 images
 
-Status: open
-Owner: -
+Status: claimed
+Owner: agent-spulift
 Touches: patches/ps3recomp/T016-*.patch (external/ps3recomp/tools/spu_lifter.py, spu_disasm.py, runtime/spu/spu_helpers.h + their tests), docs/game-profile.md (01.09 SPU rows only)
 Reads: versions/0109/src/spu_gen/inventory.json and its per-image lift.log, versions/0109/game/EBOOT.elf
 
@@ -19,3 +19,4 @@ Both images register in your copy's inventory with no unsupported instructions; 
 test exported as T016-*.patch; numbers in the task log.
 
 ## Log
+- 2026-10-18 23:33 agent-spulift: claimed

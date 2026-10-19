@@ -96,6 +96,7 @@ tools/relift.sh       # loader, TOC-stub split, PPU lift, NID table, SPU lift (~
 cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
 cmake --build build   # Release + Vulkan are the defaults on Linux -> build/sarpbc
 tools/run.sh          # build/sarpbc game/EBOOT.elf vfs (main.cpp maps /dev_hdd0 itself)
+tools/boot_check.sh 60 [--gdb] [--version 0109]   # headless boot report; stops only its own game
 ```
 Details and every flag: [docs/pipeline.md](docs/pipeline.md).
 
@@ -111,7 +112,7 @@ Details and every flag: [docs/pipeline.md](docs/pipeline.md).
 | [docs/unreal-engine-3.md](docs/unreal-engine-3.md) | Reasoning about the game's own code: threads, file I/O, renderer, UnrealScript |
 | [docs/reference-ports.md](docs/reference-ports.md) | Before solving a UE3 problem: Drakengard 3 (dod3-recomp) is a finished UE3 port on ps3recomp |
 | [docs/subsystems.md](docs/subsystems.md) | Working on graphics, audio, input, SPU/SPURS, saves, video, network, trophies |
-| [docs/debugging.md](docs/debugging.md) | Something hangs, crashes or draws wrong; env vars and triage recipes |
+| [docs/debugging.md](docs/debugging.md) | Something hangs, crashes or draws wrong; `tools/boot_check.sh` (paste the first line of `analysis/boot_report.txt` into task notes), env vars, triage recipes |
 | [docs/agents-workflow.md](docs/agents-workflow.md) | Before any work in parallel: task board, claiming, worktrees, locks, merge flow |
 
 ## Working conventions

@@ -59,6 +59,21 @@ The work is split into tasks on the board: `tools/task.sh list` (protocol:
 
 ## Log
 
+### 2026-10-18 (session 5) — parallel agents, 01.09
+- First agent wave started: T001, T002, T003, T004, T006. **T006 done and merged**:
+  `tools/boot_check.sh` (headless boot report, version aware, kills only its own game).
+- Target switched to **01.09** (user decision): downloaded from Sony's update server
+  (verified), overlaid on the base, decrypted with the RAP, lifted (5.79M lines) and built
+  in `versions/0109/`. Scripts take version dirs (VFS_DIR, GAME_DIR, OUT_DIR, BUILD_DIR).
+- **01.09 first boot:** it asks cellGame for its install and was told "disc game
+  BLES00000". Patch 0002 (game type from PARAM.SFO CATEGORY) plus `main.cpp` calling
+  `cellGame_init_from_paramsfo()` fix that. It now opens 12 packages through
+  MAINMENU.XXX at 1.6 s, then re-issues the same 8 Edge zlib requests ~9,000 times each
+  into NULL+offset buffers (0x00010000...). Most likely the sys_memory "never reuses
+  freed ranges" bug T001 found and patched (T001 is verifying on 01.09).
+- Boot is not deterministic on 01.02 (1 run in 6 went white and hit FATAL 0x373), and
+  the runtime ignores SIGTERM (boot_check escalates to SIGKILL).
+
 ### 2026-10-18 (session 4) — first boot
 - Build deps installed by the user (SDL2-devel, vulkan-headers, glslang-devel); `/home`
   now has 173 GB free. `ps3recomp_host` passes every Vulkan scene (draw, tex, shader, rtt,
