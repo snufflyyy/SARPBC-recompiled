@@ -40,12 +40,48 @@ work. Update the **Status** line of a section when you change it.
 - **Confirmed: MultiStream** (statically linked `cellMS*`, incl. MP3 stream functions)
   on SPU, with DSP effects as embedded SPU ELFs (`mstream_dsp_i3dl2/filter/para_eq`),
   outputting through cellAudio (10 imports). `cellMusicUtility` = custom soundtrack.
-- Same stack as Drakengard 3: their native MP3 decoder stand-in and DSP hooks
-  (`src/apu/`) are the reference if MultiStream asks for a firmware decoder.
+- **01.09 boot, 2026-10-19 (T007):** `cellAudio` Init / PortOpen(8 ch, 8 blocks, buffer
+  `0x58000000`, read index `0x58100000`) / PortStart all succeed. The MultiStream mixer is
+  **SPU image 0** (sha `e33837bb...`, fp `C1759183E2FF7448`, task ELF at EA `0x010AF300`),
+  started as taskset `0x01370680` task 0. Its "MultiStream Update Thread" (entry OPD
+  `0x01225628`) waits on SPURS event flag `0x01372000` bit 1, which the mixer sets.
+- **Blocker 1: the DSP plugin block (WORKAROUND ONLY).** The mixer DMAs the DSP plugins
+  (SPU images 12-14, packed) into **LS 0x37000** and calls into them (0x37018, 0x37010,
+  0x37C20, then 0x39818/0x39810/0x39B50; return addresses 0x03930/0x03AE0/0x04130).
+  Nothing is lifted there, so the task ends with "branched into unlifted LS 0x37018" and
+  flag `0x01372000` never gets set. `SPU_INTERP_UNLIFTED=1` runs that code in the SPU
+  interpreter: the flag wait is gone, and the mixer runs. The proper fix is dod3's: lift
+  the block at 0x37000 as an overlay (`tools/make_spu_overlays.py wrap/register` +
+  `build_spu_workloads.py --extra-funcs`, registered by its first 16 bytes) and later port
+  `msdsp_hooks.c` (native biquads). That needs a tools/ script and a relift.sh step
+  (outside T007's Touches).
+- **Blocker 2: `flashMP3.pic` (FIXED, untested end to end).** The PPU (01.09 `func_0082E690`)
+  reads `/dev_flash/sys/external/flashMP3.pic` into a buffer and `func_00835588` parses its
+  SPU ELF section table into a descriptor {+0 file EA, +4 body EA, +8 lowest sh_addr,
+  +C size, +10 e_entry}. Without it: "Multistream: mp3 failed to load MP3 codec".
+  `src/overrides/audio_mp3.cpp` (ported from dod3 `mp3_native.c`, MIT) writes a stand-in
+  ELF of our own to `<exe dir>/dev_flash/` at start-up and sets `PS3_DEV_FLASH` (unless the
+  user set it), registers a native `decodeFrame` at **LS 0x1A910** (body at 0x1A900, as in
+  dod3; the mixer's descriptor sits at LS 0x1A880 and it calls decodeFrame at SPU 0x6E2C
+  through the word at LS 0x3C4B0) and decodes with dod3's decoder
+  (`audio_mp3dec.cpp`). Verified: the file opens and the error is gone. **Not verified:**
+  no MP3 stream starts before the boot stalls at "Loading...", so decodeFrame has not been
+  called yet. `SARPBC_MP3_TRACE=<n>` logs the first n calls, `SARPBC_MP3_NATIVE=0` turns it off.
+- **cellAudio on Linux (patch `T007-audio-pacing-devflash-sig-region`):** the POSIX mixing
+  loop now paces to the SDL queue (it used fixed 2/5 ms sleeps), and
+  `AUDIO_RATE=1` / `AUDIO_PEAK=1` / `AUDIO_WAV=<file>` work on Linux. With PipeWire
+  (`SDL_AUDIODRIVER=pulseaudio`): `[audio-rate] 187.5 blocks/s (real time 187.5), silent
+  100.0%, dropped 0 frames/s, underruns 0`: the port runs at real time on a real device,
+  but every block is silent (nothing reaches the port yet).
+  The same patch moves the `/dev_flash` default off a Windows path
+  (`$XDG_DATA_HOME/ps3recomp/dev_flash`) and adds `spu_overlay_register_sig_region()`.
+- Still seen: `[mfc] REJECTED malformed transfer ... pc=0x0B1C8 lsa=0x30B60 size=0` from
+  the mixer, a size-0 GET (a no-op on hardware too; probably an empty stream list).
 - ps3recomp: cellAudio over SDL2 on Linux (`SDL_AUDIODRIVER=dummy` for silent runs,
   `PS3_NO_AUDIO` to disable).
 - `cellMic` (15 imports) for voice chat — stub "no mic attached" first.
-- Status: not started.
+- Status: in progress (T007 paused). Port runs; mixer runs only through the
+  interpreter; MP3 stand-in in place; no audible output yet.
 
 ## Input
 
