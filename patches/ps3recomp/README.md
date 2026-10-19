@@ -47,6 +47,11 @@ order we expect to need them (details in `docs/reference-ports.md`):
 | `0015-spurs-queue-ppu.patch` | T019: real PPU side of SPURS Queue (PopBody/PushBody, attach/detach) and LFQueue init in the task-side layout | to offer |
 | `0016-dod3-cellpad-sdl2-port.patch` | T008: Drakengard 3 fork's 13 libs/input commits (SDL pad thread, pads by instance id, rumble held, `cellPad_set_host_input`, host kind, PAD_NO_HOST); soyjxck, MIT, authors kept | fork author's work: offer with them |
 | `0017-cellpad-racing-fixes.patch` | T008: press-mode trigger pressure (a half pull read 255), small motor on/off at 0xFFFF, empty ports' sticks centred at 128, `PAD_TRIGGERS`/`PAD_TRACE`; test `libs/input/tests/test_cellpad_sdl.py` | to offer |
+| `0018-spu-task-thread-stack-uaf.patch` | T023: fork 0012+0148 (soyjxck): Linux SPU task thread leaves the lock-line reserver set when it ends, plus ours: and the MFC slot table (as on Windows) | fork author's work |
+| `0019-lwcond-signals-wake.patch` | T023: fork 0100: `sys_lwcond_signal*` wake waiters (was a 1 ms sleep poll); adapted to our semaphore lwmutex; test `tools/test_ppu_lwcond_wake.py` | fork author's work |
+| `0020-ppu-thread-slots-stacks.patch` | T023: fork 0166+0167: ended PPU threads give back their slot and guest stack; non-joinable threads self-free | fork author's work |
+| `0021-sys-fs-overlay-hdd0-symlinks.patch` | T023: fork 0119/0131/0132: `PS3_VFS_OVERLAY`, existing `/dev_hdd0` paths used directly, readdir lists symlinked dirs as dirs | fork author's work |
+| `0022-spurs-task-error-codes.patch` | T023: `CELL_SPURS_TASK_ERROR_*` use the SDK's 0x804109xx values (were 0x804107xx) | to offer |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `git -C external/ps3recomp format-patch -1 -o ../../patches/ps3recomp/ --start-number N`.
