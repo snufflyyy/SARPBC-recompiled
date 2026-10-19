@@ -2,7 +2,7 @@
 
 Status: open
 Owner: -
-Touches: patches/ps3recomp/T033-*.patch (runtime/spu/spu_lifted_thread.*, runtime/spu/spu_workload.*, runtime/spu/spurs_policy.c, runtime/spu/spu_dispatch_mt.c)
+Touches: patches/ps3recomp/T033-*.patch (runtime/spu/spu_lifted_thread.*, runtime/spu/spu_workload.*, runtime/spu/spurs_policy.c, runtime/spu/spu_dispatch_mt.c, libs/spurs/spurs_taskset.* and the task-creation path in libs/spurs/cellSpurs.c)
 Reads: docs/subsystems.md, libs/spurs (read only)
 
 ## Goal

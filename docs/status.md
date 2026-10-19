@@ -3,56 +3,65 @@
 Living document. Update the phase table, "Next steps" and the log at the end of each
 work session. Newest log entry first. Use absolute dates.
 
-## Resume here (paused 2026-10-19 ~11:15 for usage)
+## Resume here (paused 2026-10-19 ~11:30 for usage)
 
 **To restart, paste this into a new Claude Code session in the main checkout:**
-> Read AGENTS.md, docs/status.md "Resume here" and docs/agents-workflow.md. Merge the paused
-> branches listed below (renumber patches, `tools/apply_patches.sh`), then resume the tasks
-> in "Restart these" with up to 5 agents from docs/agent-brief.md. Use the Model line in each task.
+> Read AGENTS.md, docs/status.md "Resume here" and docs/agents-workflow.md, then resume the
+> tasks under "Restart these" with up to 5 agents from docs/agent-brief.md (worktree isolation;
+> use each task's Model line). Keep the slots full from "Next in line".
+
+Every agent branch from this session is merged; nothing is left to merge. Each paused task has a
+`HANDOFF:` note (`tools/task.sh show <ID>`). Old worktrees under `.claude/worktrees/` can be
+deleted (the audit will do it).
+
+**Headline: 01.09 reached the main menu** (T028, 11:11): New Game / Play Online / Split Screen /
+Options / Extras, Profile Guest1. The intro is Loading, ESRB with the car, Powered by Unreal, the
+Psyonix logo, the safe-area screen (needs X), then the menu. New Game opens MP_SOCCARARENA.XXX at
+~164 s, then the log goes silent (T037). There's no Bink anywhere in 01.09. Pressing X needs a
+`PAD_FILE` loop for now (T036 will make it `boot_check --pad`).
+
+**State of `main`:** 36 patch files (54 commits on 39a3629). Merged this session: 0028 + 0031
+(SPU ctor seeding + test), 0029 (SRW writer preference), 0030 (per-thread callback stacks), 0032
+(SSE2 SPU float helpers) + CMake `-march=x86-64-v2` for lifted SPU code (mixer 15% -> 53% of real
+time), 0033 (mfc_for engine cache + POSIX lockline TTAS: flips 100 -> 514 in 90 s), 0034-0036 (GCM
+PrepareFlip id, ring recycle fixes), `src/overrides/gcm_config.cpp` (defaults
+`GCM_PARK_GRACE_MS=5000`, `GCM_INTR_THREAD=1`; the env overrides them), and `tools/spu_profile.sh`
+(T029). Both versions are relifted. `SPU_INTERP_UNLIFTED` is no longer needed.
+
+**The bottleneck now is SPU host threads.** PhysX `CreateTask` gets one host thread per SPURS
+task, 16 per frame, and they never exit: 123 at 45 s, 561 at 300 s. All of them spin on lock line
+0x0133B880 (taskset 0x01335080's lock) through the one global `spu_lockline_lock`, which is 83% of
+all perf samples. The game runs at ~0.4 fps and uses ~1500% CPU. At ~297 s the taskset runs out of
+its 128 task ids ("PhysX: Error starting spurs task"). The fix is T033 (a ~6-thread SPURS worker
+pool, and why the tasks never exit). Boots run one at a time: `tools/task.sh lock boot ...`.
 
 **User plan (2026-10-19), in order:**
-1. Menus first (T024, T028).
-2. Then every slot goes to **SPU performance, easy wins only**: T029 (profiling harness, Sonnet),
-   T030 (busy-wait spins, started early because one boot burns ~15 of 16 cores), T031 (lifter
-   codegen), T032 (DMA/MFC), T033 (host threads), T025 (SIMD helpers). Measured, bit-exact,
+1. ~~Menus~~ reached.
+2. Now: **SPU performance, easy wins only.** Measured (`tools/spu_profile.sh`), bit-exact,
    nothing deep; bigger ideas become proposed tasks.
 3. When the easy wins are done: wrap up and stop all agents.
 4. The coordinator audits the project (read-only sweeps on Sonnet/Haiku, fixes by the coordinator)
    for cleanliness, tidiness and extensibility: docs vs. reality, the patch stack, scripts,
-   overrides, the task board, the ~20 stale worktrees and branches under `.claude/worktrees/`.
+   overrides, the task board, the ~25 stale worktrees and branches under `.claude/worktrees/`.
 
-**Furthest point (01.09):** the **safe-area screen** ("Use the Left Stick to adjust the
-screen... press X") at ~76 s, after Loading, ESRB with the car, the Psyonix logo and Powered by
-Unreal. That needs `GCM_INTR_THREAD=1 GCM_PARK_GRACE_MS=600000` (T024 is choosing the default)
-on top of `main`. That screen waits for X, and boot_check presses nothing (T028). 01.09 has no
-Bink movies, so the "intros" are logo screens in the MAINMENU map.
+**Restart these (5 slots):**
 
-**State of `main`:** 30 patches (48 commits on 39a3629), both versions relifted with 0028.
-Merged this session: 0028 (T025: SPU finder seeds .ctors/.dtors; PhysX LS 0x20180 is lifted, so
-`SPU_INTERP_UNLIFTED` is no longer needed), 0029 (T027: SRW locks prefer writers on glibc),
-0030 (T026: per-thread, per-depth guest callback stacks).
+| Task | Model | What is next (from its HANDOFF) |
+|---|---|---|
+| T033 SPU host threads | Opus | SPURS worker pool (~6 host threads instead of one per task); why PhysX tasks never exit. Biggest win |
+| T030 SPU busy-waits | Opus | GETLLAR re-read backoff + wait on `ch_wait_cv`; index coherence contexts by line; PUTLLC-fail backoff |
+| T032 DMA/MFC | Opus | fast paths; the rest of the `mfc_for` rwlock |
+| T031 lifter codegen | Opus | cheap wins in `spu_lifter.py` output |
+| T029 profiler | Sonnet | one end-to-end re-run of `tools/spu_profile.sh` after the `--no-inline` edit; name SPU threads |
 
-**Known problem:** one 01.09 boot uses ~1460% CPU. 50-170 PhysX SPU threads spin at SPU pc 0x32B44
-on `GETLLAR 0x0133B880`, through `mfc_for`'s shared lock (T030). Boots must run one at a time:
-`tools/task.sh lock boot ...` (docs/agents-workflow.md).
+**Next in line:** T025 (Opus: force-inline SSE4.1 shufb, mixer to real time), T036 (Sonnet:
+`boot_check --pad`), T035 (Sonnet: broken entry-args test), T024 (Opus: ShaderPatching chain
+0x012B6F00 throughput, ~25 parks per frame), T037 (arena hang after New Game), T038 ("Loading..."
+drawn upside down), T034 (callback stack lock + TLS).
 
-**Paused branches to merge, and tasks to restart:** see the table below (filled in from each
-agent's HANDOFF).
-
-| Task | Model | Branch | State |
-|---|---|---|---|
-| T024 GCM parks + flip fixes | Opus | (pending handoff) | |
-| T025 SPU SIMD helpers | Opus | (pending handoff) | |
-| T028 ESRB to menus | Opus | (pending handoff) | |
-| T030 SPU busy-waits | Opus | (pending handoff) | |
-| T029 SPU profiling harness | Sonnet | (pending handoff) | |
-
-**Restart these** (5 slots): T024, T028, T030, T025, T029. Next in line: T035 (Sonnet, broken
-test), T031, T032, T033, T034.
-
-**After the SPU easy wins, by priority:** T007 rest (silent audio), T008 follow-ups, T020 rest,
-T017 (saves), T021 rest, T012, T009, T018, T005, T010, T011, T013, T014. T015 multiplayer stays
-**blocked** (user permission needed).
+**After the SPU easy wins and the audit, by priority:** T037, T038, T007 rest (silent audio),
+T008 follow-ups, T020 rest, T017 (saves), T021 rest, T012, T009, T018, T005, T010, T011, T013,
+T014. T015 multiplayer stays **blocked** (user permission needed).
 
 Before building `main`: `tools/apply_patches.sh`, then reconfigure CMake.
 
@@ -67,7 +76,7 @@ Before building `main`: `tools/apply_patches.sh`, then reconfigure CMake.
 | 4 | Project skeleton from the template, first lift + build on Linux | done 2026-10-18 |
 | 5 | Boot to first file opens / first HLE gaps | done 2026-10-18 |
 | 6 | Loading screen draws (`LOADSCREEN` FPO/VPO) | done 2026-10-18 — "Loading..." through Vulkan |
-| 7 | Intro movies / main menu | in progress: 01.09 reaches the safe-area screen (before the title screen) with env overrides |
+| 7 | Intro movies / main menu | **reached 2026-10-19** on 01.09 (T028; X presses via PAD_FILE). ~0.4 fps |
 | 8 | Offline match in an arena, with input and audio | — |
 | 9 | Polish: saves, trophies, perf, split-screen; online later | — |
 
@@ -111,6 +120,15 @@ The work is split into tasks on the board: `tools/task.sh list` (protocol:
 - Does the upstream POSIX boot scaffold get a UE3-sized title to `main` on Linux?
 
 ## Log
+
+### 2026-10-19 (session 7): main menu reached; SPU bottleneck located
+- Resumed with 5 agents (limit raised from 3). Merged T025 (0028/0031/0032 + SPU `-march`), T027
+  (0029), T026 (0030), T030 (0033), T024 (0034-0036 + gcm_config.cpp), T028 (docs), T029 (profiler).
+- **01.09 reached the main menu** (T028, PAD_FILE X presses). Boots now run one at a time
+  (`lock boot`): five parallel boots put the 16-core host at load ~160 and skewed every timing.
+- Profiler: `spu_lockline_lock` is 83% of samples. PhysX tasks pile up as host threads (T033).
+- User decisions: SPU perf (easy wins) after the menus, then an audit; Sonnet 5.5 for scoped
+  tasks and Haiku 5.5 for read-only searches (AGENTS.md).
 
 ### 2026-10-18 (session 5, later) — first wave merged
 - Merged: **T001** (patch 0005: sys_memory reuses freed ranges; UE3 ran the bump allocator

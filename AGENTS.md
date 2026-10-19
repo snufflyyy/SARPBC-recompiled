@@ -11,13 +11,12 @@ you are touching instead of re-scanning the tree or the game files.
 
 ## Current state (keep this line true)
 
-**Phase 7: 01.09 reached the legal/ESRB screen in a local test; next goal is the main menu.**
-The PPU lift and all 15 SPU images (plus the 2 SPUJOBS jobs and the MultiStream DSP overlay) build
-on both 01.02 and 01.09 with 27 ps3recomp patches. 01.09 loads its packages and gets through PhysX
-init. The stall that followed had three causes: GCM labels sitting under the game's heap (fixed
-by an override), lost SPURS job-chain runs (fixed, 0024), and the GCM watchdog skipping FIFO parks
-(0027 plus an experiment that still needs reconciling). Work runs in parallel through the task
-board ([docs/agents-workflow.md](docs/agents-workflow.md)); **resume from
+**Phase 7 done: 01.09 reaches the main menu (2026-10-19); now SPU performance, then a project audit.**
+The PPU lift, all 15 SPU images, the 2 SPUJOBS jobs and the MultiStream overlay build on 01.02 and
+01.09, with 36 ps3recomp patches. The game runs at ~0.4 fps because PhysX starts one host thread per
+SPURS task, the tasks never exit, and they all spin on one global lock-line lock (~1500% CPU).
+Next is the SPURS worker pool (T033) and other easy SPU wins. Work runs in parallel through the
+task board ([docs/agents-workflow.md](docs/agents-workflow.md)); **resume from
 [docs/status.md](docs/status.md) "Resume here"**.
 
 ## Key facts
