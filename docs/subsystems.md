@@ -148,8 +148,32 @@ work. Update the **Status** line of a section when you change it.
   several unidentified — and **Edge Geometry** job images inside `SPUJOBS.prx`
   (a PPU PRX loaded with `sys_prx_load_module`).
 - SPURS features used: tasksets, tasks, job chains, event flags, job guards, **Queue
-  and LFQueue**. Drakengard 3 needed Sony's libsre lifted for Queue/LFQueue and a native
-  Edge zlib — expect the same here.
+  and LFQueue**. Drakengard 3 lifted Sony's libsre for Queue/LFQueue; we cannot ship
+  firmware, so T019 wrote the PPU side from the task-side code instead.
+- **SPURS Queue (T019, patch `T019-spurs-queue-ppu.patch`, `libs/spurs/cellSpursQueue.c`).**
+  PhysX tasks report to the PPU through SPU2PPU queues (task helper "sendResponseToPPUAndExit":
+  non-blocking push retried on AGAIN/BUSY, then push end). Line layout, derived from the
+  task-side push in the PhysX images (image `7bde2a3f`: begin LS `0x6990`, end `0x6E88`,
+  event throw `0x7608`, task signal `0x7238`): pop index `+0x00`, push index `+0x04` (both in
+  `[0, 2*depth)`, stored as `~index` while that side is in progress), size `+0x08`, depth
+  `+0x0C`, buffer u64 `+0x10`, SPU port `+0x18` (-1 = none), direction `+0x1C`, waiter lists
+  `+0x20` pop / `+0x30` push (u8 count + task ids; workload ids at `+0x40`/`+0x50`), taskset
+  u64 `+0x60`. Upstream's old init put size/buffer at `+0x10`/`+0x18` (wrong).
+  - Game calls (01.09): `_cellSpursQueueInitialize(0, taskset, q, buf, 16, 128, SPU2PPU)` at
+    `0x008496B0`, then `cellSpursQueueAttachLv2EventQueue(q)`; `cellSpursQueuePopBody(q, buf,
+    isPeek=0, isBlocking=1)` at `0x008482EC` (any error is fatal) and `(…, 0, 0)` at
+    `0x00848394`, which treats `0x80410901` (AGAIN) as "empty". Elements are 16 bytes; the PPU
+    reads words `+8` and `+0xC`. Note `cellSpurs.h`'s `CELL_SPURS_TASK_ERROR_*` macros are
+    `0x804107xx`; the real values are `0x804109xx` (the queue code spells its own).
+  - Blocking pop/push = retried non-blocking tries that sleep until an SPU commits the queue
+    line (SPU line-commit hook) or 1 ms (dod3's design). The PPU never parks holding the pop
+    side, so the task never needs to throw the `+0x18` event.
+  - Verified: `test_spurs_queue` (ctest `spurs_queue`) and a 01.09 boot: six queues init and
+    attach (ports 17-22), three blocking pops return real task results, no "Error writing to
+    SPURS queue". The boot then stalls elsewhere (EventFlagWait on `0x01372000`, job guard
+    `0x0133AA80` closed 20 s).
+  - LFQueue: init now writes libsre's CellSyncLFQueue line (from dod3); a general
+    `_cellSpursLFQueuePushBody` is still missing (Edge zlib is serviced natively).
 - Bink: no Bink SPU image identified yet; may decode on PPU.
 - ps3recomp: SPU lifter, workload registry by fingerprint, SPURS (tasks, job chains, job
   queues, policy modules), interpreter fallback, `SPU_DUMP_MISS` capture.
