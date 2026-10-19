@@ -57,6 +57,7 @@ order we expect to need them (details in `docs/reference-ports.md`):
 | `0025-gcm-user-command-queue.patch` | T024: fork 0018 (soyjxck d2e6c1b): user commands queue in order instead of sharing one slot | fork author's work |
 | `0026-gcm-pump-fast-exit.patch` | T024: fork 0139 (soyjxck b6e4e18): GCM pump fast exit | fork author's work |
 | `0027-gcm-intr-thread-park-handling.patch` | T024: the stuck-get watchdog no longer resyncs away from a jump-to-itself park; `GCM_PARK_GRACE_MS` (50), `GCM_PARK_LOG`, opt-in `GCM_INTR_THREAD=1` host interrupt thread for vblank/flip/user handlers | to offer |
+| `0028-spu-seed-ctors-dtors.patch` | T025: `find_spu_functions.py` seeds `.ctors/.dtors/.init_array/.fini_array` entries (and `-1..0` framed lists in stripped images); PhysX LS 0x20180 is a static ctor | to offer |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `git -C external/ps3recomp format-patch -1 -o ../../patches/ps3recomp/ --start-number N`.

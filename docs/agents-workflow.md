@@ -1,6 +1,6 @@
 # Working in parallel — task board, worktrees, locks
 
-Several agents (at most the number the user sets, **currently 3**) work on this port at the same time. This page is
+Several agents (at most the number the user sets, **currently 5**) work on this port at the same time. This page is
 the protocol that keeps them from breaking each other's builds, runs and commits. A
 coordinator (the main session) creates tasks, spawns agents, reviews and merges.
 
@@ -72,7 +72,7 @@ the HANDOFF note.
 
 - Create tasks with `tools/task.sh new <slug> <title>` and fill in **Touches** (exclusive
   write scope) and **Reads**. No two open or claimed tasks may share a Touches path.
-- Spawn at most as many agents as the user allows (currently 3), each with `isolation: worktree`, and tell each its task ID.
+- Spawn at most as many agents as the user allows (currently 5), each with `isolation: worktree`, and tell each its task ID.
 - On completion: review the branch diff, merge into `main`, renumber patches, run
   `tools/apply_patches.sh`, rebuild, re-run, and update `docs/status.md` and the
   AGENTS.md current-state paragraph. Commit the task board (`tasks/`) with the merge.

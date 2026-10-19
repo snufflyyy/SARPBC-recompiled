@@ -1,0 +1,101 @@
+From e1d500e3b4da4c2d1b0dfcc40fc7d9021cc6546f Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Mon, 19 Oct 2026 09:41:13 -0500
+Subject: [PATCH] find_spu_functions: seed static constructors and destructors
+
+crt0 calls every .ctors/.dtors entry through a pointer loaded from the list
+(bisl $r0), and a list usually holds one or two entries, below the data
+function-pointer-table scan's run of three, so no seeder found them. A PhysX
+image (SPU_DynamicsRelease.elf, .ctors = {-1, 0x20180, 0}) ended its first job
+with 'branched into unlifted LS 0x20180 (lr=0x20148)'. Seed every in-segment
+word of .ctors/.dtors/.init_array/.fini_array; for a section-stripped image,
+find the lists by their -1 ... 0 framing in data PT_LOADs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ tools/find_spu_functions.py | 62 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 62 insertions(+)
+
+diff --git a/tools/find_spu_functions.py b/tools/find_spu_functions.py
+index 1287ff5..305d07a 100644
+--- a/tools/find_spu_functions.py
++++ b/tools/find_spu_functions.py
+@@ -639,6 +639,60 @@ def collect_function_pointer_tables(buf, phs, code_start, code_end,
+     return targets
+ 
+ 
++CTOR_SECTIONS = (".ctors", ".dtors", ".init_array", ".fini_array")
++
++
++def collect_ctor_dtor_targets(buf, elf, code_start, code_end, insns_by_addr):
++    """Static constructors and destructors: code reached only through a list.
++
++    GCC's crt0 (`__do_global_ctors`) walks .ctors backwards from its end and
++    calls every entry with `bisl $r0, $rN`, the pointer loaded from memory; the
++    destructor walk does the same over .dtors. Nothing branches to these
++    functions by address, and a typical list has one or two entries (below
++    collect_function_pointer_tables' run of three), so no other seeder found
++    them. The first call at task start then missed the lift: a PhysX image
++    (`SPU_DynamicsRelease.elf`, .ctors = {-1, 0x20180, 0}, the constructor a
++    bare `bi $r0`) ended its first job with "branched into unlifted LS 0x20180
++    (lr=0x20148)".
++
++    With a section table, every in-segment word of a .ctors/.dtors/.init_array/
++    .fini_array section is a seed. Without one (a stripped image), the lists
++    are found by their crt framing in the non-executable PT_LOADs: a word
++    0xFFFFFFFF, one or more 4-aligned code addresses, then a 0 terminator.
++    """
++    def ok(w):
++        return (w & 3) == 0 and code_start <= w < code_end and w in insns_by_addr
++
++    targets = set()
++    secs = [sh for sh in elf.get("shs", ()) if sh.get("name") in CTOR_SECTIONS
++            and sh.get("type") != 8]                     # not SHT_NOBITS
++    if secs:
++        for sh in secs:
++            data = buf[sh["off"]:sh["off"] + sh["size"]]
++            for i in range(0, len(data) - 3, 4):
++                w = int.from_bytes(data[i:i + 4], "big")
++                if ok(w):
++                    targets.add(w)
++        return targets
++    if elf.get("shs"):
++        return targets          # sectioned, but no constructor lists
++    for ph in elf.get("phs", ()):
++        if ph.get("type") != 1 or (ph.get("flags", 0) & 1):
++            continue            # PT_LOAD data segments only
++        seg = buf[ph["off"]:ph["off"] + ph["filesz"]]
++        words = [int.from_bytes(seg[i:i + 4], "big")
++                 for i in range((-ph["vaddr"]) & 3, len(seg) - 3, 4)]
++        for i, w in enumerate(words):
++            if w != 0xFFFFFFFF:
++                continue
++            j = i + 1
++            while j < len(words) and ok(words[j]):
++                j += 1
++            if j > i + 1 and j < len(words) and words[j] == 0:
++                targets.update(words[i + 1:j])
++    return targets
++
++
+ # Kept for backwards compatibility / call-only counting.
+ def collect_brsl_targets(insns):
+     return {t for ins in insns if ins.mnemonic in ("brsl", "brasl")
+@@ -777,6 +831,14 @@ def detect_functions(buf, base_override=None, verbose=True, raw=False,
+     for t in extra_seeds:
+         if code_start <= t < code_end and (t & 3) == 0 and t in insns_by_addr:
+             seed_starts.add(t)
++    # Static constructors/destructors, called through crt0's list walk: real
++    # entries by construction, so they bypass the data filter too.
++    ctor_targets = set() if raw else collect_ctor_dtor_targets(
++        buf, elf, code_start, code_end, insns_by_addr)
++    seed_starts |= ctor_targets
++    if ctor_targets and verbose:
++        print(f"  {len(ctor_targets)} constructor/destructor target(s): "
++              f"{', '.join(f'0x{a:X}' for a in sorted(ctor_targets))}")
+     rejected -= seed_starts
+     if rejected and verbose:
+         print(f"  {len(rejected)} derived seed(s) rejected as data "
+-- 
+2.55.0
+

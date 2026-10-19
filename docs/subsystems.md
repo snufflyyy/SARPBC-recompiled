@@ -253,6 +253,24 @@ controls screen.
   below). The Edge zlib task (image 1, fp
   `4100F6EDD2441719`) is dispatched, runs, and then idles in `WAIT_SIGNAL`, because Edge
   zlib requests are now serviced natively on the PPU (`src/overrides/edgezlib.cpp`).
+- **PhysX "unlifted LS 0x20180" = an unseeded static constructor (T025, 2026-10-19).**
+  01.09 boots logged `[spu] img=363824547 branched into unlifted LS 0x20180 (lr=0x20148) --
+  ending the job` (image 7, `spu_5af85a31...`, SPU_DynamicsRelease.elf). Its `.ctors` at LS
+  0x36E70 is `{-1, 0x20180, 0}`; crt0's loop at 0x20140 loads each entry and calls it with
+  `bisl $r0` (the constructor itself is a bare `bi $r0`). Nothing branches to it by address
+  and the list is shorter than the data fn-pointer-table scan's minimum run of 3, so
+  `find_spu_functions.py` never seeded it. 9 of the 13 sectioned images had unseeded
+  `.ctors`/`.dtors` entries (e.g. 0x31D8/0x31C8 in several PhysX images); the two
+  section-stripped images (`d08b1ad8`, `e33837bb`) have empty lists (`-1, 0, -1, 0` at the
+  start of their data segment). Patch `T025-spu-seed-ctors-dtors` seeds every
+  `.ctors/.dtors/.init_array/.fini_array` word, and for stripped images finds lists by their
+  `-1 ... 0` framing. A relift of 01.09 with it: 15/15 registered, complete, every ctor/dtor
+  entry lifted (checked against functions.json). **Not yet verified at run time** (needs the
+  shared 01.09 `spu_gen` relifted, or `-DSPU_DIR=<copy>`).
+- **SPU speed baseline (T025, 01.09, before any change):** `SPURS_EF_STATS=1` flag
+  `0x01372000` ~75 waits/s (mean 11 ms), `SPU_DMA_RANGE=58000000-58200000` PUT ~410 KB/s
+  (27% of real time). `AUDIO_RATE=1` reports ~197.9 blocks/s with the dummy driver: that is
+  the port's consumption, not the mixer's output, so use the two lines above to measure SPU speed.
 - **`_cellSpursLFQueuePushBody` (NID `0x8A85674D`) has no HLE upstream.** The override
   handles only 32-byte (Edge zlib) queues and refuses others loudly.
   Request layout: in/out EA, in/out size, counter EA|inflate bit, flag EA, flag bits,

@@ -6,7 +6,7 @@ work session. Newest log entry first. Use absolute dates.
 ## Resume here (paused 2026-10-19 for usage)
 
 **Priority (user): get 01.09 into the menus.** Every agent slot goes to the boot until then.
-At most **3** agents.
+At most **5** agents (raised from 3 on 2026-10-19).
 
 **Headline:** T022 reached the **legal/ESRB screen with a 3D car rendered** on 01.09 by
 combining three fixes (`PROGRESSING | last open TEXTURES.TFC@6.1s | flips 106`, 90 s,

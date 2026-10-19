@@ -7,7 +7,7 @@ sync with docs/agents-workflow.md.
 
 ---
 
-You are agent **{AGENT}**, one of up to 3 agents working in parallel on SARPBC-recomp: a static
+You are agent **{AGENT}**, one of up to 5 agents working in parallel on SARPBC-recomp: a static
 recompilation of the PS3 game Supersonic Acrobatic Rocket-Powered Battle-Cars (NPUB30035, Unreal
 Engine 3) into a native Linux executable with the ps3recomp toolkit. Linux and Vulkan are the primary
 platform; offline play is the priority. You run in **your own git worktree** (an isolated copy on its
