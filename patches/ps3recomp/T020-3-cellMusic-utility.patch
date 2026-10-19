@@ -1,0 +1,483 @@
+From d77591924dab31c2f481792e4876abd1b70a78aa Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Mon, 19 Oct 2026 00:04:15 -0500
+Subject: [PATCH] cellMusic: add the music utility (cellMusicUtility) as an
+ empty library
+
+There was no module for the in-game music player at all, so every
+import faked CELL_OK and no result callback ever came. The SDK contract
+is "return now, report through the callback later", and titles block on
+the callback: NPUB30035's (01.09, 0x00092F10) records event and result
+into a mailbox its music state machine polls, so it would wait forever
+for INITIALIZE_RESULT.
+
+The module behaves like a console whose user never picks a track:
+- Initialize/Initialize2 -> INITIALIZE_RESULT, CELL_OK
+- Finalize/Finalize2 -> FINALIZE_RESULT, CELL_OK
+- SelectContents/SelectContents2 -> SELECT_CONTENTS_RESULT, CANCELED
+- SetSelectionContext(2) -> SET_SELECTION_CONTEXT_RESULT, NO_MATCH_FOUND
+- SetPlaybackCommand(2): STOP/PAUSE OK, others NO_ACTIVE_CONTENT
+- SetVolume(2) -> SET_VOLUME_RESULT, CELL_OK
+- GetSelectionContext(2)/GetContentsId(2): NO_ACTIVE_CONTENT, nothing
+  written; GetPlaybackStatus(2): STOP; GetVolume(2): 1.0
+Results are queued for the next cellSysutilCheckCallback, never run
+inside the call. v1 and v2 share state (the title mixes them).
+
+All 7 01.09 imports and all 6 01.02 imports match by NID computed from
+the SDK name (e.g. cellMusicInitialize 0x72EC14B5, cellMusicSelectContents2
+0xAD04CDDD); the event numbering matches what the title's callback
+switches on.
+
+Test: libs/misc/tests/test_music_utility.c.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/misc/cellMusic.c                | 189 +++++++++++++++++++++++++++
+ libs/misc/cellMusic.h                | 118 +++++++++++++++++
+ libs/misc/tests/test_music_utility.c | 113 ++++++++++++++++
+ 3 files changed, 420 insertions(+)
+ create mode 100644 libs/misc/cellMusic.c
+ create mode 100644 libs/misc/cellMusic.h
+ create mode 100644 libs/misc/tests/test_music_utility.c
+
+diff --git a/libs/misc/cellMusic.c b/libs/misc/cellMusic.c
+new file mode 100644
+index 0000000..2051f24
+--- /dev/null
++++ b/libs/misc/cellMusic.c
+@@ -0,0 +1,189 @@
++/*
++ * ps3recomp - cellMusic (cellMusicUtility) HLE implementation
++ *
++ * An offline music utility with an empty library: see cellMusic.h. The part
++ * that matters is that every asynchronous call answers. The SDK contract is
++ * "returns CELL_OK now, reports the result through the callback later", and
++ * titles block on that callback -- NPUB30035's (01.09, 0x00092F10) records
++ * the event and result into a mailbox its music state machine polls. With no
++ * module at all, cellMusicInitialize faked CELL_OK and INITIALIZE_RESULT never
++ * came, so the state machine waited for it forever.
++ *
++ * Results are delivered through the sysutil completion queue, i.e. on the
++ * title's next cellSysutilCheckCallback, which is where the system delivers
++ * them on hardware too (never from inside the call).
++ *
++ * The v1 (container) and v2 entry points share one state: a title may mix
++ * them (NPUB30035 01.09 initializes with v1 and then calls SelectContents2
++ * and SetPlaybackCommand2).
++ */
++
++#include "cellMusic.h"
++#include "../system/cellSysutil.h"   /* cellSysutilQueueGuestCallbackArgs */
++#include <stdio.h>
++#include <string.h>
++#include "../../runtime/ppu/ppu_memory.h"   /* vm_write32, vm_write_f32: guest EA -> host */
++
++/* Internal state */
++
++static int   s_initialized = 0;
++static u32   s_callback    = 0;     /* guest OPD */
++static u32   s_userdata    = 0;     /* guest pointer, opaque */
++static float s_volume      = 1.0f;
++
++static s32 music_result(u32 event, s32 result)
++{
++    const u64 args[8] = { event, (u64)(u32)result, s_userdata, 0, 0, 0, 0, 0 };
++    return cellSysutilQueueGuestCallbackArgs(s_callback, args);
++}
++
++static s32 music_init(int v2, s32 mode, u32 func_opd, u32 userData)
++{
++    printf("[cellMusic] Initialize%s(mode=%d, func=0x%08X, userData=0x%08X)\n",
++           v2 ? "2" : "", mode, func_opd, userData);
++    if (mode != CELL_MUSIC_PLAYER_MODE_NORMAL || !func_opd)
++        return (s32)CELL_MUSIC_ERROR_PARAM;
++
++    /* Re-initializing replaces the callback: lenient on purpose, so a title
++     * that never got to finalize (its own error path) can start over. */
++    s_initialized = 1;
++    s_callback    = func_opd;
++    s_userdata    = userData;
++    return music_result(CELL_MUSIC_EVENT_INITIALIZE_RESULT, CELL_OK);
++}
++
++static s32 music_finalize(int v2)
++{
++    printf("[cellMusic] Finalize%s()\n", v2 ? "2" : "");
++    if (!s_initialized)
++        return (s32)CELL_MUSIC_ERROR_GENERIC;
++    s32 rc = music_result(CELL_MUSIC_EVENT_FINALIZE_RESULT, CELL_OK);
++    s_initialized = 0;
++    return rc;
++}
++
++/* API */
++
++s32 cellMusicInitialize(s32 mode, u32 container, s32 spuPriority,
++                        u32 func_opd, u32 userData)
++{
++    (void)container; (void)spuPriority;
++    return music_init(0, mode, func_opd, userData);
++}
++
++s32 cellMusicInitialize2(s32 mode, s32 spuPriority, u32 func_opd, u32 userData)
++{
++    (void)spuPriority;
++    return music_init(1, mode, func_opd, userData);
++}
++
++s32 cellMusicFinalize(void)  { return music_finalize(0); }
++s32 cellMusicFinalize2(void) { return music_finalize(1); }
++
++/* The XMB music browser. Nobody is there to pick anything, so it comes back
++ * the way it does when the user backs out: SELECT_CONTENTS_RESULT with
++ * CELL_MUSIC_CANCELED. */
++static s32 music_select(void)
++{
++    printf("[cellMusic] SelectContents() -> CANCELED (no music library)\n");
++    if (!s_initialized)
++        return (s32)CELL_MUSIC_ERROR_GENERIC;
++    return music_result(CELL_MUSIC_EVENT_SELECT_CONTENTS_RESULT, CELL_MUSIC_CANCELED);
++}
++
++s32 cellMusicSelectContents(u32 container) { (void)container; return music_select(); }
++s32 cellMusicSelectContents2(void)         { return music_select(); }
++
++/* Synchronous: there is never a current selection to save. Nothing is
++ * written, so the title does not store a context it would later restore. */
++static s32 music_get_context(u32 context_ea)
++{
++    if (!s_initialized) return (s32)CELL_MUSIC_ERROR_GENERIC;
++    if (!context_ea)    return (s32)CELL_MUSIC_ERROR_PARAM;
++    return (s32)CELL_MUSIC_ERROR_NO_ACTIVE_CONTENT;
++}
++
++s32 cellMusicGetSelectionContext(u32 context_ea)  { return music_get_context(context_ea); }
++s32 cellMusicGetSelectionContext2(u32 context_ea) { return music_get_context(context_ea); }
++
++/* Restoring a saved selection (a context from an earlier session). Accepted,
++ * and answered asynchronously: none of its tracks exist here. */
++static s32 music_set_context(u32 context_ea)
++{
++    printf("[cellMusic] SetSelectionContext(0x%08X) -> NO_MATCH_FOUND\n", context_ea);
++    if (!s_initialized) return (s32)CELL_MUSIC_ERROR_GENERIC;
++    if (!context_ea)    return (s32)CELL_MUSIC_ERROR_PARAM;
++    return music_result(CELL_MUSIC_EVENT_SET_SELECTION_CONTEXT_RESULT,
++                        (s32)CELL_MUSIC_ERROR_NO_MATCH_FOUND);
++}
++
++s32 cellMusicSetSelectionContext(u32 context_ea)  { return music_set_context(context_ea); }
++s32 cellMusicSetSelectionContext2(u32 context_ea) { return music_set_context(context_ea); }
++
++/* Playback: stopping and pausing nothing succeed; anything that needs a track
++ * reports there is none. The status stays STOP. */
++static s32 music_command(s32 command)
++{
++    printf("[cellMusic] SetPlaybackCommand(%d)\n", command);
++    if (!s_initialized) return (s32)CELL_MUSIC_ERROR_GENERIC;
++    if (command < CELL_MUSIC_PB_CMD_STOP || command > CELL_MUSIC_PB_CMD_FASTREVERSE)
++        return (s32)CELL_MUSIC_ERROR_PARAM;
++    s32 result = (command == CELL_MUSIC_PB_CMD_STOP || command == CELL_MUSIC_PB_CMD_PAUSE)
++                     ? CELL_OK : (s32)CELL_MUSIC_ERROR_NO_ACTIVE_CONTENT;
++    return music_result(CELL_MUSIC_EVENT_SET_PLAYBACK_COMMAND_RESULT, result);
++}
++
++s32 cellMusicSetPlaybackCommand(s32 command, u32 param_ea)
++{
++    (void)param_ea;
++    return music_command(command);
++}
++
++s32 cellMusicSetPlaybackCommand2(s32 command, u32 param_ea)
++{
++    (void)param_ea;
++    return music_command(command);
++}
++
++static s32 music_get_status(u32 status_ea)
++{
++    if (!s_initialized) return (s32)CELL_MUSIC_ERROR_GENERIC;
++    if (!status_ea)     return (s32)CELL_MUSIC_ERROR_PARAM;
++    vm_write32(status_ea, CELL_MUSIC_PB_STATUS_STOP);
++    return CELL_OK;
++}
++
++s32 cellMusicGetPlaybackStatus(u32 status_ea)  { return music_get_status(status_ea); }
++s32 cellMusicGetPlaybackStatus2(u32 status_ea) { return music_get_status(status_ea); }
++
++/* The level arrives in f1, which the generic adapter does not pass (see
++ * cellMusic.h): accept the call and answer it, keep the volume as it was. */
++static s32 music_set_volume(void)
++{
++    if (!s_initialized) return (s32)CELL_MUSIC_ERROR_GENERIC;
++    return music_result(CELL_MUSIC_EVENT_SET_VOLUME_RESULT, CELL_OK);
++}
++
++s32 cellMusicSetVolume(float level)  { (void)level; return music_set_volume(); }
++s32 cellMusicSetVolume2(float level) { (void)level; return music_set_volume(); }
++
++static s32 music_get_volume(u32 level_ea)
++{
++    if (!s_initialized) return (s32)CELL_MUSIC_ERROR_GENERIC;
++    if (!level_ea)      return (s32)CELL_MUSIC_ERROR_PARAM;
++    vm_write_f32(level_ea, s_volume);
++    return CELL_OK;
++}
++
++s32 cellMusicGetVolume(u32 level_ea)  { return music_get_volume(level_ea); }
++s32 cellMusicGetVolume2(u32 level_ea) { return music_get_volume(level_ea); }
++
++static s32 music_get_contents_id(u32 contents_id_ea)
++{
++    if (!s_initialized)  return (s32)CELL_MUSIC_ERROR_GENERIC;
++    if (!contents_id_ea) return (s32)CELL_MUSIC_ERROR_PARAM;
++    return (s32)CELL_MUSIC_ERROR_NO_ACTIVE_CONTENT;
++}
++
++s32 cellMusicGetContentsId(u32 contents_id_ea)  { return music_get_contents_id(contents_id_ea); }
++s32 cellMusicGetContentsId2(u32 contents_id_ea) { return music_get_contents_id(contents_id_ea); }
+diff --git a/libs/misc/cellMusic.h b/libs/misc/cellMusic.h
+new file mode 100644
+index 0000000..be1a9fe
+--- /dev/null
++++ b/libs/misc/cellMusic.h
+@@ -0,0 +1,118 @@
++/*
++ * ps3recomp - cellMusic (cellMusicUtility) HLE
++ *
++ * The in-game music player ("custom soundtracks"): the title asks the system
++ * to show the XMB music browser, then plays, pauses and skips the user's
++ * selection through the system's own player. Every call that changes state
++ * answers asynchronously, through the callback given at initialization, on the
++ * title's next cellSysutilCheckCallback.
++ *
++ * There is no music library behind this runtime, so it behaves like a console
++ * whose user never picks anything: initialization succeeds, the browser comes
++ * back cancelled, and there is never any active content. Every result still
++ * arrives as a callback, which is the point -- a title waiting for
++ * INITIALIZE_RESULT must get one.
++ */
++
++#ifndef PS3RECOMP_CELL_MUSIC_H
++#define PS3RECOMP_CELL_MUSIC_H
++
++#include "ps3emu/ps3types.h"
++#include "ps3emu/error_codes.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Return / result codes (error base 0x8002C100) */
++#define CELL_MUSIC_OK                      0
++#define CELL_MUSIC_CANCELED                1
++#define CELL_MUSIC_PLAYBACK_FINISHED       0x8002C101
++#define CELL_MUSIC_ERROR_PARAM             0x8002C102
++#define CELL_MUSIC_ERROR_BUSY              0x8002C103
++#define CELL_MUSIC_ERROR_NO_ACTIVE_CONTENT 0x8002C104
++#define CELL_MUSIC_ERROR_NO_MATCH_FOUND    0x8002C105
++#define CELL_MUSIC_ERROR_INVALID_CONTEXT   0x8002C106
++#define CELL_MUSIC_ERROR_PLAYBACK_FAILURE  0x8002C107
++#define CELL_MUSIC_ERROR_NO_MORE_CONTENT   0x8002C108
++#define CELL_MUSIC_DIALOG_OPEN             0x8002C109
++#define CELL_MUSIC_DIALOG_CLOSE            0x8002C10A
++#define CELL_MUSIC_ERROR_GENERIC           0x8002C1FF
++
++/* Callback events. The order is confirmed by a shipping title's callback
++ * (NPUB30035 01.09, 0x00092F10): it records 1, 3, 4, 5 and 6 as results to
++ * wait on and treats 0 (status) and 2 (finalize) separately. */
++#define CELL_MUSIC_EVENT_STATUS_NOTIFICATION          0
++#define CELL_MUSIC_EVENT_INITIALIZE_RESULT            1
++#define CELL_MUSIC_EVENT_FINALIZE_RESULT              2
++#define CELL_MUSIC_EVENT_SELECT_CONTENTS_RESULT       3
++#define CELL_MUSIC_EVENT_SET_PLAYBACK_COMMAND_RESULT  4
++#define CELL_MUSIC_EVENT_SET_VOLUME_RESULT            5
++#define CELL_MUSIC_EVENT_SET_SELECTION_CONTEXT_RESULT 6
++#define CELL_MUSIC_EVENT_UI_NOTIFICATION              7
++
++#define CELL_MUSIC_PLAYER_MODE_NORMAL 0
++
++/* Playback commands */
++#define CELL_MUSIC_PB_CMD_STOP        0
++#define CELL_MUSIC_PB_CMD_PLAY        1
++#define CELL_MUSIC_PB_CMD_PAUSE       2
++#define CELL_MUSIC_PB_CMD_NEXT        3
++#define CELL_MUSIC_PB_CMD_PREV        4
++#define CELL_MUSIC_PB_CMD_FASTFORWARD 5
++#define CELL_MUSIC_PB_CMD_FASTREVERSE 6
++
++/* Playback status */
++#define CELL_MUSIC_PB_STATUS_STOP        0
++#define CELL_MUSIC_PB_STATUS_PLAY        1
++#define CELL_MUSIC_PB_STATUS_PAUSE       2
++#define CELL_MUSIC_PB_STATUS_FASTFORWARD 3
++#define CELL_MUSIC_PB_STATUS_FASTREVERSE 4
++
++#define CELL_MUSIC_SELECTION_CONTEXT_SIZE 2048
++
++/* All pointer parameters are GUEST addresses and the callback is a guest OPD:
++ * the generic HLE adapter passes r3..r10 through unchanged, so they are
++ * declared u32 and never dereferenced as host pointers.
++ *
++ *   void callback(uint32_t event, void* param, void* userData);
++ *
++ * For a *_RESULT event, param is the result code itself (CELL_OK,
++ * CELL_MUSIC_CANCELED or a CELL_MUSIC_ERROR_*), not a pointer. */
++
++/* Float parameters (cellMusicSetVolume's level) travel in f1, which the
++ * generic adapter does not pass to a C handler, so the level is declared for
++ * the SDK signature but never read. */
++
++s32 cellMusicInitialize(s32 mode, u32 container, s32 spuPriority,
++                        u32 func_opd, u32 userData);
++s32 cellMusicInitialize2(s32 mode, s32 spuPriority, u32 func_opd, u32 userData);
++s32 cellMusicFinalize(void);
++s32 cellMusicFinalize2(void);
++
++s32 cellMusicSelectContents(u32 container);
++s32 cellMusicSelectContents2(void);
++
++s32 cellMusicGetSelectionContext(u32 context_ea);
++s32 cellMusicGetSelectionContext2(u32 context_ea);
++s32 cellMusicSetSelectionContext(u32 context_ea);
++s32 cellMusicSetSelectionContext2(u32 context_ea);
++
++s32 cellMusicSetPlaybackCommand(s32 command, u32 param_ea);
++s32 cellMusicSetPlaybackCommand2(s32 command, u32 param_ea);
++s32 cellMusicGetPlaybackStatus(u32 status_ea);
++s32 cellMusicGetPlaybackStatus2(u32 status_ea);
++
++s32 cellMusicSetVolume(float level);
++s32 cellMusicSetVolume2(float level);
++s32 cellMusicGetVolume(u32 level_ea);
++s32 cellMusicGetVolume2(u32 level_ea);
++
++s32 cellMusicGetContentsId(u32 contents_id_ea);
++s32 cellMusicGetContentsId2(u32 contents_id_ea);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* PS3RECOMP_CELL_MUSIC_H */
+diff --git a/libs/misc/tests/test_music_utility.c b/libs/misc/tests/test_music_utility.c
+new file mode 100644
+index 0000000..d3c2338
+--- /dev/null
++++ b/libs/misc/tests/test_music_utility.c
+@@ -0,0 +1,113 @@
++/* clang -std=gnu17 -I include libs/misc/tests/test_music_utility.c
++ *   libs/system/cellSysutil.c -Wl,-dead_strip -pthread -o /tmp/test_music_utility && /tmp/test_music_utility
++ * Linux: replace -Wl,-dead_strip with -ffunction-sections -fdata-sections -Wl,--gc-sections
++ *
++ * Every asynchronous cellMusic call answers through the callback on the next
++ * sysutil poll, with an empty library behind it. The call shapes are those of
++ * NPUB30035 01.09 (Initialize v1, then SelectContents2/SetPlaybackCommand2). */
++#include "../cellMusic.c"
++#include "ps3emu/guest_call.h"
++#include <assert.h>
++#include <stdlib.h>
++uint8_t* vm_base;
++uint32_t ppu_vm_size;
++int g_resv_store_active;
++uint32_t g_ww_lo, g_ww_hi;
++void ppu_resv_break_store(uint64_t ea) { (void)ea; }
++void ps3_ww_report_inline(uint32_t a, uint64_t v, int w) { (void)a; (void)v; (void)w; }
++int spu_coh_is_reserved(uint32_t a) { (void)a; return 0; }
++void spu_coh_notify_write(uint32_t a) { (void)a; }
++void spu_lockline_lock(void) {}
++void spu_lockline_unlock(void) {}
++void np_psnr_pump(void) {}
++void cellMsgDialog_tick(void) {}
++
++static unsigned calls;
++static u64 last_event, last_param;
++static u32 expect_opd = 0x1200FB0;
++static void callback(u32 opd, u64 event, u64 param, u64 user, u64 d,
++                     u64 e, u64 f, u64 g, u64 h)
++{
++    assert(opd == expect_opd && user == 0xCAFE && !d && !e && !f && !g && !h);
++    calls++; last_event = event; last_param = param;
++}
++
++/* One call -> nothing until the poll -> exactly one result event. */
++static void expect(u32 event, s32 result)
++{
++    unsigned before = calls;
++    cellSysutilCheckCallback();
++    assert(calls == before + 1);
++    assert(last_event == event && (u32)last_param == (u32)result);
++}
++
++int main(void)
++{
++    vm_base = calloc(1, 65536); assert(vm_base);
++    g_ps3_guest_caller = callback;
++
++    /* Nothing before initialization, and nothing queued by refusing. */
++    assert(cellMusicSelectContents2() == (s32)CELL_MUSIC_ERROR_GENERIC);
++    assert(cellMusicInitialize(0, 1, 0x40, 0, 0xCAFE) == (s32)CELL_MUSIC_ERROR_PARAM);
++    assert(cellMusicInitialize(1, 1, 0x40, 0x1200FB0, 0xCAFE) == (s32)CELL_MUSIC_ERROR_PARAM);
++    cellSysutilCheckCallback(); assert(calls == 0);
++
++    /* Initialize answers INITIALIZE_RESULT / CELL_OK -- the one a title waits on. */
++    assert(cellMusicInitialize(CELL_MUSIC_PLAYER_MODE_NORMAL, 1, 0x40, 0x1200FB0, 0xCAFE) == CELL_OK);
++    assert(calls == 0);                         /* never inside the call */
++    expect(CELL_MUSIC_EVENT_INITIALIZE_RESULT, CELL_OK);
++    cellSysutilCheckCallback(); assert(calls == 1);
++
++    /* The browser comes back cancelled. v2 entry points share the v1 state. */
++    assert(cellMusicSelectContents2() == CELL_OK);
++    expect(CELL_MUSIC_EVENT_SELECT_CONTENTS_RESULT, CELL_MUSIC_CANCELED);
++    assert(cellMusicSelectContents(1) == CELL_OK);
++    expect(CELL_MUSIC_EVENT_SELECT_CONTENTS_RESULT, CELL_MUSIC_CANCELED);
++
++    /* No selection to save: synchronous error, nothing written. */
++    memset(vm_base + 0x1000, 0xEE, CELL_MUSIC_SELECTION_CONTEXT_SIZE);
++    assert(cellMusicGetSelectionContext(0x1000) == (s32)CELL_MUSIC_ERROR_NO_ACTIVE_CONTENT);
++    assert(cellMusicGetSelectionContext2(0) == (s32)CELL_MUSIC_ERROR_PARAM);
++    assert(vm_base[0x1000] == 0xEE);
++    cellSysutilCheckCallback(); assert(calls == 3);
++
++    /* A saved selection from another session finds no match. */
++    assert(cellMusicSetSelectionContext(0x1000) == CELL_OK);
++    expect(CELL_MUSIC_EVENT_SET_SELECTION_CONTEXT_RESULT, (s32)CELL_MUSIC_ERROR_NO_MATCH_FOUND);
++    assert(cellMusicSetSelectionContext2(0) == (s32)CELL_MUSIC_ERROR_PARAM);
++
++    /* Playback: stop/pause fine, play needs content, bad commands refused. */
++    assert(cellMusicSetPlaybackCommand(CELL_MUSIC_PB_CMD_STOP, 0) == CELL_OK);
++    expect(CELL_MUSIC_EVENT_SET_PLAYBACK_COMMAND_RESULT, CELL_OK);
++    assert(cellMusicSetPlaybackCommand2(CELL_MUSIC_PB_CMD_PLAY, 0) == CELL_OK);
++    expect(CELL_MUSIC_EVENT_SET_PLAYBACK_COMMAND_RESULT, (s32)CELL_MUSIC_ERROR_NO_ACTIVE_CONTENT);
++    assert(cellMusicSetPlaybackCommand2(7, 0) == (s32)CELL_MUSIC_ERROR_PARAM);
++    vm_write32(0x2000, 0xFFFFFFFF);
++    assert(cellMusicGetPlaybackStatus(0x2000) == CELL_OK && vm_read32(0x2000) == CELL_MUSIC_PB_STATUS_STOP);
++
++    /* Volume: answered; reads back as full volume (big-endian float). */
++    assert(cellMusicSetVolume(0.5f) == CELL_OK);
++    expect(CELL_MUSIC_EVENT_SET_VOLUME_RESULT, CELL_OK);
++    assert(cellMusicGetVolume2(0x2004) == CELL_OK && vm_read32(0x2004) == 0x3F800000);
++    assert(cellMusicGetContentsId(0x2010) == (s32)CELL_MUSIC_ERROR_NO_ACTIVE_CONTENT);
++
++    /* Two calls before one poll: both answered, in order. */
++    assert(cellMusicSetVolume2(1.0f) == CELL_OK);
++    assert(cellMusicSetPlaybackCommand(CELL_MUSIC_PB_CMD_PAUSE, 0) == CELL_OK);
++    unsigned before = calls;
++    cellSysutilCheckCallback();
++    assert(calls == before + 2 && last_event == CELL_MUSIC_EVENT_SET_PLAYBACK_COMMAND_RESULT);
++
++    /* Finalize answers FINALIZE_RESULT through the callback it had, then the
++     * library is down; Initialize2 brings it back with a new callback. */
++    assert(cellMusicFinalize() == CELL_OK);
++    expect(CELL_MUSIC_EVENT_FINALIZE_RESULT, CELL_OK);
++    assert(cellMusicFinalize2() == (s32)CELL_MUSIC_ERROR_GENERIC);
++    assert(cellMusicSetVolume2(1.0f) == (s32)CELL_MUSIC_ERROR_GENERIC);
++    expect_opd = 0x1200FC0;
++    assert(cellMusicInitialize2(CELL_MUSIC_PLAYER_MODE_NORMAL, 0x40, 0x1200FC0, 0xCAFE) == CELL_OK);
++    expect(CELL_MUSIC_EVENT_INITIALIZE_RESULT, CELL_OK);
++
++    free(vm_base);
++    puts("cellMusic: every asynchronous call answers on the next sysutil poll");
++}
+-- 
+2.55.0
+
