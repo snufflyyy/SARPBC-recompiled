@@ -1,7 +1,7 @@
 # T028: 01.09: from the ESRB screen to the intro movies and main menu
 
-Status: open
-Owner: -
+Status: claimed
+Owner: agent-frontier3
 Touches: src/overrides/frontier_*.cpp (new), patches/ps3recomp/T028-*.patch (libs/spurs/**, libs/sysutil/**, libs/codec/** or other HLE modules no other claimed task touches; not libs/gcm, libs/video, runtime/spu, runtime/ppu, runtime/platform), docs/debugging.md, docs/unreal-engine-3.md
 Reads: tasks/done/T022*, patches/experimental/T022-esrb-experiment.diff, tasks/open|claimed/T024*, T025*, T027*, docs/dod3-reuse.md
 
@@ -21,3 +21,4 @@ documented with address and evidence, and fixes in your Touches either committed
 owning task as a note.
 
 ## Log
+- 2026-10-19 10:04 agent-frontier3: claimed

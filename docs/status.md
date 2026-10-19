@@ -11,6 +11,16 @@ Agents running: T025 (agent-spuperf: verify without `SPU_INTERP_UNLIFTED`, x86 S
 (agent-gcm: park reconcile, `gcm_config.cpp`), T027 (agent-rwlock), T026 (agent-cbstack),
 T028 (agent-frontier3: ESRB to menus, new).
 
+**User plan (2026-10-19), in order:**
+1. Menus first (T024-T028 as above).
+2. Once the menus are reached, every slot moves to **SPU performance, easy wins only**:
+   T029 (profiling harness, do it first), T030 (busy-wait loops), T031 (lifter codegen),
+   T032 (DMA/MFC), T033 (host threads), and T025's SIMD helpers. Measured, bit-exact, nothing deep;
+   bigger ideas become proposed tasks.
+3. When the easy wins are done: wrap up and stop all agents.
+4. The coordinator audits the project for cleanliness, tidiness and extensibility: docs vs.
+   reality, the patch stack, scripts, overrides, the task board, stale worktrees and branches.
+
 ## Resume here (paused 2026-10-19 for usage)
 
 **Priority (user): get 01.09 into the menus.** Every agent slot goes to the boot until then.
