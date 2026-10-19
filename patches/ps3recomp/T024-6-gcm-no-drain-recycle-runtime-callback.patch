@@ -1,0 +1,45 @@
+From 087d9471d065a1cfccfe5bb83379cdd160e39243 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Mon, 19 Oct 2026 11:19:42 -0500
+Subject: [PATCH] cellGcmSys: no drain-side ring recycle when the runtime's
+ callback owns the ring
+
+The drain recycles a title's ring when `current` reaches `end` and the
+title's buffer-full callback will not. When the context still has the
+runtime's own callback (cellGcmSetupContext installs it), current == end
+is a normal state: the title calls that callback from gcmReserve next,
+and it recycles. Recycling from the drain thread as well raced it: the
+JUMP went over the title's last word at end-4 and `current` went back to
+begin before the callback ran. Supersonic Acrobatic Rocket-Powered
+Battle-Cars 01.09 keeps the runtime callback and sometimes never
+submitted again after such a recycle (stuck on its loading screen).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/cellGcmSys.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 18bb713..e12ec7f 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -2300,6 +2300,16 @@ static void gcm_rsx_process_fifo_unlocked(void)
+          * overruns first, so the first overrun is recycled by the path above
+          * and near-end recycling is enabled from then on. */
+         static int s_title_overran = 0;
++        /* The runtime's own buffer-full callback (cellGcmSetupContext installs
++         * it) does recycle: the title calls it from gcmReserve once `current`
++         * is at `end`, which is a normal state, not an overrun. Recycling here
++         * as well raced it from the drain thread: the JUMP went over the
++         * title's last word at end-4, `current` went back to begin before the
++         * title's callback ran (which then found nothing to recycle), and
++         * Supersonic Acrobatic Rocket-Powered Battle-Cars 01.09 (whose context
++         * keeps the runtime callback) sometimes never submitted again. */
++        const u32 cb_opd = ctx ? vm_read32(ctx + 0xC) : 0;
++        if (cb_opd && vm_read32(cb_opd) == GCM_FIFO_CALLBACK_SENTINEL_EA) begin = 0;
+         if (begin && end > begin && cur >= end) {
+             if (!s_title_overran)
+                 fprintf(stderr, "[cellGcmSys] title overran its ring: ctx=0x%08X begin=0x%08X "
+-- 
+2.55.0
+
