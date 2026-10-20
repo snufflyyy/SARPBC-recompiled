@@ -1,6 +1,6 @@
 # T047: Validate native zlib requests and VFS path bounds
 
-Status: claimed
+Status: done
 Owner: pi
 Priority: 2
 Touches: src/overrides/edgezlib.cpp, src/main.cpp (setup_vfs only), tools/test_edgezlib.py (new), tools/test_vfs.py (new), docs/project-audit.md (A01/A02), docs/build-linux.md
@@ -26,3 +26,5 @@ Synthetic tests cover valid copy/inflate, truncated streams, invalid spans, temp
 - 2026-10-20 19:53 pi: 120 s capture confirms rendered tutorial arena, car and tutorial overlay; 3717 zlib requests, zero rejected requests, zero unresolved imports. Antigravity independently finished and committed 0050 while our boot ran. Fast-forwarded private worktree to that main, applied only their new patch privately (preserving it unchanged), and rebuilt affected runtime objects. Re-running full tests and a 30 s smoke on combined latest main before merge.
 - 2026-10-20 19:55 pi: boot_check 2026-10-20 19:54 v01.09 ba70ca3+dirty 30s: PROGRESSING | last open TEXTURES.TFC@7.1s | pkgs 13 (GUIDCACHE last) | zlib 3279 | dumps 17 lit 17 distinct 12 | flips 717 | threads 13/9 alive | unresolved 0
 - 2026-10-20 19:55 pi: Combined latest-main verification exit 0: all 87 discovered scripts pass again; 0050 unchanged, private/runtime main tree IDs both 0979dd8f16b189ff239246a906506a48734e0dd7. Source-only memory/path regressions plus ASan/UBSan green. Ready to merge only native boundary code, tests and documentation.
+- 2026-10-20 19:56 pi: HANDOFF: done=critical native zlib/VFS fixes merged in 9fd99f8 (board merge fc4a5da); all 87 scripts, 3 nested suites and 21 ASan/UBSan cases green; 120 s tutorial-arena boot and 30 s combined-0050 smoke progress, unresolved 0. Main executable refreshed successfully under cpu lock (only main.cpp/edgezlib.cpp rebuilt); no shared runtime reset or graphics edits. Next=T048 verification reliability, then T049 tooling; remaining audit findings unchanged.
+- 2026-10-20 19:56 pi: DONE: Validated zlib guest spans/sizes/counters and strict stream completion; removed VFS fixed buffers; added 21 synthetic regressions. Build, full/nested tests, ASan/UBSan and 01.09 boots pass. Antigravity patch 0050 preserved; main executable rebuilt.
