@@ -34,6 +34,7 @@ class PerfFailureWindow(unittest.TestCase):
                 shutil.copyfile(ROOT / "tools/spu_profile.sh", tools / "spu_profile.sh")
                 executable(tools / "boot_check.sh", """#!/usr/bin/env bash
 printf 'boot_check: game pid %s, fixture\n' "$$" >&2
+date +%s.%N
 sleep "$1"
 echo 'boot_check fixture finished'
 """)
@@ -66,9 +67,10 @@ else:
 """)
                 env = dict(os.environ, SPU_PROFILE_LOCKED="1", FAKE_PERF_DELAY=str(delay))
                 env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
+                warmup = 2 if delay else 0
                 result = subprocess.run(
-                    ["bash", str(tools / "spu_profile.sh"), "8"],
-                    env=env, capture_output=True, text=True, timeout=15,
+                    ["bash", str(tools / "spu_profile.sh"), "8", "--warmup", str(warmup)],
+                    env=env, capture_output=True, text=True, timeout=17,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 data = json.loads((root / "analysis/fixture-result.json").read_text())
@@ -78,6 +80,10 @@ else:
                 self.assertEqual(data["perf"], "0")
                 self.assertIn("perf record failed", data["why"])
                 self.assertIn("fixture: perf_event_open denied", result.stderr)
+                work = next((root / "analysis").glob("*.d"))
+                started = float((work / "boot_check.out").read_text().splitlines()[0])
+                sample_start = json.loads((work / "proc0.json").read_text())["t"]
+                self.assertGreaterEqual(sample_start - started, warmup - 0.1)
 
 
 if __name__ == "__main__":

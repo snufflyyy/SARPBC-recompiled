@@ -213,7 +213,7 @@ the command. That is how the flip handler `func_000DC144` was caught releasing t
 
 ## Profiling
 
-`tools/spu_profile.sh <secs> [--version 0109] [--build-dir DIR] [-- VAR=val ...]` (T029) runs
+`tools/spu_profile.sh <secs> [--warmup N] [--version 0109] [--build-dir DIR] [-- VAR=val ...]` (T029) runs
 one boot_check under the boot lock with `perf record -F 499 --call-graph=fp -p <game pid>`
 (PID taken from boot_check's output, never by name), then writes
 `analysis/spu_profile_<ts>.txt` (raw data in `analysis/spu_profile_<ts>.d/`, delete when done) and
@@ -230,15 +230,48 @@ the 5-second sample window. The test needs no game files or performance counters
 ```bash
 tools/spu_profile.sh 60 --version 0109 --build-dir build-0109 -- GCM_INTR_THREAD=1 GCM_PARK_GRACE_MS=600000
 ```
+`--warmup N` starts the game N seconds before the CPU/perf sample window.
+The total boot lasts N + secs. The final 3 seconds remain outside the CPU window
+so that the recorder finishes before shutdown. Main-menu measurements need a
+confirmed menu frame and no further button presses during the sample window.
+
+The harness enables `SARPBC_FRAME_STATS=1`. The frame-clock thread reports its
+cumulative guest-boundary count once per second. Boot fallback presentations do
+not count. The report correlates these counters with the monotonic CPU window.
+It reports average FPS and the lowest telemetry-window FPS. Missing, stale, or
+reset counters produce `n/a`, not an inferred rate from image dumps.
+`python3 tools/test_profile_metrics.py` covers counter/window analysis.
+`tools/task.sh lock cpu python3 tools/test_frame_stats.py` checks the real C++ sink.
+
+The report also includes observed mixer PUT windows and the 01.09 mixer flag's
+wait rate. These event-driven diagnostics cover the boot log, not just the CPU
+window. Their last rate is not a whole-run average or proof of current activity.
+
+**Hardware constraint (user, 2026-10-19):** the RTX 2070 SUPER occupies a bottom
+PCIe slot. Normal full-bandwidth 2070 SUPER comparisons do not apply. Under
+01.09 graphics load, `nvidia-smi` reports **Gen2 x4** (idle: Gen1 x4). Reported
+maxima are Gen2 and x16; the maximum width is not the negotiated width.
+
+**Menu baseline after 0038, before T040 pacing (2026-10-19):** two separate
+`PAD_FILE` CROSS-for-3-poll pulses at 45 and 50 seconds reached the main menu.
+One pulse alone left the Choose Profile dialog. The screenshot at 76 seconds
+showed New Game / Play Online / Split Screen / Options / Extras, Profile: Guest1.
+The 75–102 second CPU window measured 102% host CPU and 28 threads. Guest-boundary
+telemetry measured **19.81 FPS over 26.6 seconds**, lowest telemetry window
+18.29 FPS. This does not meet the 60 FPS target. Evidence:
+`analysis/spu_profile_20261019-235339.txt` and `analysis/menu-readback-base-live.png`.
+Frame dumps were enabled every 60 backend presents; final acceptance also needs
+measurement without dump I/O.
+
 Reading the report: host CPU% (100 = one core) and top threads from /proc; on-CPU sample shares by
 category (lifted SPU, interpreter, SPU runtime helpers, locks/spin, PPU lifted, GCM/Vulkan, other;
 leaf frame, user space only, blocked time is not sampled); lifted SPU per image hash with top
 functions; top symbols per category. `spu_lockline_lock` (reservation line spin) counts as lock.
 `perf script` needs `--no-inline` (else ~2 min and it was killed); done in the script.
-Baseline 01.09, 60 s, the env above (2026-10-19, before the lock reclassification): 1331% host CPU,
+Historical baseline 01.09, before the 0038 CreateTask race fix (60 s, 2026-10-19): 1331% host CPU,
 167 threads; 375k samples; lifted SPU 0.8% (image 5af85a31 0.6%), PPU 0.2%, GCM/VK 0.2%,
-`spu_lockline_lock` 83% of all samples, rwlock unlock/rdlock 6.8%, mfc_for 4.1%. So SPU time is
-almost all spinning on the line lock, not computing.
+`spu_lockline_lock` 83% of all samples, rwlock unlock/rdlock 6.8%, mfc_for 4.1%. That baseline
+spent almost all SPU time on the line lock, not useful computation.
 
 ## From ESRB to the safe-area screen (T028, 2026-10-19)
 

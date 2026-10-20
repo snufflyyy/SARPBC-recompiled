@@ -22,8 +22,12 @@ def snap(pid):
         threads[tid] = {"comm": comm, "ticks": int(f[11]) + int(f[12])}
     total = open(base + "/stat").read()
     f = total[total.rindex(")") + 2:].split()
-    return {"t": time.time(), "threads": threads, "proc_ticks": int(f[11]) + int(f[12])}
+    return {"t": time.time(), "monotonic": time.monotonic(), "threads": threads,
+            "proc_ticks": int(f[11]) + int(f[12])}
 
+
+# Eight float32 mixer channels at 48 kHz (activity windows, not whole-run rates).
+MIXER_TARGET_BPS = 48_000 * 8 * 4
 
 SPU_FUNC = re.compile(r"^spu_([0-9a-f]{8,64})_spu_func_([0-9a-fA-F]+)")
 PPU_FUNC = re.compile(r"^func_[0-9a-fA-F]{6,8}")
@@ -92,6 +96,41 @@ LABEL = {"spu_lifted": "lifted SPU code (spu_<hash>_spu_func_*)",
          "ppu_lifted": "PPU lifted code (func_XXXXXXXX)",
          "gcm_vulkan": "GCM / Vulkan / driver",
          "other": "other"}
+
+
+def runtime_metrics(text: str, start_ms: float | None, end_ms: float | None) -> dict:
+    """Guest counter rates for the sample window; mixer rates are boot log windows.
+
+    No frame data is inferred from dumps, HLE chatter or backend presentations.
+    Missing/stale/reset telemetry cannot establish the requested FPS target.
+    """
+    result = {"frame_fps": None, "frame_reason": "guest-frame telemetry unavailable",
+              "mixer_put_bps": [float(x) for x in re.findall(
+                  r"\[dma-range\] (\d+(?:\.\d+)?) B/s put,", text)],
+              "mixer_waits": [float(x) for x in re.findall(
+                  r"\[ef-stats\] flag=0x01372000 waits=(\d+(?:\.\d+)?)/s", text)]}
+    if start_ms is None or end_ms is None:
+        return result
+    frames = [(int(t), int(n)) for t, n in re.findall(
+        r"\[frame-stats\] clock_ms=(\d+) guest_frames=(\d+)", text)
+        if start_ms <= int(t) <= end_ms]
+    if (len(frames) < 2 or frames[0][0] - start_ms > 2000
+            or end_ms - frames[-1][0] > 2000):
+        return result
+    rates, gaps = [], []
+    for (t0, n0), (t1, n1) in zip(frames, frames[1:]):
+        if n1 < n0:
+            result["frame_reason"] = "guest-frame counter reset"
+            return result
+        if t1 <= t0:
+            return result
+        gaps.append((t1 - t0) / 1000)
+        rates.append((n1 - n0) / gaps[-1])
+    seconds = (frames[-1][0] - frames[0][0]) / 1000
+    result.update(frame_fps=(frames[-1][1] - frames[0][1]) / seconds,
+                  frame_seconds=seconds, frame_min_fps=min(rates),
+                  frame_max_gap_seconds=max(gaps), frame_reason="")
+    return result
 
 
 def report(a):
@@ -167,6 +206,43 @@ def report(a):
         body.append("perf not used: %s" % a.why)
         body.append("")
 
+    # boot_check's PID announcement also names the raw runtime log. Keep old
+    # report directories usable even when they predate frame telemetry.
+    runtime_log = ""
+    announcement = os.path.join(a.work, "boot_check.err")
+    if os.path.exists(announcement):
+        match = re.search(r"^boot_check:.* log (.+)$", open(announcement).read(), re.M)
+        if match and os.path.exists(match.group(1)):
+            runtime_log = open(match.group(1), errors="replace").read()
+    metrics = runtime_metrics(runtime_log,
+                              p0.get("monotonic", 0) * 1000 or None,
+                              p1.get("monotonic", 0) * 1000 or None)
+    if metrics["frame_fps"] is not None:
+        parts.append("guest %.2f FPS over %.1fs (min window %.2f)" % (
+            metrics["frame_fps"], metrics["frame_seconds"], metrics["frame_min_fps"]))
+    else:
+        parts.append("guest FPS n/a (%s)" % metrics["frame_reason"])
+    body += ["== Runtime diagnostics ==",
+             "  guest frame rates count completed flip-boundary presents, not boot fallback presents"]
+    if metrics["frame_fps"] is not None:
+        body.append("  guest %.2f FPS over %.1fs, min window %.2f FPS, largest telemetry gap %.2fs" % (
+            metrics["frame_fps"], metrics["frame_seconds"], metrics["frame_min_fps"],
+            metrics["frame_max_gap_seconds"]))
+    else:
+        body.append("  " + metrics["frame_reason"])
+    puts = metrics["mixer_put_bps"]
+    if puts:
+        parts.append("mixer PUT last %.0f KB/s (%.1f%% real time)" % (
+            puts[-1] / 1000, puts[-1] / MIXER_TARGET_BPS * 100))
+        body.append("  mixer logged PUT windows: min %.0f, max %.0f, last %.0f B/s (%d samples)" % (
+            min(puts), max(puts), puts[-1], len(puts)))
+    else:
+        body.append("  mixer PUT: no logged window")
+    waits = metrics["mixer_waits"]
+    if waits:
+        body.append("  01.09 mixer flag 0x01372000: last %.1f waits/s" % waits[-1])
+    body += ["  mixer windows cover the boot log, not just the CPU sample window",
+             "  diagnostic rates print only on activity; silence does not establish real-time mixing", ""]
     parts.append("top threads: " + ", ".join("%s %.0f%%" % (c, v) for v, _, c in thr[:3]))
     summary = "spu_profile %s %ss | %s" % (time.strftime("%Y-%m-%d %H:%M"), a.secs, " | ".join(parts))
 

@@ -2,9 +2,10 @@
 # Where does the time go? One boot_check under `perf record`, grouped for SPU work
 # (docs/debugging.md, "Profiling"). Task T029.
 #
-#   tools/spu_profile.sh <secs> [--version V] [--build-dir DIR] [-- VAR=val ...]
+#   tools/spu_profile.sh <secs> [--warmup N] [--version V] [--build-dir DIR] [-- VAR=val ...]
 #
-#   secs          how long to run (default 60)
+#   secs          sample duration (default 60, final 3s reserved for shutdown)
+#   --warmup N    boot N seconds before sampling (total boot = N + secs)
 #   --version V   as boot_check: the staged versions/V/{build,game,vfs}
 #   --build-dir D sets BUILD_DIR (e.g. build-0109)
 #   -- VAR=val    extra environment for the game, e.g. -- GCM_INTR_THREAD=1 SPU_DMA_RANGE=58000000-58200000
@@ -19,9 +20,10 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-SECS=60 VERSION= BDIR= EXTRA=()
+SECS=60 WARMUP=0 VERSION= BDIR= EXTRA=()
 while [ $# -gt 0 ]; do
     case "$1" in
+        --warmup) WARMUP=$2; shift ;;
         --version) VERSION=$2; shift ;;
         --build-dir) BDIR=$2; shift ;;
         -h|--help) sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
@@ -34,13 +36,15 @@ done
 
 # Take the boot lock for the whole run, unless the caller already holds it.
 if [ -z "${SPU_PROFILE_LOCKED:-}" ]; then
-    ARGS=("$SECS"); [ -z "$VERSION" ] || ARGS+=(--version "$VERSION")
+    ARGS=("$SECS" --warmup "$WARMUP"); [ -z "$VERSION" ] || ARGS+=(--version "$VERSION")
     [ -z "$BDIR" ] || ARGS+=(--build-dir "$BDIR")
     [ ${#EXTRA[@]} -eq 0 ] || ARGS+=(-- "${EXTRA[@]}")
     exec "$ROOT/tools/task.sh" lock boot env SPU_PROFILE_LOCKED=1 "$0" "${ARGS[@]}"
 fi
 
 [ "$SECS" -ge 8 ] 2>/dev/null || { echo "spu_profile: need at least 8 seconds" >&2; exit 2; }
+[[ "$WARMUP" =~ ^[0-9]+$ ]] || { echo "spu_profile: --warmup needs nonnegative integer seconds" >&2; exit 2; }
+WARMUP=$((10#$WARMUP))
 TS=$(date +%Y%m%d-%H%M%S)
 OUT=$ROOT/analysis/spu_profile_$TS.txt
 WORK=$ROOT/analysis/spu_profile_$TS.d
@@ -58,9 +62,12 @@ else
 fi
 [ "$PERF" = 1 ] || echo "spu_profile: $WHY -- falling back to /proc thread sampling only" >&2
 
-BARGS=("$SECS"); [ -z "$VERSION" ] || BARGS+=(--version "$VERSION")
+BARGS=("$((SECS + WARMUP))"); [ -z "$VERSION" ] || BARGS+=(--version "$VERSION")
 [ -z "$BDIR" ] || export BUILD_DIR=$BDIR
 [ ${#EXTRA[@]} -eq 0 ] || export "${EXTRA[@]}"
+export SARPBC_FRAME_STATS=${SARPBC_FRAME_STATS-1}
+export SPURS_EF_STATS=${SPURS_EF_STATS-1}
+export SPU_DMA_RANGE=${SPU_DMA_RANGE-58000000-58200000}
 
 BLOG=$WORK/boot_check.out
 "$ROOT/tools/boot_check.sh" "${BARGS[@]}" > "$BLOG" 2> "$WORK/boot_check.err" &
@@ -76,6 +83,8 @@ for _ in $(seq 400); do
 done
 [ -n "$GPID" ] || { echo "spu_profile: boot_check did not start a game:" >&2; cat "$WORK/boot_check.err" >&2; exit 1; }
 
+# Warm up before taking either CPU snapshot or starting the perf recorder.
+[ "$WARMUP" = 0 ] || sleep "$WARMUP"
 # perf records for SECS-3 s, so it ends before boot_check stops the game.
 REC=$(( SECS - 3 ))
 python3 "$ROOT/tools/spu_profile.py" snap "$GPID" "$WORK/proc0.json"

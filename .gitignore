@@ -13,6 +13,8 @@
 EBOOT*
 /vfs/
 /game/
+# Runtime savedata includes copies of the game's profile artwork.
+/gamedata/
 /spu_dump/
 /captures/
 
