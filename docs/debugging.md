@@ -310,7 +310,7 @@ shared boot lock (one game at a time; with several agents' games the host load r
 GCM_INTR_THREAD=1 GCM_PARK_GRACE_MS=100000000 BUILD_DIR=build-0109 \
   tools/task.sh lock boot tools/boot_check.sh 180 --version 0109 --every 30
 ```
-Screens in order: "Loading..." (drawn upside down: T038; honouring the bottom-left window origin of `SET_SHADER_WINDOW` fixes it but flips the arena composite, so that is not the cause), legal/ESRB with a 3D car, "Powered by Unreal
+Screens in order: "Loading..." (drawn upside down: T038; honouring the bottom-left window origin of `SET_SHADER_WINDOW` fixes it but flips the arena composite, so that is not the cause; hypotheses and a recipe are in the T038 task file), legal/ESRB with a 3D car, "Powered by Unreal
 Technology", the Psyonix logo, then the **safe-area screen** ("Use the Left Stick to adjust the
 screen ... Then press X"), reached at 35-95 s depending on load. Before it the SaveData thread runs
 `cellSaveDataAutoLoad2('NPUB30035-PROFILE')`: new profile, `funcStat` returns 1, LOAD complete. It
