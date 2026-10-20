@@ -42,6 +42,12 @@ sibling's exit started a second copy (542 per 90 s). The copies never returned, 
 now runs at a steady 17-24 fps in 120/N steps on one core. The likely limit is the frame clock's
 4 ms FIFO drain (src/main.cpp `frame_clock`). Boot one game at a time.
 
+**Menu fps (T040, in progress):** the main menu runs at **29.2 fps** (from 19.8). The Vulkan backend
+now batches draws and caches geometry in VRAM; the GPU sits on a PCIe 2.0 x4 link. Details,
+method and the next steps are in subsystems.md "Menu frame rate". pi's T024/T029/T041 work (center-texel
+readback, `SARPBC_FRAME_STATS`, desktop `./run.sh` window) is merged; pi ran out of usage
+(HANDOFF notes on those tasks).
+
 **This machine (since 2026-10-19 evening):** Debian 13 container, 16 threads, 15 GB RAM, ~16 GB free
 disk, RTX 2070 SUPER in a bottom PCIe slot (slower than usual for uploads and readbacks). perf is
 blocked. Builds use `-j10` with ccache off. Setup notes are in the T033 log.
@@ -118,6 +124,12 @@ the board: `tools/task.sh list` (protocol: [workflow.md](workflow.md)). Highest 
 - Does the upstream POSIX boot scaffold get a UE3-sized title to `main` on Linux?
 
 ## Log
+
+### 2026-10-20 (session 9, cont.): menu fps 19.8 -> 29.2
+- T040 (claude): Vulkan draw batching, geometry content cache in BAR memory, constant reuse, no
+  per-frame readback on the engine path (patch T040). Merged with pi's uncommitted work (pi out of
+  usage): T024 centre-texel present readback (claude finished its test runner), T029 frame telemetry,
+  T041 desktop launcher. From now on the user wants work done in the main checkout.
 
 ### 2026-10-19 (session 9): new machine; SPURS tasks ran twice
 - New machine, fresh clone (claude): base PKG extracted, 01.09 downloaded from Sony and verified,

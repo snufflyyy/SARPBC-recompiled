@@ -13,9 +13,9 @@ you are touching instead of re-scanning the tree or the game files.
 
 **Phase 7 done: 01.09 reaches the main menu (2026-10-19); now SPU performance, then a project audit.**
 The PPU lift, all 15 SPU images, the 2 SPUJOBS jobs and the MultiStream overlay build on 01.02 and
-01.09, with 38 ps3recomp patches. The PhysX task pile-up (~1500% CPU) was a SPURS CreateTask race
-and is fixed (T033): one core and 17-24 fps in the intro. **Goal: 60 fps in the main menu** (user,
-2026-10-19); next suspect is the frame clock's FIFO drain cadence. Agents the user starts (Claude Code,
+01.09, with 40 ps3recomp patches. The PhysX task pile-up (~1500% CPU) was a SPURS CreateTask race
+and is fixed (T033). **Goal: 60 fps in the main menu** (user, 2026-10-19): it is at 29.2 fps after
+Vulkan draw batching and a VRAM geometry cache (T040, in progress; the GPU is on PCIe 2.0 x4). Agents the user starts (Claude Code,
 pi, Antigravity) take tasks from the board by priority ([docs/workflow.md](docs/workflow.md));
 **resume from [docs/status.md](docs/status.md) "Resume here"**.
 

@@ -115,6 +115,59 @@ work. Update the **Status** line of a section when you change it.
 - Status: 01.09 draws the legal/ESRB screen, the Psyonix logo and the screen-adjust prompt
   through Vulkan. Linux/Vulkan is the least-proven upstream path.
 
+### Menu frame rate: Vulkan batching and the PCIe bus (T040, 2026-10-20, in progress)
+
+Goal (user): 60 fps in the main menu. After T033 the game uses about one core, so the limit is
+the frame-clock thread (`frame_clock` in src/main.cpp), which drains the GCM FIFO into the
+Vulkan backend. **This machine's GPU link is PCIe 2.0 x4** (`nvidia-smi` under load; Gen1 x4
+idle), about 2 GB/s, so every byte or GPU round trip per frame is expensive.
+
+How it was measured (perf is denied in this container):
+- **gdb stack sampling** of the running game (`gdb -p PID -batch -ex "thread apply all bt 24"`,
+  ~25-60 samples, aggregated per thread). Before: the frame clock was in `vk_submit_and_wait`
+  in 15 of 15 samples. Every engine draw submitted and waited on its own command buffer,
+  because all draws shared one vertex buffer, constant buffer and descriptor set.
+- `FRAME_CLOCK_STATS=1` (src/main.cpp): ms per 5 s in sleep / FIFO drain / present.
+- `PS3RECOMP_VK_BATCH_STATS=1`: draws per batch, submits and total GPU wait.
+- `PS3RECOMP_VK_DRAW_TIMES=1`: GPU timestamps per draw, per pipeline, slowest draws. Draws
+  with geometry in host memory cost 30-70 us each, and a 7,772-vertex/21,696-index draw
+  (pipeline 67) 1.2 ms.
+- Menus pass **~38 KB of vertices+indices and 8.2 KB of vertex constants per draw** (~150-190
+  draws a frame); 69% of constant binds are unchanged.
+- `SARPBC_FRAME_STATS=1` (T029, src/overrides/frame_stats.cpp) counts guest frames per second.
+  Don't use `frames.jsonl` gaps for fps: its timestamps have a 0.5 s grain (the 120/N "steps"
+  seen first were that grain).
+- boot_check redirects stderr, which turns verbose logging on (`ps3_log.h`). Measure with
+  `PS3_VERBOSE=0` (verbose costs ~5% here).
+
+Changes (patches T024 by pi, T040):
+- T024: present reads back a 1x1 centre texel instead of the whole frame, unless a dump is due.
+- T040: engine draws record into one command buffer (per-draw slices of per-batch arenas and
+  per-draw descriptor sets). Anything else that touches the GPU flushes the batch first. Vertex
+  and index data go through a 64 MB content-hash cache in device-local host-visible (BAR)
+  memory. Unchanged constants are reused. On the engine path, present reads nothing back.
+- Dead end: putting the per-draw arenas in BAR memory *without* the cache was slower (23 fps):
+  the CPU then pushes ~9 MB a frame across the bus. Removing the per-draw barriers changed
+  little (30.9 vs 29.9 fps), so they are not the GPU cost.
+
+Numbers (01.09, `PS3_VERBOSE=0`, boot lock, this machine):
+
+| build | screen | fps |
+|---|---|---|
+| main after 0038 (pi's baseline, dumps on, verbose) | main menu | 19.8 |
+| before T040 | Choose Profile | ~23 |
+| + batching | Choose Profile | 27.2 |
+| + no present readback, `PS3_VERBOSE=0` | Choose Profile | ~30 |
+| + geometry cache + constant reuse | Choose Profile | 32.5 |
+| merged with T024/T029/T041 | **main menu** | **29.2** (1 s windows 26-32) |
+
+Main menu recipe: `PAD_FILE` with CROSS for 3 polls at 45 s and at 50 s; measure from ~75 s.
+Where the frame goes now (Choose Profile, ~31 ms): ~18 ms CPU in the FIFO drain (vertex
+fetch/decode `rsx_vertex_fetch_one`, `eng_texture_content_hash` on texture binds, `sink_end`),
+~8 ms waiting on the GPU (batch flushes forced by depth/stencil clears and present), ~4.6 ms
+idle in `Sleep(4)`. Next: record clears into the batch, overlap GPU with CPU (double-buffered
+submissions instead of waiting), and cut the per-draw CPU work in the draw engine.
+
 ## Audio
 
 - `PS3Drv.PS3AudioDevice`, 32 voices, LPCM up to 7.1 + Dolby Digital per PARAM.SFO.
