@@ -1,6 +1,6 @@
 # T036: boot_check --pad: short scripted button presses via PAD_FILE
 
-Status: claimed
+Status: done
 Owner: pi
 Priority: 7
 Touches: tools/boot_check.sh, tools/boot_report.py (only if needed), docs/debugging.md (boot_check section)
@@ -18,3 +18,4 @@ A boot_check run with --pad reaches the main menu with no manual loop (the same 
 - 2026-10-20 09:18 pi: claimed
 - 2026-10-20 09:22 pi: Preserved Claude --pad implementation in updated pi/work. New game-free tests cover production parser and actual timed writer. Baseline accepted cross:0@1; tightened positive polls/repeats, decimal syntax, finite times, positive repeat interval and 10000-event limit. All 5 tests pass. Full offline boot with --pad pending.
 - 2026-10-20 09:22 pi: Correction to preceding note: first writer test failed because fixture passed a trailing newline that shell command substitution removes in production. Fixture now reproduces production substitution; all 5 tests pass (including actual writer). No production writer change was needed.
+- 2026-10-20 11:28 claude: DONE: Merged 4d39a5c (pi's --pad + tests, from claude's first version). Verified: 120 s boot_check --pad 'cross@40*4/5,cross@70,r2:120@90,cross@100' reaches the main menu and New Game with no manual loop (run 20261020-112130-791118 in the pi worktree).

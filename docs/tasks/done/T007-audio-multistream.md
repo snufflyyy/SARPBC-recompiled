@@ -1,6 +1,6 @@
 # T007: Audio — MultiStream on SPU through cellAudio/SDL2
 
-Status: claimed
+Status: done
 Owner: pi
 Priority: 14
 Touches: tools/make_spu_overlays.py + its relift.sh step (coordinator-approved 2026-10-19), src/overrides/audio_*.cpp (new), patches/ps3recomp/T007-*.patch (libs/audio/**, runtime/spu/** only for audio), docs/subsystems.md (Audio section only)
@@ -57,3 +57,4 @@ in docs/subsystems.md.
 - 2026-10-20 09:18 pi: Continuation base is now 16b0488 (Claude merge of origin/main audit + Wayland); own audio changes replayed cleanly. User asks to preserve and verify Claude local work too. Copied original uncommitted diff and T037 patch to private analysis before touching integration.
 - 2026-10-20 09:38 pi: Combined 150s boot confirms filter bank repair: zero unlifted misses, MP3 continues decoding and mixer remains alive. Real PulseAudio output capture: 149.685s f32 stereo, 2,547,400 nonzero samples, peak0.955703, RMS0.03442, zero nonfinite samples, nonzero audio7.205..63.275s. Quiet after stalled arena load; real-time sound quality not yet claimed (boot overlapped regression CPU work). Report summary: STALLED since111.8s | MP_SOCCARARENA@55.7s | pkgs14 | zlib3532 | flips2359 | unresolved0.
 - 2026-10-20 09:39 pi: Integration requirement: shared generated SPU tree must remain read-only. Normal build.sh currently only configures/builds; it does not rerun overlay lifting, so a source-only merge would leave the new filter bank absent for normal launch. Need optional --output in overlay generator plus build-dir-only CMake fallback generation when SPU_DIR lacks filter bank (no shared relift, no new game data tracked). No other agent owns CMake now; will test default-SPU_DIR build independently.
+- 2026-10-20 11:28 claude: DONE: Merged 4d39a5c. Both MultiStream DSP banks lifted (filter bank added, CMake generates it in the build dir for older lifts); real MP3 decodes and non-silent audio reached PulseAudio (pi: 149.7 s capture, 2.55M nonzero samples, peak 0.956). Left: real-time quality/underruns during gameplay (measure once the arena renders), mixer SPU perf (see subsystems.md Audio).

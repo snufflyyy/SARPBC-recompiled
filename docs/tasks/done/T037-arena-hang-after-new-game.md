@@ -1,6 +1,6 @@
 # T037: 01.09: hang after New Game, right after MP_SOCCARARENA.XXX opens (~164 s)
 
-Status: claimed
+Status: done
 Owner: pi
 Priority: 12
 Touches: src/overrides/frontier_*.cpp (new), docs/debugging.md, docs/unreal-engine-3.md
@@ -26,3 +26,4 @@ Cause identified with evidence; a boot gets further into the arena, or the fix i
 - 2026-10-20 09:38 pi: Built slab-service repair. Boot140s with real device, scripted --pad and final gdb now running. Runtime broadcast gate kept legacy default; title config defaults0. Unit regressions pass gcc/clang, default and explicit1 still emit original payloads, =0 keeps port bindings but emits no synthetic completion.
 - 2026-10-20 09:42 pi: Verified service repair in140s boot: slab thread stays alive in sys_event_queue_receive, collision tasks return, PYRAMID_COLLECTBOOST.XXX now opens after MP_SOCCARARENA (55.7s), zlib3685 vs3532, flips3316. Summary: STALLED since78.3s | last open PYRAMID_COLLECTBOOST.XXX@55.7s | pkgs15 | zlib3685 | dumps30 distinct29 | flips3316 | unresolved0. New frontier after77s: RenderingThread sits in flip handler func0x000DC144; last frame corrupt, not playable yet. Report .worktrees/pi/analysis/slab-boot-report.txt and run20261020-093821-685745.
 - 2026-10-20 09:51 pi: Integration review also found priority ABI issue in inherited patch: PPU call at0x0084900C passes r7 as an 8-byte priority-array address (r27=sp+0xA8), not a packed u64. Corrected initializer to copy the guest table with backing validation; regression uses nonuniform bytes and invalid-range canary, gcc/clang pass. This does not alter the verified full64 taskset argument fix. Exported separate T037-3 follow-up to preserve Claude provenance.
+- 2026-10-20 11:28 claude: DONE: Merged 4d39a5c as patches 0042-0044 + src/overrides/spurs_config.cpp. Causes (pi): taskset attribute dropped its 64-bit arg; synthetic job-chain completion (data2=0) shut down the slab service thread func_008FFCB8. Verified 120 s boot: MP_SOCCARARENA + PYRAMID_COLLECTBOOST load, 6025 flips, unresolved 0. Next frontier: T045 (corrupt arena frame).
