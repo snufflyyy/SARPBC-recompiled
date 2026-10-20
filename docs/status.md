@@ -22,7 +22,7 @@ intro is Loading, ESRB with the car, Powered by Unreal, the Psyonix logo, the sa
 `boot_check --pad`). New Game now loads MP_SOCCARARENA + PYRAMID_COLLECTBOOST and keeps presenting (T037, T044),
 and **the arena renders and plays** (T045: reversed-Z depth clear, then NV0039 texture copies):
 clean textures, a working HUD, the car drives on throttle, its shadow is right (depth-compare
-direction). Left in T045: a black border (85% frame, maybe the safe-area setting). Real MP3 audio
+direction). T045 is done; the 85% black border is the game's own safe-area setting (menus have it too). Real MP3 audio
 plays (T007). `boot_check --pad` scripts the presses (T036). There's no Bink in 01.09.
 
 **Last verified on `main` (fc9cdf4, 2026-10-20, `PS3_VERBOSE=0`, under the boot lock):** a 120 s
@@ -51,11 +51,11 @@ X11 override; `SDL_VIDEODRIVER=wayland ./run.sh` explicitly selects Wayland. A
 45-second window test presented 3,581 guest frames without a headless fallback;
 this is not a main-menu FPS measurement. See build-linux.md "Desktop launch".
 
-**Queue:** the board's `Priority:` lines (`tools/task.sh next`): **T045 (arena border, P1,
-read its log)**, T040 (steady 30 fps), T043 (pin bump), T029 (profiler mixer metric), T032/T031 (SPU
+**Queue:** the board's `Priority:` lines (`tools/task.sh next`): **T040 (steady 30 fps), T043 (pin bump), T029 (profiler mixer metric), T032/T031 (SPU
 DMA, codegen), T034 (callback stacks), T038 (upside-down Loading), then T020, T017, T021, T012, T009,
 T018, T005, T010, T011, T013, T014. T015 (multiplayer) is **blocked** until the user has permission.
-T007, T036, T037 and T044 were closed on 2026-10-20.
+T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena: a real match
+(phase 8: an exhibition with input over time, audio in the arena, frame rate there).
 
 ## Phases
 
