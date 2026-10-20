@@ -13,7 +13,7 @@ you are touching instead of re-scanning the tree or the game files.
 
 **Phase 7 done: 01.09 reaches the main menu; now performance, goal a steady 30 fps in the main menu** (user,
 2026-10-20: the game itself is capped at 30 fps; the earlier 60 fps goal is dropped). The PPU lift, all 15 SPU images, the 2 SPUJOBS jobs and the MultiStream overlay build
-on 01.02 and 01.09, with 55 ps3recomp patch files on upstream v0.16.0. New Game loads the arena, which renders with a working HUD, shadows and a drivable car (T045 done). The loading screen is upright via correct PNG row order, without a shader-length workaround (T051 done). The menus run at 30+ fps (2026-10-20; the heavier Single Player screen went 19.5 to ~32 with a shared Vulkan render pass, patch 0053; arena ~30)
+on 01.02 and 01.09, with 56 ps3recomp patch files on upstream v0.16.0. New Game loads the arena, which renders with a working HUD, shadows and a drivable car (T045 done). The loading screen is upright via correct PNG row order, without a shader-length workaround (T051 done). The menus run at 30+ fps (2026-10-20; the heavier Single Player screen went 19.5 to ~32 with a shared Vulkan render pass, patch 0053; arena ~30)
 after the SPURS CreateTask race fix (T033) and Vulkan draw batching with a VRAM geometry cache
 (T040, in progress; the GPU is on PCIe 2.0 x4). The pin moved to upstream v0.16.0 on 2026-10-20
 (T043). The project audit (T039) ran on 2026-10-20 and left `tools/lint.py` behind. Agents the user

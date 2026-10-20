@@ -1,0 +1,266 @@
+From 8c4d0c2002d30a566ef13497453dfe585d36b620 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Tue, 20 Oct 2026 23:04:20 +0000
+Subject: [PATCH] video: fetch a draw's vertices attribute by attribute
+ (rsx_vertex_fetch_all)
+
+Resolves the type switch and plan once per attribute and walks contiguous
+sources without a call. Byte-identical to rsx_vertex_fetch_one per ref on the
+random plans of test_vertex_fetch_plan.
+---
+ libs/video/rsx_draw_engine.c              |   9 +-
+ libs/video/rsx_vertex_compact.c           | 136 ++++++++++++++++------
+ libs/video/rsx_vertex_compact.h           |   7 ++
+ libs/video/tests/test_vertex_fetch_plan.c |  23 +++-
+ 4 files changed, 132 insertions(+), 43 deletions(-)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 10f408c..4cc1ec1 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -1979,12 +1979,9 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+         dc.fetch_ok = 0;
+         return;
+     }
+-    for (u32 i = 0; i < dc.n_refs; i++) {
+-        u8* dst = layout->stride ? dc.verts + (u64)i * layout->stride : NULL;
+-        if (!rsx_vertex_fetch_one(&dc.fetch_plan, &dc.refs[i], dst)) {
+-            dc.fetch_ok = 0;
+-            return;
+-        }
++    if (!rsx_vertex_fetch_all(&dc.fetch_plan, dc.refs, dc.n_refs, layout->stride ? dc.verts : NULL)) {
++        dc.fetch_ok = 0;
++        return;
+     }
+     dc.n_verts = dc.n_refs;
+ }
+diff --git a/libs/video/rsx_vertex_compact.c b/libs/video/rsx_vertex_compact.c
+index 745245d..78c0ae0 100644
+--- a/libs/video/rsx_vertex_compact.c
++++ b/libs/video/rsx_vertex_compact.c
+@@ -280,50 +280,118 @@ void rsx_vertex_fetch_plan_prepare(
+     }
+ }
+ 
++/* One attribute of one vertex: the generic resolver, shared by fetch_one and
++ * by fetch_all's per-vertex fallback. 0 only for an invalid enabled ATTR0. */
++static int rsx_vertex_fetch_attr_one(
++    const rsx_vertex_fetch_plan* plan, u32 attr, const rsx_vertex_ref* ref,
++    float* value)
++{
++    const rsx_vertex_fetch_attr* fetch = &plan->attr[attr];
++    if (!fetch->desc.type || !fetch->desc.size) {
++        memcpy(value, fetch->default_value, 16);
++        return 1;
++    }
++
++    const u32 element = rsx_vertex_element_index(
++        ref->vertex_id, ref->base_index, fetch->desc.frequency,
++        (plan->divider_mask >> attr) & 1u);
++    const u8* source = NULL;
++    if (fetch->stable_base &&
++        element >= fetch->stable_first && element <= fetch->stable_last) {
++        source = fetch->stable_base +
++            (u64)(element - fetch->stable_first) * fetch->stride;
++    } else if (plan->inline_data) {
++        /* An inline draw has no vertex array to fall back to: the array
++         * offsets still hold whatever the last ordinary draw bound, and
++         * reading them would feed this draw another mesh's vertices.
++         * An attribute the stream does not supply gets its default,
++         * which is what the hardware feeds. */
++        source = NULL;
++    } else if (plan->guest_ptr) {
++        const u32 offset =
++            plan->base_offset + fetch->desc.offset +
++            element * fetch->stride;
++        source = plan->guest_ptr(
++            plan->guest_user, fetch->desc.location, offset,
++            fetch->elem_size);
++    }
++
++    if (source && rsx_vertex_decode_inline(
++            fetch->desc.type, fetch->desc.size, source, value))
++        return 1;
++    if (attr == 0)
++        return 0;
++    memcpy(value, fetch->default_value, 16);
++    return 1;
++}
++
+ int rsx_vertex_fetch_one(
+     const rsx_vertex_fetch_plan* plan, const rsx_vertex_ref* ref, u8* out)
+ {
+     if (!plan || !ref || (!out && plan->layout.stride))
+         return 0;
++    for (u32 slot = 0; slot < plan->layout.count; slot++) {
++        if (!rsx_vertex_fetch_attr_one(
++                plan, plan->layout.attrs[slot], ref,
++                (float*)(out + slot * 16u)))
++            return 0;
++    }
++    return 1;
++}
++
++/* Fetch every vertex of a draw, one attribute at a time: the type switch and
++ * the attribute's plan are resolved once per attribute instead of once per
++ * vertex per attribute, and a contiguous attribute (stable_base, the usual
++ * case) walks its source with no function call. Same output as calling
++ * rsx_vertex_fetch_one for each ref. */
++#define RSX_FETCH_RUN(TYPE) \
++    for (u32 i = 0; i < count; i++) { \
++        const u32 element = rsx_vertex_element_index( \
++            refs[i].vertex_id, refs[i].base_index, 0, 0); \
++        float* value = (float*)(out + (size_t)i * stride + slot * 16u); \
++        if (element >= first && element <= last && \
++            rsx_vertex_decode_inline(TYPE, size, \
++                base + (u64)(element - first) * vstride, value)) \
++            continue; \
++        if (!rsx_vertex_fetch_attr_one(plan, attr, &refs[i], value)) \
++            return 0; \
++    } \
++    break
++
++int rsx_vertex_fetch_all(
++    const rsx_vertex_fetch_plan* plan, const rsx_vertex_ref* refs, u32 count,
++    u8* out)
++{
++    if (!plan || (!refs && count) || (!out && plan->layout.stride))
++        return 0;
++    const u32 stride = plan->layout.stride;
+     for (u32 slot = 0; slot < plan->layout.count; slot++) {
+         const u32 attr = plan->layout.attrs[slot];
+         const rsx_vertex_fetch_attr* fetch = &plan->attr[attr];
+-        float* value = (float*)(out + slot * 16u);
+-        if (!fetch->desc.type || !fetch->desc.size) {
+-            memcpy(value, fetch->default_value, 16);
++        if (fetch->stable_base && fetch->desc.frequency <= 1 &&
++            fetch->desc.type && fetch->desc.size) {
++            const u8* base = fetch->stable_base;
++            const u32 first = fetch->stable_first, last = fetch->stable_last;
++            const u32 vstride = fetch->stride, size = fetch->desc.size;
++            switch (fetch->desc.type) {
++            case RSX_VTX_TYPE_FLOAT:   RSX_FETCH_RUN(RSX_VTX_TYPE_FLOAT);
++            case RSX_VTX_TYPE_HALF:    RSX_FETCH_RUN(RSX_VTX_TYPE_HALF);
++            case RSX_VTX_TYPE_UNORM8:  RSX_FETCH_RUN(RSX_VTX_TYPE_UNORM8);
++            case RSX_VTX_TYPE_SNORM16: RSX_FETCH_RUN(RSX_VTX_TYPE_SNORM16);
++            default:
++                for (u32 i = 0; i < count; i++)
++                    if (!rsx_vertex_fetch_attr_one(
++                            plan, attr, &refs[i],
++                            (float*)(out + (size_t)i * stride + slot * 16u)))
++                        return 0;
++            }
+             continue;
+         }
+-
+-        const u32 element = rsx_vertex_element_index(
+-            ref->vertex_id, ref->base_index, fetch->desc.frequency,
+-            (plan->divider_mask >> attr) & 1u);
+-        const u8* source = NULL;
+-        if (fetch->stable_base &&
+-            element >= fetch->stable_first && element <= fetch->stable_last) {
+-            source = fetch->stable_base +
+-                (u64)(element - fetch->stable_first) * fetch->stride;
+-        } else if (plan->inline_data) {
+-            /* An inline draw has no vertex array to fall back to: the array
+-             * offsets still hold whatever the last ordinary draw bound, and
+-             * reading them would feed this draw another mesh's vertices.
+-             * An attribute the stream does not supply gets its default,
+-             * which is what the hardware feeds. */
+-            source = NULL;
+-        } else if (plan->guest_ptr) {
+-            const u32 offset =
+-                plan->base_offset + fetch->desc.offset +
+-                element * fetch->stride;
+-            source = plan->guest_ptr(
+-                plan->guest_user, fetch->desc.location, offset,
+-                fetch->elem_size);
+-        }
+-
+-        if (source && rsx_vertex_decode_inline(
+-                fetch->desc.type, fetch->desc.size, source, value))
+-            continue;
+-        if (attr == 0)
+-            return 0;
+-        memcpy(value, fetch->default_value, 16);
++        for (u32 i = 0; i < count; i++)
++            if (!rsx_vertex_fetch_attr_one(
++                    plan, attr, &refs[i],
++                    (float*)(out + (size_t)i * stride + slot * 16u)))
++                return 0;
+     }
+     return 1;
+ }
+diff --git a/libs/video/rsx_vertex_compact.h b/libs/video/rsx_vertex_compact.h
+index ad21361..68bb267 100644
+--- a/libs/video/rsx_vertex_compact.h
++++ b/libs/video/rsx_vertex_compact.h
+@@ -116,6 +116,13 @@ void rsx_vertex_fetch_plan_prepare(
+ int rsx_vertex_fetch_one(
+     const rsx_vertex_fetch_plan* plan, const rsx_vertex_ref* ref, u8* out);
+ 
++/* All `count` vertices at once into out (count * layout.stride bytes),
++ * identical to rsx_vertex_fetch_one on each ref but faster: the work is done
++ * attribute by attribute. 0 on an invalid enabled ATTR0. */
++int rsx_vertex_fetch_all(
++    const rsx_vertex_fetch_plan* plan, const rsx_vertex_ref* refs, u32 count,
++    u8* out);
++
+ /* Collapse repeated (vertex_id, base_index) references in first-use order.
+  * refs is rewritten in place with the unique prefix.  The occurrence map
+  * remains valid until the next call using the same remap object. */
+diff --git a/libs/video/tests/test_vertex_fetch_plan.c b/libs/video/tests/test_vertex_fetch_plan.c
+index 79f3cc6..99fcfda 100644
+--- a/libs/video/tests/test_vertex_fetch_plan.c
++++ b/libs/video/tests/test_vertex_fetch_plan.c
+@@ -6,7 +6,9 @@
+  * vertex type, strides and offsets, frequency dividers in both modes, guest
+  * memory that is partly unmapped, INLINE_ARRAY streams -- with random index
+  * references, some past the 20-bit element wrap: every attribute's stable
+- * range (base, first, last) must be what the old walk gave.
++ * range (base, first, last) must be what the old walk gave. The same plans
++ * check rsx_vertex_fetch_all, the attribute-major fetch, byte for byte against
++ * rsx_vertex_fetch_one on each reference.
+  *
+  * Build (from the repo root):
+  *   clang -std=gnu17 -O2 -Wall -Wextra -Wno-unused-parameter -I include -I libs/video \
+@@ -133,7 +135,7 @@ int main(void)
+     enum { PLANS = 6000, MAXV = 200 };
+     static rsx_vertex_ref refs[MAXV];
+     static u8 inl[8192];
+-    int stable = 0, divided = 0;
++    int stable = 0, divided = 0, fetched = 0;
+ 
+     for (int n = 0; n < PLANS; n++) {
+         for (int l = 0; l < 2; l++)
+@@ -165,11 +167,26 @@ int main(void)
+                 if (plan.attr[at].desc.frequency > 1) divided++;
+             }
+         }
++        {
++            const u32 vs = plan.layout.stride;
++            static u8 one[MAXV * 16 * 16 + 16], all[MAXV * 16 * 16 + 16];
++            memset(one, 0xA5, sizeof one);
++            memset(all, 0xA5, sizeof all);
++            int ok1 = 1;
++            for (u32 i = 0; i < count && ok1; i++)
++                ok1 = rsx_vertex_fetch_one(&plan, &refs[i], vs ? one + (size_t)i * vs : NULL);
++            const int ok2 = rsx_vertex_fetch_all(&plan, refs, count, vs ? all : NULL);
++            CHECK(ok1 == ok2, "plan %d: fetch_one ok=%d, fetch_all ok=%d", n, ok1, ok2);
++            if (ok1 && ok2) {
++                CHECK(!memcmp(one, all, (size_t)count * vs), "plan %d: fetch_all differs from fetch_one", n);
++                fetched++;
++            }
++        }
+     }
+ 
+     printf("test_vertex_fetch_plan: %d plans, %d stable ranges (%d divided), %d failure(s)\n",
+            PLANS, stable, divided, fails);
+-    if (stable < PLANS || divided < 100) {
++    if (stable < PLANS || divided < 100 || fetched < PLANS / 4) {
+         printf("FAIL: too few cases exercised a path\n");
+         return 1;
+     }
+-- 
+2.47.3
+

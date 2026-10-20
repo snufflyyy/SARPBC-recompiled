@@ -158,6 +158,7 @@ numbers:
 | `0053-vulkan-shared-render-pass.patch` | T040: consecutive engine draws into one framebuffer share a render pass (a per-draw pass loaded/stored every attachment: ~33 us x 400 draws a menu frame); a draw sampling its own attachment still starts a new pass | Vulkan-only; offer upstream |
 | `0054-vertex-decode-inline.patch` | T040: `rsx_vertex_decode_element` with the type switch outside the component loop, inlined into `rsx_vertex_fetch_one`; bit-identical (2M random cases vs the old loop) | generic, offer upstream |
 | `0055-vulkan-batch-clears-snapshots.patch` | T040: colour/depth clears and colour snapshots record into the open draw batch (ends the shared render pass) instead of submit-and-wait | Vulkan-only; offer upstream |
+| `0056-vertex-fetch-all.patch` | T040: `rsx_vertex_fetch_all` fetches a draw attribute by attribute (type switch and plan resolved once per attribute); the draw engine uses it. Checked byte for byte against `rsx_vertex_fetch_one` in test_vertex_fetch_plan | generic, offer upstream |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `git -C external/ps3recomp format-patch -1 -o ../../patches/ps3recomp/ --start-number N`.
