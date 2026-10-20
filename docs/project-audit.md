@@ -267,6 +267,24 @@ history; check tracked paths without requiring proprietary data. Add a short hum
 README linking existing docs. Ask the owner to choose the original-code license;
 retain third-party notices. Avoid a second documentation hierarchy in specs.
 
+## Second pass (2026-10-20 evening, claude): stability, performance, extension
+
+What was run: a 600 s arena soak (RSS 652 to 705 MB over the first 145 s and flat after,
+44 file descriptors, 30 threads: no leak), a 160 s arena run under the Vulkan validation layer
+(only `Undefined-Value-ShaderOutputNotConsumed` warnings: the render-pass sharing and batched
+clears are clean), repeated 215 s runs to the end of a round, and per-call-site counts of GPU
+submit-and-waits.
+
+| # | Finding | Result |
+|---|---|---|
+| S1 | **Round-end crash**: at 0:00 the arena degrades (null reads at ~163 s) and SIGSEGVs at ~193 s, every run. The crashing thread is MultiStream's update thread hitting the game's own assert "cellMSSystemSignalSPU was called but MultiStream hasn't been initialised" | Open as **T052** (priority 2). A crash handler now prints the guest call chain (`src/overrides/crash_report.cpp`) |
+| S2 | Vulkan: one render pass per draw (~33 us x 400 draws a frame), a 4 ms frame-clock sleep, clears and colour snapshots each doing a submit-and-wait, per-vertex decode dispatch | Fixed, patches 0053-0056 and `src/main.cpp`: Single Player 19.5 to ~54 fps, arena ~30 to ~38 |
+| S3 | `[input]` in config.toml exported any upper-case key (PATH, LD_PRELOAD) to the process | Whitelist + test |
+| S4 | Frame clock: 62.5 Hz step, volatile counter, unchecked sleep setting and thread start | Fixed (A07 partly) |
+| S5 | MP3 stand-in could not be written when the executable's directory is read-only | Falls back to the user cache directory |
+| S6 | No CI, no README, template examples in `src/stubs.cpp`, stale status | `.github/workflows/lint.yml`, README.md, stubs trimmed, status.md corrected |
+| S7 | Not done, by choice | A single init function for the override constructors (A06), an owned frame-clock stop/join (T018), Vulkan engine state tests without a GPU (A09), a license for the original code (owner's decision), Windows/macOS builds (T011) |
+
 ## Minimal extension rules
 
 1. Guest-address/NID behavior stays in a named title override. Add evidence and a test.
