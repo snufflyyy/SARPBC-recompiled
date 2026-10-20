@@ -127,7 +127,9 @@ T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena
 - Corrected-stack Release boot, 120 s: upright Loading and tutorial arena/car/HUD,
   3729 zlib requests, 2575 flips, unresolved 0. An additional 55 s staged capture verifies
   upright ESRB/car, Psyonix/Unreal logos, profile screen, main and Single Player menus.
-  No new FPS or Windows/macOS claim. No game data or generated lift is committed.
+  Main checkout also rebuilt successfully through `./build.sh`; its fresh 20 s smoke
+  is PROGRESSING (3279 zlib requests, 442 flips, unresolved 0). No new FPS or
+  Windows/macOS claim. No game data or generated lift is committed.
 
 ### 2026-10-20: Antigravity loading-screen fix reviewed (T050, pi)
 - T038 was already merged as `ba70ca3`; no second implementation merge is needed.
