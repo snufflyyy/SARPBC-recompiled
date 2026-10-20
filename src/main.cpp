@@ -76,6 +76,7 @@ void     ps3_load_prx_modules(void);
 
 /* src/overrides/: firmware functions the runtime lacks, done for this title. */
 void     sarpbc_register_edgezlib(void);
+void     sarpbc_frame_stats_tick(uint64_t clock_ms, unsigned guest_frames);
 
 /* libs/system/cellGame.c: title id and game type (CATEGORY HG -> HDD) from the
  * install's PARAM.SFO. Without it cellGame answers "disc game BLES00000", and
@@ -259,6 +260,9 @@ static DWORD WINAPI frame_clock(LPVOID)
                 rsx_backend_present();
             }
         }
+        /* Report completed guest boundaries, never the pre-first-flip fallback
+         * presents. A fresh timestamp includes time spent draining/presenting. */
+        sarpbc_frame_stats_tick(GetTickCount64(), ppu_boot_frames_presented());
     }
     return 0;
 }
