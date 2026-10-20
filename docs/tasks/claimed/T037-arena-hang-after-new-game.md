@@ -1,0 +1,28 @@
+# T037: 01.09: hang after New Game, right after MP_SOCCARARENA.XXX opens (~164 s)
+
+Status: claimed
+Owner: pi
+Priority: 12
+Touches: src/overrides/frontier_*.cpp (new), docs/debugging.md, docs/unreal-engine-3.md
+Reads: docs/tasks/*/T028*
+
+## Goal
+From T028: after New Game the arena package MP_SOCCARARENA.XXX opens at ~164 s, then the log goes silent (HUNG). Find out why: map load, PhysX scene creation (the task pile-up from T030 may run out of the 128 task ids at ~297 s), or something else. Wait for T030 first if the pile-up is still there.
+
+## Done when
+Cause identified with evidence; a boot gets further into the arena, or the fix is handed to the owning task.
+
+## Log
+- 2026-10-20 08:56 claude: claimed
+- 2026-10-20 08:57 pi: User now prioritizes offline in-game progress. I am resuming T007 audio (src/overrides/audio_*.cpp, libs/audio, Audio section only) in isolated pi worktree; leaving arena loader and boot_check tools to claude. Boots/builds will use shared locks.
+- 2026-10-20 09:03 pi: T007 baseline also reaches MP_SOCCARARENA at 65.2s then stops at 65.7s (115s real pulseaudio boot, Cross 40/45/50/65/80/95). Summary: STALLED since 65.7s | last open MP_SOCCARARENA.XXX@65.2s | pkgs 14 | zlib 3532 | flips 3103 | unresolved 0 | alerts blocked. Audio remains 100% silent; investigating mixer flag 0x01372000 independently. Log .worktrees/pi/analysis/boot_check/20261020-090055-586602/run.log.
+- 2026-10-20 09:18 claude: RELEASED: user says Claude stopped; pi preserving/reviewing exported taskset attribute fix
+- 2026-10-20 09:18 pi: claimed
+- 2026-10-20 09:22 pi: Preserved and applied Claude exported taskset attribute argument patch on updated base. Removed title-specific runtime comment only; extended fixture to preserve a full 64-bit argument and nonuniform priority byte order. Clang and GCC pass. Building together with missing audio filter bank before offline boot.
+- 2026-10-20 09:26 pi: Review of Claude interrupted boot analysis/boot_check/20261020-091434-650117/run.log: arg forwarding now logs args=0x100125E000 (line404), but collision tasks still spin at LS0x0E6C4/0x0E7C4 on EA0x0125E000, whose first four words are zero. This is beyond the prior EA0 failure, not proof the arena is fixed. Combined 150s boot with audio bank + original logic fix is running; will inspect guest progress/backtraces before closing anything.
+- 2026-10-20 09:27 pi: Combined updated-base regression suite PASS: tools/lint.py --tests ran 76 scripts, 0 problems. Shellcheck/pyflakes absent (explicit skips); no failures. Self-review: no new dependencies/secrets/network path; shared taskset ABI fix retains existing validation; full64/priority regressions pass clang/gcc. Amended Claude patch only for title-agnostic comment and stronger fixture, kept Claude credit and exported it. Arena integration boot still pending.
+- 2026-10-20 09:34 pi: Root cause candidate now precise: combined run log line6252 ShaderPatching chain0x012B6F00 job0 broadcasts synthetic completion to queue5 with data2=0; line6254 CellSlabMemoryManager tid7 immediately exits status0. Its guest func0x008FFCB8 interprets low24(data2)=0 as shutdown (0x008FFF6C), 1 as replenish, 2 as free. Queue5 is the slab service queue attached port16, not a job-chain completion queue. Collision tasks later wait on the now-unserviced slab pool EA0x0125E000. Current jc_signal_done broadcasts every chain to all public attached queues; documented dod3 SPURS_JC_DONE_EVENTS gate is not ported. Will test suppressing synthetic completions via a generic opt-in compatibility gate, never fake physics completion.
+- 2026-10-20 09:36 pi: Scope extension (no other agent active): runtime libs/spurs/cellSpurs.c + new src/overrides/spurs_config.cpp and standalone tests, because evidence proves jc_signal_done broadcasts shut down slab service. Reusing MIT fork 93dbfddf95b317d2b4aedccc8a0525d2f8c82d86 SPURS_JC_DONE_EVENTS gate; compatibility default stays on in runtime, title defaults gate=0 with env override. Red fixture confirms opted-out service queue still received completion before fix. No physics waits bypassed or fabricated completions.
+- 2026-10-20 09:38 pi: Built slab-service repair. Boot140s with real device, scripted --pad and final gdb now running. Runtime broadcast gate kept legacy default; title config defaults0. Unit regressions pass gcc/clang, default and explicit1 still emit original payloads, =0 keeps port bindings but emits no synthetic completion.
+- 2026-10-20 09:42 pi: Verified service repair in140s boot: slab thread stays alive in sys_event_queue_receive, collision tasks return, PYRAMID_COLLECTBOOST.XXX now opens after MP_SOCCARARENA (55.7s), zlib3685 vs3532, flips3316. Summary: STALLED since78.3s | last open PYRAMID_COLLECTBOOST.XXX@55.7s | pkgs15 | zlib3685 | dumps30 distinct29 | flips3316 | unresolved0. New frontier after77s: RenderingThread sits in flip handler func0x000DC144; last frame corrupt, not playable yet. Report .worktrees/pi/analysis/slab-boot-report.txt and run20261020-093821-685745.
+- 2026-10-20 09:51 pi: Integration review also found priority ABI issue in inherited patch: PPU call at0x0084900C passes r7 as an 8-byte priority-array address (r27=sp+0xA8), not a packed u64. Corrected initializer to copy the guest table with backing validation; regression uses nonuniform bytes and invalid-range canary, gcc/clang pass. This does not alter the verified full64 taskset argument fix. Exported separate T037-3 follow-up to preserve Claude provenance.
