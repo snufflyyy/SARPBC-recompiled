@@ -168,6 +168,25 @@ fetch/decode `rsx_vertex_fetch_one`, `eng_texture_content_hash` on texture binds
 idle in `Sleep(4)`. Next: record clears into the batch, overlap GPU with CPU (double-buffered
 submissions instead of waiting), and cut the per-draw CPU work in the draw engine.
 
+### Arena flip-callback stall (T044, 2026-10-20)
+
+After the slab-service repair lets the challenge package load, a 140 s boot
+stops presenting near 77 s. The render thread is inside flip handler
+`func_000DC144`, reached from `ppu_gcm_pump` at an HLE boundary in
+`func_000DD214` / `func_000EE334`. The handler polls a render-owned park slot;
+its suspended render caller cannot publish further state. A dedicated
+interrupt thread existed, but other HLE callers could still steal its work.
+Evidence: pi worktree `analysis/boot_check/20261020-093821-685745/gdb.txt`.
+
+The runtime now leaves pending ticks and user commands untouched on foreign
+threads while a GCM interrupt worker is published. The worker alone pumps
+callbacks. With no worker, manual/HLE delivery still works. Failed thread
+startup closes and clears the event so it cannot disable that fallback.
+The fixture checks FIFO ordering, exactly-once delivery, tick retention and
+mocked CreateThread failure under GCC and Clang. No fences are skipped and
+no flips are fabricated. Arena boot verification is pending; the previous
+last frame is corrupt, so do not call the arena playable yet.
+
 ## Audio
 
 - `PS3Drv.PS3AudioDevice`, 32 voices, LPCM up to 7.1 + Dolby Digital per PARAM.SFO.
@@ -214,7 +233,7 @@ submissions instead of waiting), and cut the per-draw CPU work in the draw engin
   apply. Cheapest wins, both generic: build the SPU sources with SSE4.1 (or
   `-march=x86-64-v2`), and an SSE2/AVX version of the NEON float fast path in
   `runtime/spu/spu_helpers.h`. Until then real audio would stutter.
-- **Blocker 2: `flashMP3.pic` (FIXED, untested end to end).** The PPU (01.09 `func_0082E690`)
+- **Blocker 2: `flashMP3.pic` (FIXED; stream path verified 2026-10-20).** The PPU (01.09 `func_0082E690`)
   reads `/dev_flash/sys/external/flashMP3.pic` into a buffer and `func_00835588` parses its
   SPU ELF section table into a descriptor {+0 file EA, +4 body EA, +8 lowest sh_addr,
   +C size, +10 e_entry}. Without it: "Multistream: mp3 failed to load MP3 codec".
@@ -223,9 +242,11 @@ submissions instead of waiting), and cut the per-draw CPU work in the draw engin
   user set it), registers a native `decodeFrame` at **LS 0x1A910** (body at 0x1A900, as in
   dod3; the mixer's descriptor sits at LS 0x1A880 and it calls decodeFrame at SPU 0x6E2C
   through the word at LS 0x3C4B0) and decodes with dod3's decoder
-  (`audio_mp3dec.cpp`). Verified: the file opens and the error is gone. **Not verified:**
-  no MP3 stream starts before the boot stalls at "Loading...", so decodeFrame has not been
-  called yet. `SARPBC_MP3_TRACE=<n>` logs the first n calls, `SARPBC_MP3_NATIVE=0` turns it off.
+  (`audio_mp3dec.cpp`). The file opens and the error is gone. Stream decoding
+  was initially untested because no MP3 stream started before the Loading stall.
+  Update 2026-10-20: real 44.1 kHz stereo streams decode, and the filter-bank repair below
+  lets the mixer keep running. `SARPBC_MP3_TRACE=<n>` logs the first n calls;
+  `SARPBC_MP3_NATIVE=0` turns it off.
 - **cellAudio on Linux (patch `0023-audio-pacing-devflash-sig-region`):** the POSIX mixing
   loop now paces to the SDL queue (it used fixed 2/5 ms sleeps), and
   `AUDIO_RATE=1` / `AUDIO_PEAK=1` / `AUDIO_WAV=<file>` work on Linux. With PipeWire
@@ -239,11 +260,57 @@ submissions instead of waiting), and cut the per-draw CPU work in the draw engin
 - ps3recomp: cellAudio over SDL2 on Linux (`SDL_AUDIODRIVER=dummy` for silent runs,
   `PS3_NO_AUDIO` to disable).
 - `cellMic` (15 imports) for voice chat — stub "no mic attached" first.
-- Status (2026-10-19, T007): the port runs on a real device (pulseaudio, 0 underruns); the
-  mixer runs lifted (DSP block at 0x37000) and PUTs every block it finishes into the port,
-  but slower than real time (above); MP3 stand-in in place. Every block so far is silent
-  (`AUDIO_PEAK=1`: peak 0.0000): the 01.09 boot stalls at "Loading..." before any sound
-  plays, so nothing audible can be checked yet.
+- Status (2026-10-20, T007): both DSP banks are lifted; real MP3 streams decode and
+  non-silent audio reaches PulseAudio/PipeWire. A 149.685 s f32 stereo capture has
+  2,547,400 nonzero samples, peak 0.955703 and no nonfinite values. Output quality is
+  not yet verified at real time: observed silent blocks and underruns need a quiet
+  gameplay measurement. The older speed measurements above predate later SPURS fixes.
+
+### Sound after the menu became reachable (T007, 2026-10-20)
+
+A 115-second 01.09 boot on `87b64cb` reached `MP_SOCCARARENA.XXX` at
+65.2 s, then stalled at 65.7 s (T037). PulseAudio/PipeWire consumed 187.5
+blocks/s with zero device underruns, but the output was 100% silent. This
+is not evidence that the host audio device failed.
+
+With `SARPBC_MP3_TRACE=30`, the native decoder consumed three valid 44.1 kHz
+stereo frames (261, 182, 261 bytes; 2304 output bytes/channel each). The
+next line was `img=506692475 branched into unlifted LS 0x37010
+(lr=0x03930) -- ending the job`. The DSP entry is present in the generated
+lift, but belongs to a different plugin bank from the one now in local
+store. The update thread then waits forever on event flag `0x01372000`.
+
+A temporary GET trace found the missing bank: the mixer loads 12 KiB banks
+at LS `0x37000`. After MP3 starts, it replaces the initial i3dl2/parametric
+EQ bank with the next bank. Its signature matches the embedded
+`mstream_dsp_filter.pic` text (0x500 bytes), which the overlay tool does not
+yet lift at that address. This contradicts the earlier boot-only finding
+that the filter plugin was not loaded. The generic eviction of the old bank
+is correct. The overlay tool now emits a second bank under image id
+`0x4D534402`, distinct from the original bank's `0x4D534401`. A subsequent
+150 s real-device boot has no unlifted branches, the mixer remains alive,
+and non-silent output reaches the device. This verifies the missing-bank
+repair, not real-time audio quality. Trace: pi worktree
+`analysis/boot_check/20261020-090756-641267/run.log`.
+
+Evidence: pi worktree `analysis/boot_check/20261020-090055-586602/run.log`,
+lines 12833–12837. Command: `SDL_AUDIODRIVER=pulseaudio PAD_NO_HOST=1
+AUDIO_RATE=1 AUDIO_PEAK=1 SARPBC_MP3_TRACE=30 SPURS_EF_STATS=1
+SPU_DMA_RANGE=58000000-58200000 PS3_VERBOSE=0`, a locked 115 s boot with
+three-poll CROSS presses at 40/45/50/65/80/95 s.
+
+`tools/test_audio_mp3.py` tests the native SPU ABI without firmware or game
+data. It covers metadata skips, bad/truncated headers, planar big-endian
+PCM, byte counts, return registers and independent stream histories. A
+synthetic tone requires ffmpeg/libmp3lame. A separate 48 kHz tone comparison
+against ffmpeg gave correlation 0.999999999868 and RMS ratio 0.999999682.
+These tests do not prove the game's stream ABI or audible output.
+
+The guard-page test exposed an unrelated host crash: a four-byte ID3v2
+prefix at LS end passed the frame-header check, then read its size field
+outside local store (SIGSEGV, exit -11). The native override now checks that
+the ten-byte ID3v2 header fits and returns the existing decode-error result
+when it does not.
 
 ## Input
 

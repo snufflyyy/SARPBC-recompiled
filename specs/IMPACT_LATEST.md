@@ -1,47 +1,46 @@
 ---
 type: impact-analysis
-context: T042 native Wayland desktop launch failure
+context: T007 audio plus preserved Claude T036/T037 gameplay changes on 16b0488
 ---
 
-# T042: Native Wayland surface-format enumeration
+# Combined offline-gameplay changes
 
-## Target
-`external/ps3recomp/libs/video/rsx_vulkan_backend.c`: surface-format selection in
-`vk_create_swapchain`, exported as an upstreamable patch.
+## Targets and dependents
+- `tools/make_spu_overlays.py`: called by `tools/relift.sh`; emit a second,
+  independently registered filter bank at the same LS base. Existing bank name,
+  image id and placement remain unchanged. Both game versions use this tool.
+- `src/overrides/audio_mp3.cpp`: one internal `standin_entry` caller. Reject a
+  truncated ID3v2 header without reading beyond local store. No ABI change.
+- Claude's `tools/boot_check.sh --pad`: preserve and validate scheduled input.
+  Existing runs without `--pad` are unchanged. Only trusted local specs are parsed;
+  no shell evaluation of button names or schedule text.
+- Claude's SPURS attribute patch: shared `cellSpursCreateTasksetWithAttribute`
+  creation path now preserves the full taskset argument passed to tasks in r4.
+  Priority bytes are retained; scheduling priorities remain otherwise unchanged.
+  No title-specific runtime conditions, registry changes or instruction changes.
 
-## Dependents (2)
-- Vulkan backend initialization calls `vk_create_swapchain` for windowed launches.
-- `vk_swapchain_lost` calls it again after an out-of-date swapchain.
+## Affected stories/tasks
+No release plan exists. Board tasks T007 (sound), T036 (scripted input), T037
+(arena load). User requested preserving Claude's local changes and verifying them
+with pi's changes, using Claude's updated main 16b0488 as the base.
 
-Headless mode does not call this code. SDL's Wayland and X11 drivers both use it.
-T040 draw batching and T024 present readback are outside this change.
-
-## Affected Stories
-No release-plan stories exist. Board tasks: T042 (fix), T041 (desktop launch).
-Work is in main per the user instruction recorded in docs/status.md session 9.
-
-## Test Coverage
-- Existing `test_vulkan_present_readback.py` covers present/readback, not WSI setup.
-- New mocked regression will extract production format selection and cover lists
-  larger than 64, VK_INCOMPLETE/retry, preference ordering, zero formats, allocation
-  failure and driver errors, with allocation tracking and Valgrind.
-- GCC and ROCm clang sanitizer runtimes are absent on this host, so ASan/UBSan
-  cannot link. Valgrind Memcheck passes: 15 allocations/frees, zero leaks/errors.
-- Native Wayland desktop smoke must create a swapchain and present frames.
-- X11 desktop smoke checks the previously working path remains usable.
+## Evidence and coverage
+- 115 s real PulseAudio boot: arena package opens at 65.2 s, then stalls.
+  Three MP3 frames decode; a missing DSP-bank lift ends the mixer at LS0x37010.
+- A temporary DMA trace identifies the next 12 KiB DSP bank as the filter plugin.
+  Generic eviction is correct. No runtime overlay change is required.
+- Synthetic overlay tests cover both bank layouts, same-base/distinct-image
+  registration inputs, seeds, source discovery, missing modules and overlap.
+- Firmware-free MP3/SPU tests cover metadata, planar BE PCM, state, counts and
+  return registers. Guard pages reproduce the ID3v2 boundary SIGSEGV (-11).
+- Game-free pad tests exercise the production parser and timed writer.
+- Clang/GCC SPURS tests cover full 64-bit args, priority byte order and the
+  pre-existing size/alignment/backing/canary checks.
+- Required integration gates: full lint/tests, clean patch replay, 01.09 build,
+  real-device audio capture, scripted offline arena boot and desktop smoke.
 
 ## Risk: Medium
-Two callers share the WSI path across platforms; format policy must remain unchanged.
-No public API, renderer pipeline, or title-specific behavior changes are needed.
-
-## Recommended action
-Add a failing regression first. Replace fixed-size truncation with complete,
-dynamically sized enumeration and bounded retries if the driver's list changes.
-Retain existing UNORM preference and unsupported/error fallback behavior.
-
-## Evidence
-The failing desktop log reports SDL `wayland` and
-`vkGetPhysicalDeviceSurfaceFormatsKHR failed (VkResult 5)`. The source clamps `nf`
-to 64 and sends the fill call through VK_CHECK, which accepts only VK_SUCCESS.
-Vulkan defines 5 as VK_INCOMPLETE, not a fatal enumeration error:
-https://docs.vulkan.org/refpages/latest/refpages/source/vkGetPhysicalDeviceSurfaceFormatsKHR.html
+SPURS is shared runtime code and DSP banks deliberately overlap in LS. Keep exact
+signature ownership and run both regressions and a real boot; do not infer arena
+playability or audible output from synthetic tests alone. No firmware/game data
+will be published. Generated test lifts stay private under the pi analysis tree.

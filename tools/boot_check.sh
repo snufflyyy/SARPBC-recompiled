@@ -3,6 +3,7 @@
 # (docs/debugging.md, "boot_check").
 #
 #   tools/boot_check.sh [seconds] [--version V] [--gdb] [--every N] [--keep N] [--quiet]
+#                       [--pad SPEC]
 #   BUILD_DIR=versions/0109/build GAME_DIR=versions/0109/game VFS_DIR=versions/0109/vfs \
 #       tools/boot_check.sh 60
 #
@@ -14,6 +15,14 @@
 #   --every N  dump every Nth presented frame (default 60; PS3RECOMP_VK_DUMP_EVERY)
 #   --keep N   keep the last N runs under analysis/boot_check/ (default 5)
 #   --quiet    print only the one-line summary
+#   --pad SPEC press pad buttons at wall-clock seconds after start, through
+#              PAD_FILE (libs/input/cellPad.c): short presses that work at any
+#              frame rate. SPEC is a comma list of BUTTON[+BUTTON][:POLLS]@SEC[*N/STEP]
+#              (POLLS: how many cellPadGetData polls to hold, default 3;
+#              *N/STEP: N presses STEP seconds apart). Buttons: cross circle
+#              square triangle start select up down left right l1 r1 l2 r2 l3 r3.
+#              Example, 01.09 into an exhibition match:
+#                --pad 'cross@40*4/5,cross@70*8/8'
 #
 # BUILD_DIR, GAME_DIR and VFS_DIR mean what they mean to tools/run.sh (default:
 # this checkout's build/, game/, vfs/). A relative path that does not exist from
@@ -30,13 +39,14 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MAIN=$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)")
-SECS=60 GDB=0 EVERY=60 KEEP=5 QUIET=0 VERSION=
+SECS=60 GDB=0 EVERY=60 KEEP=5 QUIET=0 VERSION= PAD=
 while [ $# -gt 0 ]; do
     case "$1" in
         --gdb) GDB=1 ;;
         --version) VERSION=$2; shift ;;
         --every) EVERY=$2; shift ;;
         --keep) KEEP=$2; shift ;;
+        --pad) PAD=$2; shift ;;
         -q|--quiet) QUIET=1 ;;
         -h|--help) sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
         [0-9]*) SECS=$1 ;;
@@ -66,6 +76,41 @@ VFS_DIR=$(resolve "${VFS_DIR:-$ROOT/vfs}")
 [ -d "$VFS_DIR/dev_hdd0" ] || { echo "boot_check: no $VFS_DIR/dev_hdd0" >&2; exit 1; }
 [ "$GDB" = 0 ] || command -v gdb >/dev/null || { echo "boot_check: --gdb needs gdb" >&2; exit 1; }
 
+# --pad: expand SPEC into sorted "<sec> <mask> <polls> <text>" lines now, so a typo
+# fails before the game starts. Masks are PAD_FILE's (digital2 << 8 | digital1).
+PAD_EVENTS=
+if [ -n "$PAD" ]; then
+    PAD_EVENTS=$(python3 - "$PAD" <<'PY'
+import math, re, sys
+B = dict(select=0x0001, l3=0x0002, r3=0x0004, start=0x0008, up=0x0010, right=0x0020,
+         down=0x0040, left=0x0080, l2=0x0100, r2=0x0200, l1=0x0400, r1=0x0800,
+         triangle=0x1000, circle=0x2000, cross=0x4000, square=0x8000)
+ev = []
+number = r'(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)'
+for item in filter(None, (x.strip() for x in sys.argv[1].split(','))):
+    m = re.fullmatch(rf'([a-z0-9+]+)(?::(\d+))?@({number})(?:\*(\d+)/({number}))?', item.lower())
+    if not m:
+        sys.exit(f"boot_check: bad --pad item '{item}' (BUTTON[+BUTTON][:POLLS]@SEC[*N/STEP])")
+    names, polls, t, n, step = m.groups()
+    mask = 0
+    for b in names.split('+'):
+        if b not in B: sys.exit(f"boot_check: unknown button '{b}' in --pad")
+        mask |= B[b]
+    polls, count, at, step = int(polls or 3), int(n or 1), float(t), float(step or 0)
+    if polls < 1 or count < 1 or len(ev) + count > 10000:
+        sys.exit('boot_check: --pad needs positive polls/repeats and at most 10000 events')
+    if not math.isfinite(at + step * (count - 1)) or (count > 1 and step <= 0):
+        sys.exit('boot_check: --pad times must be finite and repeated presses need a positive step')
+    for i in range(count):
+        ev.append((at + i * step, mask, polls, names))
+if not ev:
+    sys.exit('boot_check: --pad needs at least one button press')
+for t, mask, polls, names in sorted(ev):
+    print(f"{t:g} 0x{mask:04X} {polls} {names}")
+PY
+) || exit 2
+fi
+
 ID=$(date +%Y%m%d-%H%M%S)-$$
 RUN=$ROOT/analysis/boot_check/$ID
 CAP=$ROOT/captures/boot_check/$ID
@@ -84,7 +129,8 @@ export PS3RECOMP_VK_DUMP_EVERY=${PS3RECOMP_VK_DUMP_EVERY:-$EVERY}
 
 # A safety net past our own deadline: if this script dies, timeout still ends the game.
 LIMIT=$(( SECS + (GDB ? 180 : 30) ))
-TPID='' GPID='' WPID=''
+TPID='' GPID='' WPID='' PPID_PAD=''
+[ -z "$PAD_EVENTS" ] || export PAD_FILE=$RUN/pad.txt
 
 # State of a PID from /proc ("" if gone); comm cannot contain ')' for our binary.
 pstate() { local s; s=$(cat "/proc/$1/stat" 2>/dev/null) || return 0; s=${s##*) }; echo "${s%% *}"; }
@@ -106,6 +152,7 @@ stop_game() {
 cleanup() {
     stop_game
     [ -z "$WPID" ] || { : > "$RUN/stop"; wait "$WPID" 2>/dev/null || true; }
+    [ -z "$PPID_PAD" ] || { kill "$PPID_PAD" 2>/dev/null || true; wait "$PPID_PAD" 2>/dev/null || true; }
 }
 trap cleanup EXIT
 trap 'echo "boot_check: interrupted" >&2; exit 130' INT TERM
@@ -126,6 +173,23 @@ python3 "$ROOT/tools/boot_report.py" watch --log "$LOG" --pid "$GPID" --run-dir 
 WPID=$!
 [ "$QUIET" = 1 ] || echo "boot_check: game pid $GPID, ${SECS}s, $BUILD_DIR/sarpbc, log $LOG" >&2
 
+# The pad driver: write each press into PAD_FILE at its time; the game reads the
+# file at most every 30 ms, presses for <polls> polls and empties it. pad.log has
+# what was written and when (seconds since start).
+if [ -n "$PAD_EVENTS" ]; then
+    : > "$PAD_FILE"
+    (
+        while read -r t mask polls names; do
+            now=$(python3 -c "import time; print(time.time() - $T0)")
+            wait_s=$(python3 -c "print(max(0.0, $t - $now))")
+            sleep "$wait_s"
+            echo "$mask $polls" > "$PAD_FILE"
+            echo "$t $names $mask $polls" >> "$RUN/pad.log"
+        done <<< "$PAD_EVENTS"
+    ) &
+    PPID_PAD=$!
+fi
+
 END=$(( $(date +%s) + SECS ))
 while [ "$(date +%s)" -lt "$END" ] && ours; do sleep 0.5; done
 
@@ -144,6 +208,7 @@ ELAPSED=$(python3 -c "import time; print(round(time.time() - $T0, 1))")
 STATUS=0; wait "$TPID" 2>/dev/null || STATUS=$?
 TFIRED=0; [ "$STATUS" = 124 ] && [ "$KILLED" = 0 ] && TFIRED=1
 : > "$RUN/stop"; wait "$WPID" || true; WPID=
+[ -z "$PPID_PAD" ] || { kill "$PPID_PAD" 2>/dev/null || true; wait "$PPID_PAD" 2>/dev/null || true; PPID_PAD=; }
 trap - EXIT
 
 # Frames: keep PNGs of the first/last non-black and the last dump; drop the PPMs.
@@ -172,6 +237,7 @@ rm -f "$PS3RECOMP_VK_DUMP"
     echo "frames_dir=$CAP"
     echo "env=PS3RECOMP_VK_WINDOW=$PS3RECOMP_VK_WINDOW SDL_AUDIODRIVER=$SDL_AUDIODRIVER PS3_FSLOG=$PS3_FSLOG SARPBC_ZLIB_TRACE=$SARPBC_ZLIB_TRACE PS3RECOMP_VK_DUMP_EVERY=$PS3RECOMP_VK_DUMP_EVERY"
     echo "gdb=$GDB"
+    echo "pad=$PAD"
 } > "$RUN/meta.txt"
 
 python3 "$ROOT/tools/boot_report.py" report "$LOG" --run-dir "$RUN" --out "$RUN/report.txt" > /dev/null

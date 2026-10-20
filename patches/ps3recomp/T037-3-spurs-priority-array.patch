@@ -1,0 +1,71 @@
+From 60ca48840776aa78fe1ca865c22d4441c4ca8aaf Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Tue, 20 Oct 2026 09:51:11 -0500
+Subject: [PATCH] spurs: read taskset priorities from their guest byte array
+
+The attribute initializer priority argument is a guest pointer, not eight priorities packed into a u64. Copy the pointed-to bytes and reject partial backing before modifying the attribute. The taskset argument fix is preserved. Extend the fixture with a nonuniform guest array and invalid-backing canaries.
+---
+ libs/spurs/cellSpurs.c           | 11 +++++++----
+ tools/test_spurs_taskset_size.py |  7 ++++++-
+ 2 files changed, 13 insertions(+), 5 deletions(-)
+
+diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+index 9487059..913dc77 100644
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -1300,20 +1300,23 @@ s32 cellSpursCreateTaskWithAttribute(CellSpursTaskset* taskset,
+  * through CreateTaskset (which ignores the attribute), so just zero the struct. */
+ s32 _cellSpursTasksetAttributeInitialize(CellSpursTasksetAttribute* attr,
+                                          u32 revision, u32 sdkVersion, u64 argTaskset,
+-                                         u64 priority, u32 maxContention)
++                                         const u8* priority, u32 maxContention)
+ {
+     (void)sdkVersion; (void)maxContention;
+     if (!attr) return CELL_SPURS_TASK_ERROR_NULL_POINTER;
++    u32 priority_ea = (u32)(uintptr_t)priority;
++    if (priority_ea && !spurs_guest_range_valid(priority_ea, CELL_SPURS_MAX_SPU))
++        return (s32)0x8041090Du;
+     attr = GUEST_PTR(attr, CellSpursTasksetAttribute*);
+     memset(attr, 0, sizeof(CellSpursTasksetAttribute));
+     attr->revision = revision ? revision : 1;
+     attr->tasksetSize = CSTS_STRUCT_END;
+     /* The policy passes the taskset argument to each task in r4. Preserve it
+      * until CreateTasksetWithAttribute so tasks receive their shared context.
+-     * priority is the u8[8] per-SPU table packed big-endian in a u64. */
++     * priority names a guest byte array, not a packed integer: copy the table,
++     * not the numeric bytes of its effective address. */
+     attr->args = argTaskset;
+-    for (int i = 0; i < CELL_SPURS_MAX_SPU; i++)
+-        attr->priority[i] = (u8)(priority >> (56 - 8 * i));
++    if (priority_ea) memcpy(attr->priority, vm_base + priority_ea, CELL_SPURS_MAX_SPU);
+     printf("[cellSpurs] _TasksetAttributeInitialize(rev=%u)\n", revision);
+     return CELL_OK;
+ }
+diff --git a/tools/test_spurs_taskset_size.py b/tools/test_spurs_taskset_size.py
+index aab2b0b..fe8b4d3 100644
+--- a/tools/test_spurs_taskset_size.py
++++ b/tools/test_spurs_taskset_size.py
+@@ -68,7 +68,8 @@ int main(void) {
+     expect(cellSpursCreateTaskset(spurs,ts,0,NULL,0)==0,"plain creation");
+     expect(vm_read32(0x4000+CSTS_SIZE_FIELD)==0x1900,"plain creation uses full default guest size");
+     clean(0x1900);
+-    expect(_cellSpursTasksetAttributeInitialize(attr,1,0,0x1234567841D09780ull,0x0102030405060708ull,8)==0,"attribute init with argument");
++    for (unsigned i=0;i<CELL_SPURS_MAX_SPU;i++) memory[0x3000+i]=(uint8_t)(i+1);
++    expect(_cellSpursTasksetAttributeInitialize(attr,1,0,0x1234567841D09780ull,(const u8*)(uintptr_t)0x3000,8)==0,"attribute init with argument");
+     const CellSpursTasksetAttribute* host_attr = (const CellSpursTasksetAttribute*)(memory+0x2000);
+     for (unsigned i=0;i<CELL_SPURS_MAX_SPU;i++)
+         expect(host_attr->priority[i]==i+1,"attribute retains priority byte order");
+@@ -78,6 +79,10 @@ int main(void) {
+     expect(cellSpursCreateTaskset(spurs,ts,0x123456789ull,NULL,0)==0 &&
+            vm_read32(0x4000+CSTS_ARGS)==1 && vm_read32(0x4000+CSTS_ARGS+4)==0x23456789u,
+            "plain creation stores its argument");
++    CellSpursTasksetAttribute saved=*host_attr;
++    expect((uint32_t)_cellSpursTasksetAttributeInitialize(attr,1,0,0,(const u8*)(uintptr_t)0xFFFC,8)==0x8041090Du,
++           "priority array must be fully backed");
++    expect(memcmp(host_attr,&saved,sizeof saved)==0,"bad priority backing preserves attribute");
+     puts("PASS: real taskset requested-size retention, argument and initialization");
+ }
+ '''
+-- 
+2.55.0
+

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""make_spu_overlays.py -- lift MultiStream's DSP plugin block where it actually runs.
+"""make_spu_overlays.py -- lift MultiStream's DSP plugin banks where they run.
 
 Ported from Drakengard 3's port, soyjxck/dod3-recomp 96df4c3 tools/make_spu_overlays.py
 (MIT, (c) soyjxck): the `wrap` + `register` steps for the DSP block. Its `standin`
@@ -19,20 +19,22 @@ overlay region (spu_overlay_register_sig_region, patch T007-audio-pacing-devflas
 sig-region): the runtime recognises the GET by the block's first 16 bytes, because the
 heap copy's address differs from run to run.
 
-SARPBC's layout (both 01.02 and 01.09 use MultiStream from SDK 420), from a dump of
-that GET (SPU_DUMP_OVL=<dir>,0x37000, 2026-10-19, 01.09): the i3dl2 reverb text at
-+0x0000 (0x27C0 bytes) and the parametric EQ at +0x2800 (0x690 bytes), each byte for
-byte the ELF's executable PT_LOAD (no relocation applied). The filter plugin is not
-loaded. dod3's 2013 MultiStream packs three plugins at 0x0/0x2000/0x2900, so the table
-below is per title. A different plugin set or order arrives with a different signature
-and misses, and the runtime reports "branched into unlifted LS 0x37xxx" again.
+SARPBC streams 12 KiB banks into the SAME LS 0x37000 swap area. The first bank
+(01.09 dump, 2026-10-19) contains i3dl2 reverb at +0 (0x27C0 bytes) and parametric
+EQ at +0x2800 (0x690 bytes). When MP3 starts, the mixer also loads the next bank,
+containing the filter plugin at +0 (0x500 bytes; traced 2026-10-20). Register each
+bank with a distinct image id and content signature: the filter's 0x37010 entry
+must not dispatch the stale reverb lift at that same address. No runtime change
+is needed. Both versions use MultiStream SDK 420; the 01.02 bank layout remains
+unverified at runtime. dod3's 2013 layout differs, so these tables are per title.
 
 Usage (tools/relift.sh runs it after build_spu_workloads.py):
-  make_spu_overlays.py --spu <SPU_DIR> [--ps3recomp <dir>]
+  make_spu_overlays.py --spu <SPU_DIR> [--output <dir>] [--ps3recomp <dir>]
+  --output keeps extracted inputs read-only and writes banks in a build directory.
 
-Writes <SPU_DIR>/spu_ovl_msdsp_37000/{image.elf,spu_recomp.c,spu_recomp.h,lift.log}.
-The registration constructor is appended to that spu_recomp.c, so CMake's
-<SPU_DIR>/*/spu_recomp.c glob builds it with no other change.
+Writes <SPU_DIR>/{spu_ovl_msdsp_37000,spu_ovl_msfilter_37000}/ with image.elf,
+spu_recomp.c, spu_recomp.h and lift.log. Each registration constructor is appended
+to its spu_recomp.c, so CMake's glob builds both without other changes.
 """
 import argparse
 import os
@@ -51,6 +53,10 @@ MSDSP_IMAGE_ID = 0x4D534401
 PLUGINS = [
     ("mstream_dsp_i3dl2.pic", 0x0000),
     ("mstream_dsp_para_eq.pic", 0x2800),
+]
+BANKS = [
+    (MSDSP_NAME, MSDSP_IMAGE_ID, PLUGINS),
+    ("spu_ovl_msfilter_37000", MSDSP_IMAGE_ID + 1, [("mstream_dsp_filter.pic", 0)]),
 ]
 
 BI_R0, NOP, LNOP = 0x35000000, 0x4020007F, 0x00200000
@@ -89,7 +95,7 @@ def find_plugins(spu_dir):
     found = {}
     for d in sorted(spu_dir.iterdir()):
         elf_path = d / "image.elf"
-        if d.name == MSDSP_NAME or not elf_path.is_file():
+        if d.name in {name for name, _, _ in BANKS} or not elf_path.is_file():
             continue
         elf = elf_path.read_bytes()
         m = re.search(rb"mstream_dsp_[a-z0-9_]+\.pic", elf)
@@ -98,11 +104,11 @@ def find_plugins(spu_dir):
     return found
 
 
-def build_msdsp(spu_dir):
-    """-> (block at MSDSP_LSA, entry seeds, signature, span)."""
+def build_msdsp(spu_dir, layout=PLUGINS):
+    """-> (one bank at MSDSP_LSA, entry seeds, signature, span)."""
     plugins = find_plugins(spu_dir)
     block, entries = bytearray(), []
-    for name, at in PLUGINS:
+    for name, at in layout:
         if name not in plugins:
             sys.exit(f"make_spu_overlays: {name} not among the lifted SPU images in {spu_dir}")
         entry, va, code = text_segment(plugins[name])
@@ -129,24 +135,17 @@ def debase_includes(path):
         path.write_text(new, encoding="utf-8")
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    root = Path(__file__).resolve().parent.parent
-    ap.add_argument("--spu", required=True, type=Path, help="SPU_DIR (src/spu_gen of the version)")
-    ap.add_argument("--ps3recomp", type=Path,
-                    default=Path(os.environ.get("PS3RECOMP") or root / "external/ps3recomp"))
-    args = ap.parse_args()
-    tools = args.ps3recomp / "tools"
+def lift_bank(spu_dir, tools, name, image_id, layout, output_dir=None):
     sys.path.insert(0, str(tools))
     from wrap_spu_elf import wrap as wrap_elf
 
-    block, entries, sig, span = build_msdsp(args.spu)
-    out = args.spu / MSDSP_NAME
+    block, entries, sig, span = build_msdsp(spu_dir, layout)
+    out = (output_dir or spu_dir) / name
     out.mkdir(parents=True, exist_ok=True)
     elf = out / "image.elf"
     elf.write_bytes(wrap_elf(block, base=MSDSP_LSA, entry=entries[0]))
 
-    prefix = MSDSP_NAME + "_"
+    prefix = name + "_"
     extra = ",".join(f"0x{e:X}" for e in sorted(set(entries[1:])))
     cmd = [sys.executable, str(tools / "spu_lifter.py"), "--auto-functions", str(elf),
            "--symbol-prefix", prefix, "--extra-funcs", extra, "-o", str(out)]
@@ -161,24 +160,36 @@ def main():
     with open(src, "a", encoding="utf-8") as f:
         f.write(f"""
 /* ---- GENERATED by tools/make_spu_overlays.py ----------------------------------
- * MultiStream's DSP plugin block ({", ".join(f"{n} @ +0x{a:X}" for n, a in PLUGINS)}),
- * lifted at LS 0x{MSDSP_LSA:X} and registered under image id 0x{MSDSP_IMAGE_ID:X}: the
+ * MultiStream's DSP bank ({", ".join(f"{n} @ +0x{a:X}" for n, a in layout)}),
+ * lifted at LS 0x{MSDSP_LSA:X} and registered under image id 0x{image_id:X}: the
  * runtime makes it a resident code span of the mixer's context when a GET of >= 512
- * bytes starts with these 16 bytes (the i3dl2 plugin's .SpuGUID). */
+ * bytes starts with these 16 bytes (the first plugin's .SpuGUID). */
 extern void spu_begin_image(int image_id);
 extern void spu_overlay_register_sig_region(const uint8_t sig[16], uint32_t span, int image_id);
 
 __attribute__((constructor)) static void {prefix}overlay_register(void)
 {{
     static const uint8_t sig[16] = {{ {sig_c} }};
-    spu_begin_image(0x{MSDSP_IMAGE_ID:X});
+    spu_begin_image(0x{image_id:X});
     {prefix}spu_recomp_register();
     spu_begin_image(0);
-    spu_overlay_register_sig_region(sig, 0x{span:X}u, 0x{MSDSP_IMAGE_ID:X});
+    spu_overlay_register_sig_region(sig, 0x{span:X}u, 0x{image_id:X});
 }}
 """)
-    print(f"make_spu_overlays: {MSDSP_NAME}: {len(block):#x} bytes at LS 0x{MSDSP_LSA:X}, "
-          f"{len(set(entries))} seeds, image id 0x{MSDSP_IMAGE_ID:X} -> {src}")
+    print(f"make_spu_overlays: {name}: {len(block):#x} bytes at LS 0x{MSDSP_LSA:X}, "
+          f"{len(set(entries))} seeds, image id 0x{image_id:X} -> {src}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    root = Path(__file__).resolve().parent.parent
+    ap.add_argument("--spu", required=True, type=Path, help="SPU_DIR (src/spu_gen of the version)")
+    ap.add_argument("--output", type=Path, help="Write banks here instead of modifying SPU_DIR")
+    ap.add_argument("--ps3recomp", type=Path,
+                    default=Path(os.environ.get("PS3RECOMP") or root / "external/ps3recomp"))
+    args = ap.parse_args()
+    for name, image_id, layout in BANKS:
+        lift_bank(args.spu, args.ps3recomp / "tools", name, image_id, layout, args.output)
 
 
 if __name__ == "__main__":

@@ -79,6 +79,46 @@ in turn waits for the RHI's SPURS job chain: `cellSpursRunJobChain` and then an
 `appSleep` poll on a counter the jobs advance (01.02 `func_006DDFF0`, counter at
 `obj+0x21180`; `func_006C61F0` is `appSleep`: float seconds → `sys_timer_usleep`).
 
+## Arena-loading slab service (01.09, T037, 2026-10-20) **[seen]**
+
+`CellSlabMemoryManager` (OPD `0x0122C800`, code `0x008FFCB8`) receives on
+queue 5, attached to SPURS port 16. It interprets the low 24 bits of event
+`data2` as a service command: 0 exits (`0x008FFF6C`), 1 replenishes the pool
+(`0x008FFF64`), and 2 frees blocks. This queue is not a generic job-chain
+completion queue.
+
+In the failing boot, `jc_signal_done` broadcasts ShaderPatching job 0 to
+queue 5 with `data2=0`; the next log line shows the slab thread exiting with
+status 0. Later, after `MP_SOCCARARENA.XXX` opens, collision tasks spin at
+LS `0x0E6C4` / `0x0E7C4`, waiting on pool EA `0x0125E000`. PPU PhysX blocks
+in `func_008482B8` / `cellSpursQueuePopBody`. The game is waiting for a
+service thread that the HLE's unrelated notification already shut down.
+Evidence: pi worktree `analysis/boot_check/20261020-092526-670246/run.log`,
+lines 6252–6255, and its final gdb dump.
+
+Claude's taskset-attribute fix is also required: preserve the 64-bit argument
+`0x000000100125E000` through `_cellSpursTasksetAttributeInitialize` and
+`cellSpursCreateTasksetWithAttribute`. Without it, the tasks poll EA 0 rather
+than the slab pool. The argument fix alone does not keep the slab service
+alive.
+
+The repair ports the fork's `SPURS_JC_DONE_EVENTS` compatibility gate and
+defaults it to 0 in `src/overrides/spurs_config.cpp`. Runtime compatibility
+remains on for other ports; explicit environment values win. This suppresses
+fabricated broadcasts, not real SPU notifications or physics work.
+
+A 140 s boot verifies that the slab thread stays alive, collision tasks
+return, and `PYRAMID_COLLECTBOOST.XXX` loads after the arena package. The
+next stall is in the render thread's flip callback (T044), not physics:
+3316 flips, 3685 zlib requests, no unresolved imports. See pi worktree
+`analysis/boot_check/20261020-093821-685745/`. This is progress into level
+loading, not proof of a playable match.
+
+The priority argument to `_cellSpursTasksetAttributeInitialize` is a guest
+byte-array pointer. At `0x0084900C`, r7 names the table at sp+0xA8. Copy its
+bytes, not the numeric bytes of that address; the follow-up fixture checks
+nonuniform priorities and rejects partial backing before changing the attribute.
+
 ## Threads *(UE3, verify against `sys_ppu_thread_create` calls at boot)*
 
 | Thread | Role |

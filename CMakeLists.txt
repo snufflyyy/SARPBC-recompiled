@@ -205,6 +205,40 @@ elseif(PORT_ENABLE_SPU)
     endif()
 endif()
 
+# Older shared lifts contain only MultiStream's first DSP bank. Generate both
+# banks privately when the filter bank is absent; building must never relift or
+# overwrite the shared SPU_DIR. Fresh tools/relift.sh output already has both.
+if(PORT_ENABLE_SPU AND
+   EXISTS "${SPU_DIR}/spu_ovl_msdsp_37000/spu_recomp.c" AND
+   NOT EXISTS "${SPU_DIR}/spu_ovl_msfilter_37000/spu_recomp.c")
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(_overlay_python "${Python3_EXECUTABLE}")
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.venv/bin/python")
+        set(_overlay_python "${CMAKE_CURRENT_SOURCE_DIR}/.venv/bin/python")
+    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.venv/Scripts/python.exe")
+        set(_overlay_python "${CMAKE_CURRENT_SOURCE_DIR}/.venv/Scripts/python.exe")
+    endif()
+    set(_overlay_dir "${CMAKE_CURRENT_BINARY_DIR}/spu_audio")
+    set(_overlay_sources "")
+    set(_overlay_outputs "")
+    foreach(_bank IN ITEMS spu_ovl_msdsp_37000 spu_ovl_msfilter_37000)
+        list(APPEND _overlay_sources "${_overlay_dir}/${_bank}/spu_recomp.c")
+        list(APPEND _overlay_outputs "${_overlay_dir}/${_bank}/spu_recomp.c"
+                                     "${_overlay_dir}/${_bank}/spu_recomp.h")
+    endforeach()
+    file(GLOB _overlay_inputs CONFIGURE_DEPENDS "${SPU_DIR}/*/image.elf")
+    file(GLOB _overlay_tools CONFIGURE_DEPENDS "${PS3RECOMP_DIR}/tools/*spu*.py")
+    add_custom_command(OUTPUT ${_overlay_outputs}
+        COMMAND "${_overlay_python}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_spu_overlays.py"
+                --spu "${SPU_DIR}" --output "${_overlay_dir}" --ps3recomp "${PS3RECOMP_DIR}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_spu_overlays.py"
+                ${_overlay_inputs} ${_overlay_tools}
+        COMMENT "Lifting both MultiStream DSP banks into the build directory"
+        VERBATIM)
+    list(REMOVE_ITEM SPU_SOURCES "${SPU_DIR}/spu_ovl_msdsp_37000/spu_recomp.c")
+    list(APPEND SPU_SOURCES ${_overlay_sources})
+endif()
+
 # Port-side native replacements and overrides (see AGENTS.md rule 3).
 file(GLOB PORT_OVERRIDES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/overrides/*.cpp")
 find_package(ZLIB REQUIRED)   # src/overrides/edgezlib.cpp

@@ -324,6 +324,13 @@ void decode_frame(uint8_t* ls, const args_t* a, dod3_mp3* d, result_t* r)
     r->samples = 0;
     r->nch = 0;
     if (f[0] == 'I' && f[1] == 'D' && f[2] == '3') {
+        /* args_ok covers the four-byte frame header, not ID3v2's size field.
+         * A truncated tag at LS end must use the decode-error ABI, not read
+         * beyond the local-store allocation. ID3v1 needs only the prefix. */
+        if (f[3] != 1 && !ls_ok(a->in, 10)) {
+            r->ret = 0xFFFFFFFFu;
+            return;
+        }
         r->cons = f[3] == 1 ? 128u
                             : 10u + ((uint32_t)(f[6] & 0x7F) << 21 | (uint32_t)(f[7] & 0x7F) << 14 |
                                      (uint32_t)(f[8] & 0x7F) << 7 | (f[9] & 0x7F));

@@ -112,6 +112,7 @@ tools/boot_check.sh 60                 # 60 s run, full report (~70 lines)
 tools/boot_check.sh 60 --quiet         # just the summary line
 tools/boot_check.sh 60 --gdb           # + every guest thread's stack at the end
 tools/boot_check.sh 60 --version 0109  # the staged 01.09 build (versions/0109/{build,game,vfs})
+tools/boot_check.sh 120 --version 0109 --pad 'cross@40*4/5,cross@70*4/8'  # scripted offline input
 BUILD_DIR=... GAME_DIR=... VFS_DIR=... tools/boot_check.sh 60   # same variables as tools/run.sh
 tools/boot_report.py report analysis/run9.log       # report on any old log (no times/frames)
 grep -v -E "$(tools/boot_report.py noise)" run.log  # the noise filter it uses
@@ -146,6 +147,15 @@ Example summary (01.02, 2026-10-18):
   requests #0-3 and prints its total only at a clean exit. A plain `tools/run.sh` log
   therefore shows "4 zlib requests" while ~1,500 are serviced in the first 10 s. Relative `BUILD_DIR`/`GAME_DIR`/`VFS_DIR` that do not exist
   from the current directory resolve against the main checkout, where `versions/` lives.
+- **Scripted input (T036):** `--pad 'BUTTON[+BUTTON][:POLLS]@SEC[*N/STEP],...'`
+  writes short presses through a per-run `PAD_FILE`. Default hold: 3 pad polls.
+  Repeats, combos and decimal seconds are supported; events are sorted by time.
+  Use `PAD_NO_HOST=1` to exclude desk controllers. `pad.log` records each scheduled
+  press and `meta.txt` retains the spec. Timing is from game launch, not the first
+  pad poll. Input state still depends on which screen the game has reached: an X
+  schedule alone does not prove a match started. Invalid/empty schedules fail
+  before launch; the limit is 10000 events. `tools/test_boot_pad.py` tests the
+  parser and writer without running the game.
 - **Killing:** it starts `timeout -k 5 -s TERM <secs+30> build/sarpbc ...` and records the
   child PID; it signals that PID only while `/proc/<pid>/stat` still names its own
   `timeout` as parent (so PID reuse can't hit another agent's game). Verified by running two

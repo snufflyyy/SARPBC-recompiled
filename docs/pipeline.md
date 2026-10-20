@@ -158,11 +158,21 @@ unsupported. `src/spu_gen/inventory.json` lists each image's status and reason. 
 the images up from `src/spu_gen/*/spu_recomp.c` (reconfigure after a relift).
 
 Then `tools/make_spu_overlays.py --spu src/spu_gen --ps3recomp external/ps3recomp` (T007)
-rebuilds MultiStream's DSP plugin block (i3dl2 at +0, para_eq at +0x2800, 0x2E90 bytes),
-lifts it at LS 0x37000 into `src/spu_gen/spu_ovl_msdsp_37000/` and registers it by its first
-16 bytes (patch 0023's `spu_overlay_register_sig_region`). Without it the mixer branches into
-unlifted LS 0x37018 and MultiStream's event flag (`0x01372000` on 01.09) never gets set. It
-must run after `build_spu_workloads.py`, which deletes `src/spu_gen`.
+rebuilds two MultiStream DSP banks at the same LS 0x37000: i3dl2 + parametric EQ
+(0x2E90 bytes) and the filter (0x500 bytes). It writes `spu_ovl_msdsp_37000/` and
+`spu_ovl_msfilter_37000/` under the output directory, with separate image ids and
+content signatures (patch 0023's `spu_overlay_register_sig_region`). The filter
+bank is loaded when MP3 streams start; omitting it kills the mixer at LS 0x37010.
+The step must follow `build_spu_workloads.py`, which deletes `src/spu_gen`.
+
+For older shared lifts that have only the first bank, CMake generates both in
+its own build directory (`spu_audio/`) and excludes the old first-bank source
+from that target. The normal build therefore needs no shared relift. It uses
+`.venv/bin/python` (or `.venv/Scripts/python.exe`), with the configured Python as
+fallback. Input ELFs and relevant SPU tools are build dependencies. The manual
+read-only equivalent is `tools/make_spu_overlays.py --spu <SPU_DIR> --output <BUILD_DIR>/spu_audio`.
+The two generated constructors must be linked together; never register both
+banks under one image id.
 
 ## Regenerating (`tools/relift.sh`)
 

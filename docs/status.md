@@ -18,8 +18,9 @@ tool changed).
 **Headline: 01.09 reaches the main menu at ~30 fps; the goal is 60 fps** (user, 2026-10-19). The
 intro is Loading, ESRB with the car, Powered by Unreal, the Psyonix logo, the safe-area screen
 (needs X), then the menu: CROSS at 45 s and again at 50 s by `PAD_FILE` (T036 will make that
-`boot_check --pad`). New Game opens MP_SOCCARARENA.XXX, then the log goes silent (T037). There's no
-Bink in 01.09.
+`boot_check --pad`). New Game now loads MP_SOCCARARENA + PYRAMID_COLLECTBOOST and keeps presenting (T037, T044),
+but the arena frame is mostly black with corrupt rectangles (T045, priority 1). Real MP3 audio
+plays (T007). `boot_check --pad` scripts the presses (T036). There's no Bink in 01.09.
 
 **Last verified on `main` (fc9cdf4, 2026-10-20, `PS3_VERBOSE=0`, under the boot lock):** a 120 s
 boot_check is PROGRESSING with 3513 flips; the main menu runs at **29.5 fps** (1 s windows
@@ -94,6 +95,19 @@ user has permission.
   POSIX boot scaffold gets this UE3 title to the menus on Linux.
 
 ## Log
+
+### 2026-10-20 (session 9, cont.): New Game loads the arena; audio plays
+- pi (merged by claude after pi ran out of usage): T037: the arena hang had two SPURS causes.
+  The taskset attribute dropped its 64-bit argument (collision tasks polled EA 0), and the HLE's
+  synthetic job-chain completion broadcast (`data2=0`) told the slab service thread
+  (`func_008FFCB8`) to exit, so collision tasks waited forever for slabs. Patches T037-1/2/3
+  (+ `src/overrides/spurs_config.cpp`: `SPURS_JC_DONE_EVENTS=0`). T044: GCM callbacks stay on
+  the interrupt worker (the render thread had run the flip handler on itself and deadlocked).
+  T007: MultiStream's second DSP bank (filter) is now lifted too; real MP3 audio reaches
+  PulseAudio. T036: `boot_check --pad`. Verified (claude, 120 s, `--pad
+  'cross@40*4/5,cross@70,r2:120@90,cross@100'`): MP_SOCCARARENA + PYRAMID_COLLECTBOOST load,
+  6025 flips, frames presented to the end, unresolved 0. **The arena frame is mostly black
+  with small corrupt rectangles** (T045, next).
 
 ### 2026-10-20 (session 9, cont.): project audit (T039)
 - User asked for an audit of the whole project, to keep it clean and uniform as it grows.
