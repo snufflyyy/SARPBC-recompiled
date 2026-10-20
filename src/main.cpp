@@ -44,6 +44,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <string>
 #ifndef _WIN32
 #include <sys/mman.h>
 #endif
@@ -304,8 +305,7 @@ static DWORD WINAPI frame_clock(LPVOID)
  * <vfs> is argv[2], else ./vfs. Each variable already set in the environment
  * is left alone. */
 #ifdef _WIN32
-/* The two POSIX calls below, for the later Windows build. */
-static char* realpath(const char* path, char* out) { return _fullpath(out, path, 1024); }
+/* Environment defaults for the later Windows build. */
 static int setenv(const char* k, const char* v, int overwrite)
 {
     if (!overwrite && getenv(k)) return 0;
@@ -316,31 +316,38 @@ static int setenv(const char* k, const char* v, int overwrite)
 #define TITLE_ID   "NPUB30035"
 #define BOOT_PATH  "/dev_hdd0/game/" TITLE_ID "/USRDIR/EBOOT.BIN"
 
-static char s_vfs_root[1024];
+static std::string s_vfs_root;
 
 static bool setup_vfs(const char* vfs_arg)
 {
-    char vfs[1024];
-    if (!realpath(vfs_arg, vfs)) {
-        fprintf(stderr, "ERROR: VFS root %s not found -- run tools/extract.sh\n", vfs_arg);
+    /* realpath has no destination-size parameter. Let the platform allocate
+     * its result, then retain dynamic strings through every derived path. */
+#ifdef _WIN32
+    char* resolved = _fullpath(nullptr, vfs_arg, 0);
+#else
+    char* resolved = realpath(vfs_arg, nullptr);
+#endif
+    if (!resolved) {
+        fprintf(stderr, "ERROR: cannot resolve VFS root %s -- check the path and run tools/extract.sh\n", vfs_arg);
         return false;
     }
-    char hdd0[1200], game[1300];
-    snprintf(hdd0, sizeof hdd0, "%s/dev_hdd0", vfs);
-    snprintf(game, sizeof game, "%s/game/" TITLE_ID, hdd0);
+    const std::string hdd0 = std::string(resolved) + "/dev_hdd0";
+    free(resolved);
+    const std::string game = hdd0 + "/game/" TITLE_ID;
 
-    setenv("PS3_VFS_ROOT", hdd0, 0);
-    setenv("PS3_HDD0_ROOT", hdd0, 0);
-    setenv("PS3_USRDIR_BASE", game, 0);
-    setenv("PS3_BOOT_PATH", BOOT_PATH, 0);
-    setenv("PS3_TITLE", "Supersonic Acrobatic Rocket-Powered Battle-Cars", 0);
+    if (setenv("PS3_VFS_ROOT", hdd0.c_str(), 0) ||
+        setenv("PS3_HDD0_ROOT", hdd0.c_str(), 0) ||
+        setenv("PS3_USRDIR_BASE", game.c_str(), 0) ||
+        setenv("PS3_BOOT_PATH", BOOT_PATH, 0) ||
+        setenv("PS3_TITLE", "Supersonic Acrobatic Rocket-Powered Battle-Cars", 0)) {
+        fprintf(stderr, "ERROR: cannot configure the VFS environment\n");
+        return false;
+    }
+    const std::string sfo = game + "/PARAM.SFO";
+    cellGame_init_from_paramsfo(sfo.c_str());
 
-    char sfo[1400];
-    snprintf(sfo, sizeof sfo, "%s/PARAM.SFO", game);
-    cellGame_init_from_paramsfo(sfo);
-
-    snprintf(s_vfs_root, sizeof s_vfs_root, "%s", getenv("PS3_VFS_ROOT"));
-    ppu_vfs_root = s_vfs_root;
+    s_vfs_root = getenv("PS3_VFS_ROOT");
+    ppu_vfs_root = s_vfs_root.c_str();   /* stable until the next setup, before guest threads start */
     return true;
 }
 

@@ -108,6 +108,19 @@ T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena
 
 ## Log
 
+### 2026-10-20: critical native boundary fixes (T047, pi)
+- Native Edge-zlib now checks full guest spans, decoded-size arithmetic and counter
+  alignment; rejects unfinished/incorrect-length streams without publishing completion;
+  streams skipped bytes through fixed scratch space; and propagates event-delivery errors.
+  VFS setup uses allocated canonical paths and owned strings, preserving long overrides
+  without truncation. Audit A01/A02 remediation: [project-audit.md](project-audit.md).
+- Private 01.09 Release build passes. All 87 discovered scripts and three explicit nested
+  SDL/Vulkan suites return zero; 16 zlib + 5 VFS tests also pass under ASan/UBSan. A 120 s
+  boot renders the tutorial arena (3717 zlib requests, none rejected; 2463 flips, unresolved
+  0). Antigravity's independently completed patch 0050 is retained unchanged and integrated
+  into the private build; the combined stack passes all 87 scripts again and a 30 s smoke
+  (3279 zlib requests, 717 flips, unresolved 0). No FPS or Windows claim is made.
+
 ### 2026-10-20: Loading screen orientation fixed (T038, antigravity)
 - Fixed the "Loading..." splash screen rendering upside down. UE3's `LOADSCREEN.VPO` is an unprojected 2-instruction passthrough shader (`MOV HPOS, v0; MOV TEX0, v8`) with 0 constants. On RSX with negative viewport scale (`scale[1] = -360`), `pos.y = -1` mapped to top (`yw = 720`, row 0 of texture) and `pos.y = +1` to bottom (`yw = 0`). In Vulkan, glslang's `shader.setInvertY(true)` inverted this unprojected quad vertically, drawing "Loading..." upside down.
 - Patch `0050-loadscreen-passthrough-orientation`: `rsx_draw_engine.c` flips `xf[1]` and `xf[5]` for 2-instruction passthrough vertex programs without projection matrices. Verified: `frame_first_lit.png` shows upright "Loading...", while all subsequent passes (ESRB car, Psyonix logo, safe-area screen, menus, HUD, and 3D arena) remain 100% upright without regression. All 85 lint tests pass.

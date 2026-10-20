@@ -5,8 +5,9 @@
 Keep the recompilation simple to modify without losing the working 01.09 boot.
 This is an evidence-backed review, not a claim that the whole runtime is safe.
 Baseline: superproject `8252d70`, upstream `749182e`, 49 patch files / 67 commits.
-Implementation files were not changed. T038's loading-screen orientation work is
-owned by Antigravity and was not modified.
+The audit itself did not change implementation files; later T047 remediations are
+recorded under A01/A02 below. T038's loading-screen orientation work is owned by
+Antigravity and was not modified.
 
 **Verdict: keep the architecture; strengthen its safety and verification boundaries.**
 The port does not need a framework, plugin system, wholesale rewrite, or more layers.
@@ -58,7 +59,24 @@ not preserved by the current runner.
 Priority is cleanup order, not a remote-exploit severity score. The current application
 runs local game files; no remote attack path was established by this audit.
 
-### A01 — High: native zlib lacks a checked guest-memory boundary
+### A01 — High: native zlib lacks a checked guest-memory boundary (fixed in T047)
+
+**Remediation:** request/queue, actual input/output, optional counter and full 128-byte
+flag spans are checked before access, against the 32-bit guest limit and a nonzero
+`ppu_vm_size` when provided. Counter alignment and zero-count underflow are rejected.
+Wide decoded-size arithmetic rejects overflow; prefix/suffix bytes go into fixed
+scratch space rather than a request-sized vector. Success requires Z_STREAM_END and
+an exact decoded length. Invalid requests and decode failures return a SPURS error
+without decrementing the work counter or signalling successful completion. An event-
+delivery error is propagated after successful work/counter completion; that decrement
+is not rolled back or retried, which could race other requests.
+This is the port's synchronous rejection policy, not a newly claimed firmware error
+ABI: 01.09 caller `func_00B55024` checks the push result at `0x00B55168` and enters
+its error path on nonzero. A failed inflate may have written partial output; callers
+must not consume it. The checks bound address arithmetic, not allocation ownership
+inside the deliberately flat guest mapping. Synthetic coverage: `tools/test_edgezlib.py`.
+
+The original audit evidence and recommendation follow for traceability.
 
 **Evidence:** `src/overrides/edgezlib.cpp:105-160` checks queue element size, then
 reads the request and passes guest addresses/lengths directly to `memmove`, zlib,
@@ -79,7 +97,23 @@ truncated-stream and failure-completion behavior from the guest ABI, rather than
 blindly returning an error that might strand a waiter. Add synthetic copy/inflate,
 truncation, overflow, boundary and completion tests. No general LFQueue framework.
 
-### A02 — High: the POSIX VFS resolver gives realpath an undersized buffer
+### A02 — High: the POSIX VFS resolver gives realpath an undersized buffer (fixed in T047)
+
+**Remediation:** platform-allocated resolution and owned strings replace every fixed
+VFS path buffer in setup. Existing environment values retain precedence without
+truncation; failed environment updates stop setup before metadata loading. Synthetic
+coverage: `tools/test_vfs.py`; platform limits and upstream filesystem code still apply.
+
+**T047 verification (Linux/Clang):** private 01.09 Release build; all 87 discovered
+scripts return zero plus three explicit nested SDL/Vulkan runners; 16 zlib and five
+VFS tests also pass with ASan/UBSan. A 120 s boot renders the tutorial arena with
+3717 zlib requests, none rejected, 2463 flips and zero unresolved imports. Antigravity's
+subsequent patch 0050 is integrated unchanged into the private build; the combined
+stack passes the 87-script gate again and a 30 s smoke (3279 zlib requests, 717 flips,
+unresolved 0). The private runtime tree matches main's patched tree. GCC is absent;
+Windows was not tested. No new performance claim is made.
+
+The original audit evidence and recommendation follow for traceability.
 
 **Evidence:** `src/main.cpp:321-324` passes `char vfs[1024]` to POSIX `realpath`.
 That API has no destination-length argument; valid resolved paths can exceed 1024

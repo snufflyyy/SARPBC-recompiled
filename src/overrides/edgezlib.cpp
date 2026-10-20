@@ -33,13 +33,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <atomic>
-#include <vector>
+#include <array>
 #include <zlib.h>
 
 #include "ppu_recomp.h"
 
 extern "C" {
 extern uint8_t* vm_base;
+extern uint32_t ppu_vm_size;
 typedef void (*hle_ctx_fn)(ppu_context*);
 void ps3_hle_register_ctx(uint32_t nid, const char* name, hle_ctx_fn fn);
 typedef struct CellSpursEventFlag CellSpursEventFlag;
@@ -51,6 +52,23 @@ namespace {
 constexpr uint32_t kNidLFQueuePushBody = 0x8A85674D;
 constexpr uint32_t kQueueSizeOffset = 0x10;          /* see _cellSpursLFQueueInitialize */
 constexpr uint32_t kSpursTaskErrorStat = 0x8041090F;
+constexpr uint32_t kSpursTaskErrorInval = 0x80410902;
+constexpr uint32_t kSpursTaskErrorAlign = 0x80410910;
+constexpr uint32_t kEventFlagBytes = 128;
+
+/* ppu_vm_size=0 is the runner's full 32-bit mapping convention. A nonzero
+ * size (also used by synthetic fixtures) bounds the actual guest backing.
+ * Do not count the runner's extra 64 KiB guard as guest address space. */
+bool guest_range(uint32_t ea, uint64_t bytes)
+{
+    if (!bytes) return true;
+    if (!ea || bytes > 0x100000000ull - ea) return false;
+    const uint64_t end = (uint64_t)ea + bytes;
+    const uintptr_t base = (uintptr_t)vm_base;
+    return (vm_base || ppu_vm_size) &&
+           (!ppu_vm_size || end <= ppu_vm_size) && base <= UINTPTR_MAX - ea &&
+           bytes - 1 <= UINTPTR_MAX - (base + ea);
+}
 
 uint32_t be32(uint32_t ea)
 {
@@ -60,8 +78,7 @@ uint32_t be32(uint32_t ea)
 
 bool trace()
 {
-    static int on = -1;
-    if (on < 0) on = getenv("SARPBC_ZLIB_TRACE") ? 1 : 0;
+    static const bool on = getenv("SARPBC_ZLIB_TRACE") != nullptr;
     return on;
 }
 
@@ -69,50 +86,75 @@ std::atomic<unsigned long long> s_requests, s_failed, s_bytes_in, s_bytes_out;
 
 void report()
 {
-    fprintf(stderr, "[edgezlib] %llu requests (%.1f MB -> %.1f MB), %llu failed to inflate\n",
+    fprintf(stderr, "[edgezlib] %llu requests (%.1f MB -> %.1f MB), %llu rejected requests\n",
             s_requests.load(), s_bytes_in.load() / 1048576.0, s_bytes_out.load() / 1048576.0,
             s_failed.load());
 }
 
-/* Inflate the raw deflate stream at `in` into `out`, exactly `total` bytes. */
-bool inflate_exact(const uint8_t* in, uint32_t in_size, uint8_t* out, uint32_t total)
+/* Stream the prefix/suffix into fixed scratch space instead of allocating
+ * skip_begin + total + skip_end bytes from untrusted request lengths. The
+ * two skips are u16; the caller checks the combined size in wide arithmetic. */
+bool inflate_exact(const uint8_t* in, uint32_t in_size, uint8_t* out, uint32_t total,
+                   uint16_t skip_begin, uint16_t skip_end)
 {
-    z_stream z;
-    memset(&z, 0, sizeof z);
+    z_stream z{};
     if (inflateInit2(&z, -15) != Z_OK) return false;
     z.next_in = const_cast<Bytef*>(in);
     z.avail_in = in_size;
-    z.next_out = out;
-    z.avail_out = total;
-    const int rc = inflate(&z, Z_FINISH);
-    const bool ok = (rc == Z_STREAM_END || rc == Z_OK || rc == Z_BUF_ERROR) && z.total_out == total;
+    std::array<uint8_t, UINT16_MAX> discard;
+    uint8_t* targets[] = { discard.data(), out, discard.data() };
+    const uint32_t lengths[] = { skip_begin, total, skip_end };
+    int rc = Z_OK;
+    for (unsigned i = 0; i < 3 && rc == Z_OK; ++i) {
+        z.next_out = targets[i];
+        z.avail_out = lengths[i];
+        while (z.avail_out && rc == Z_OK) rc = inflate(&z, Z_NO_FLUSH);
+    }
+    /* An exact-sized output can fill before zlib consumes the end marker.
+     * Give it one byte to finish, but reject a stream that writes that byte. */
+    uint8_t extra;
+    if (rc == Z_OK) {
+        z.next_out = &extra;
+        z.avail_out = 1;
+        rc = inflate(&z, Z_FINISH);
+    }
+    const uint64_t expected = (uint64_t)skip_begin + total + skip_end;
+    const bool ok = rc == Z_STREAM_END && z.total_out == expected;
     inflateEnd(&z);
     return ok;
 }
 
-/* Atomically decrement the big-endian u32 at ea; returns the new value. */
-uint32_t counter_decrement(uint32_t ea)
+/* Never wrap a depleted shared work counter, even if another caller changed
+ * it after validation. Publish successful output before the completion CAS. */
+bool counter_decrement(uint32_t ea, uint32_t& remaining)
 {
     auto* p = reinterpret_cast<uint32_t*>(vm_base + ea);
     uint32_t old_raw = __atomic_load_n(p, __ATOMIC_ACQUIRE), new_raw;
     do {
-        new_raw = __builtin_bswap32(__builtin_bswap32(old_raw) - 1);
+        const uint32_t old = __builtin_bswap32(old_raw);
+        if (!old) return false;
+        remaining = old - 1;
+        new_raw = __builtin_bswap32(remaining);
     } while (!__atomic_compare_exchange_n(p, &old_raw, new_raw, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
-    return __builtin_bswap32(new_raw);
+    return true;
+}
+
+void reject(ppu_context* ctx, uint32_t error, const char* reason)
+{
+    if (s_failed++ < 8) fprintf(stderr, "[edgezlib] request rejected: %s (0x%08X)\n", reason, error);
+    ctx->gpr[3] = error;
 }
 
 /* _cellSpursLFQueuePushBody(CellSpursLFQueue* queue, const void* buffer, bool isBlocking) */
 void lfqueue_push_body(ppu_context* ctx)
 {
     const uint32_t q = (uint32_t)ctx->gpr[3], buf = (uint32_t)ctx->gpr[4];
-    if (!q || !buf || be32(q + kQueueSizeOffset) != 32) {
-        static bool once = false;
-        if (!once) {
-            once = true;
-            fprintf(stderr, "[edgezlib] push onto a non-Edge-zlib LFQueue q=0x%08X size=%u -- unsupported\n", q,
-                    q ? be32(q + kQueueSizeOffset) : 0);
-        }
-        ctx->gpr[3] = kSpursTaskErrorStat;
+    if (!guest_range(q, kQueueSizeOffset + 4) || !guest_range(buf, 32)) {
+        reject(ctx, kSpursTaskErrorInval, "queue or descriptor outside guest backing");
+        return;
+    }
+    if (be32(q + kQueueSizeOffset) != 32) {
+        reject(ctx, kSpursTaskErrorStat, "unsupported non-Edge-zlib queue");
         return;
     }
     static bool s_atexit = (atexit(report), true);
@@ -124,7 +166,27 @@ void lfqueue_push_body(ppu_context* ctx)
     const uint32_t counter_ea = w[4] & ~1u, flag_ea = w[5];
     const bool do_inflate = w[4] & 1u;
     const uint16_t bits = (uint16_t)(w[6] >> 16);
-    const uint32_t skip_begin = w[6] & 0xFFFFu, skip_end = w[7] >> 16;
+    const uint16_t skip_begin = (uint16_t)w[6], skip_end = (uint16_t)(w[7] >> 16);
+
+    const uint64_t total = (uint64_t)skip_begin + out_size + skip_end;
+    const uint32_t read_size = do_inflate ? in_size : out_size;
+    if (!guest_range(in_ea, read_size) || !guest_range(out_ea, out_size) ||
+        (do_inflate && total > UINT32_MAX) ||
+        (counter_ea && !guest_range(counter_ea, 4)) ||
+        (flag_ea && !guest_range(flag_ea, kEventFlagBytes))) {
+        reject(ctx, kSpursTaskErrorInval, "request span or decoded size outside guest backing");
+        return;
+    }
+    if (counter_ea && (counter_ea & 3u)) {
+        reject(ctx, kSpursTaskErrorAlign, "unaligned work counter");
+        return;
+    }
+    const uint32_t pending = counter_ea ? __builtin_bswap32(__atomic_load_n(
+        reinterpret_cast<uint32_t*>(vm_base + counter_ea), __ATOMIC_ACQUIRE)) : 0;
+    if (counter_ea && !pending) {
+        reject(ctx, kSpursTaskErrorStat, "work counter already zero");
+        return;
+    }
 
     const unsigned long long n = s_requests++;
     if (trace() || n < 4)
@@ -132,32 +194,34 @@ void lfqueue_push_body(ppu_context* ctx)
                 "[edgezlib] #%llu %s in=0x%08X/%u out=0x%08X/%u counter=0x%08X(=%u) flag=0x%08X bits=0x%04X "
                 "skip=%u/%u\n",
                 n, do_inflate ? "inflate" : "copy", in_ea, in_size, out_ea, out_size, counter_ea,
-                counter_ea ? be32(counter_ea) : 0, flag_ea, bits, skip_begin, skip_end);
+                pending, flag_ea, bits, skip_begin, skip_end);
 
     bool ok = true;
     if (!do_inflate) {
-        memmove(vm_base + out_ea, vm_base + in_ea, out_size);
-    } else if (!skip_begin && !skip_end) {
-        ok = inflate_exact(vm_base + in_ea, in_size, vm_base + out_ea, out_size);
+        if (out_size) memmove(vm_base + out_ea, vm_base + in_ea, out_size);
     } else {
-        std::vector<uint8_t> tmp(skip_begin + out_size + skip_end);
-        ok = inflate_exact(vm_base + in_ea, in_size, tmp.data(), (uint32_t)tmp.size());
-        if (ok) memcpy(vm_base + out_ea, tmp.data() + skip_begin, out_size);
+        ok = inflate_exact(vm_base + in_ea, in_size, vm_base + out_ea, out_size, skip_begin, skip_end);
     }
     s_bytes_in += in_size;
     s_bytes_out += out_size;
-    if (!ok && s_failed++ < 8)
-        fprintf(stderr, "[edgezlib] #%llu in=0x%08X (%u B) did not inflate to %u B -- output is wrong\n", n, in_ea,
-                in_size, out_size);
+    if (!ok) {
+        /* 01.09 func_00B55024 checks the push result at 0x00B55168. A bad
+         * stream is not completed work: do not wake a waiter on corrupt data. */
+        reject(ctx, kSpursTaskErrorStat, "invalid or incomplete deflate stream");
+        return;
+    }
 
     /* The task's completion: count down, and on zero set the flag bits. This
      * title passes no counter (EA 0) -- one request per wait -- so then the
      * request alone completes the work and sets the flag. */
-    const bool done = counter_ea ? counter_decrement(counter_ea) == 0 : true;
-    if (done && flag_ea)
-        cellSpursEventFlagSet(reinterpret_cast<CellSpursEventFlag*>((uintptr_t)flag_ea), bits);
-
-    ctx->gpr[3] = 0;   /* CELL_OK */
+    uint32_t remaining = 0;
+    if (counter_ea && !counter_decrement(counter_ea, remaining)) {
+        reject(ctx, kSpursTaskErrorStat, "work counter depleted during request");
+        return;
+    }
+    ctx->gpr[3] = remaining == 0 && flag_ea
+        ? (uint32_t)cellSpursEventFlagSet(reinterpret_cast<CellSpursEventFlag*>((uintptr_t)flag_ea), bits)
+        : 0;   /* CELL_OK; never hide an event-delivery error. */
 }
 
 }  // namespace

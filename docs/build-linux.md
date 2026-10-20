@@ -77,6 +77,20 @@ tools/run.sh                 # build/sarpbc game/EBOOT.elf vfs, window + guest s
   `cmake -S external/ps3recomp -B build-rt -G Ninja -DPS3RECOMP_RSX_VULKAN=ON &&
   cmake --build build-rt --target ps3recomp_host && ./build-rt/ps3recomp_host --draw`.
 
+## Native boundary checks (T047)
+
+VFS setup asks `realpath` (Windows: `_fullpath`) to allocate the resolved path,
+then keeps the root, derived paths and `PS3_VFS_ROOT` override in owned strings.
+There is no 1024-byte destination or silent truncation in the port's setup code.
+Resolution or environment-setting failure stops boot before guest threads start.
+This does not establish long-path support in every upstream file-system module.
+
+`python3 tools/test_vfs.py` exercises the real setup function with synthetic short,
+long and missing paths, a long environment override, and a mocked environment failure.
+The fixture refuses unsafe fixed-buffer resolution rather than causing an overflow.
+`python3 tools/test_edgezlib.py` checks the native decompression boundary without game
+files; failure/completion semantics are recorded in [project-audit.md](project-audit.md).
+
 ## Graphics backend selection
 
 `src/main.cpp` picks the backend **at build time**: Vulkan when `PS3RECOMP_RSX_VULKAN`
