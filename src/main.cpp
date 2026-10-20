@@ -209,10 +209,12 @@ static DWORD WINAPI frame_clock(LPVOID)
     unsigned  last_flip = 0;
     ULONGLONG next_tick = GetTickCount64();
 
-    /* FRAME_CLOCK_SLEEP_MS: the outer drain cadence (default 4 ms; 1 ms was
-     * ~10% faster before draw batching, T040). FRAME_CLOCK_STATS=1: where this
+    /* FRAME_CLOCK_SLEEP_MS: the outer drain cadence (default 1 ms: with the
+     * render-pass sharing and inlined vertex decode, 4 ms left the thread idle a
+     * quarter of the time and held the menus at ~37 fps against ~53 at 1 ms, the
+     * arena 31 against 34; the guest waits on labels this drain writes). FRAME_CLOCK_STATS=1: where this
      * thread's time goes, as ms per 5 s in sleep / FIFO drain / present. */
-    DWORD outer_ms = 4;
+    DWORD outer_ms = 1;
     if (const char* e = getenv("FRAME_CLOCK_SLEEP_MS")) outer_ms = (DWORD)atoi(e);
     const int stats = getenv("FRAME_CLOCK_STATS") != nullptr;
     auto now_us = []() -> unsigned long long {

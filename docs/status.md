@@ -111,6 +111,9 @@ T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena
 
 ## Log
 
+### 2026-10-20: frame clock drains every 1 ms (claude)
+- `frame_clock`'s outer `Sleep(4)` became `Sleep(1)` (src/main.cpp, `FRAME_CLOCK_SLEEP_MS`). The guest waits on labels the drain writes, so the 4 ms grain was latency: Single Player 36.8 -> 53.1 fps (min 48), arena 31 -> 33-36. The game is not capped at 30 by itself here, it runs as fast as the drain lets it; pacing to a cap is T012.
+
 ### 2026-10-20: vertex decode inlined (0054, claude)
 - `rsx_vertex_decode_element` with the type switch hoisted and inlined into `rsx_vertex_fetch_one`, bit-identical on 2M random cases. Single Player ~32 -> ~37 fps, arena ~31. The frame-clock thread now idles in a third of samples, so the remaining limit is the guest side and the game's own 30 fps cap.
 
