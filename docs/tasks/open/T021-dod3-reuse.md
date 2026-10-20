@@ -1,7 +1,7 @@
 # T021: Reuse Drakengard 3's port — inventory, then port the generic pieces
 
-Status: claimed
-Owner: sonnet-2
+Status: open
+Owner: -
 Priority: 17
 Touches: docs/dod3-reuse.md (new), docs/reference-ports.md, patches/ps3recomp/T021-*.patch (runtime/** and libs/** pieces NOT owned by an active task: see "Exclusions"), src/overrides/dod3_*.cpp (new)
 Reads: https://github.com/soyjxck/dod3-recomp and https://github.com/soyjxck/ps3recomp (both MIT), docs/reference-ports.md, docs/tasks/claimed/*
@@ -40,3 +40,4 @@ follow-up tasks are proposed.
 - 2026-10-20 18:00 sonnet-2: Started by claude as a Sonnet 5.5 subagent (user request 2026-10-20), isolated worktree; scope this round: finish the inventory (docs/dod3-reuse.md, docs/reference-ports.md) only. No patches: T043 is rebasing the whole stack.
 - 2026-10-20 18:19 sonnet-2: Findings: v0.16.0 still lacks (checked in code) alpha-ref for float surface formats 11/12/13 (rsx_fp_decompiler.c:1433), zero-stride vertex attribute as constant (rsx_vertex_compact.c:130), DDX/DDY and NRM-zero in the fp decompiler, scissored depth clears, vertex fetch by attribute, walker kick on usleep, rsx_present_pace, FIFO-position PrepareFlip. Arena FP16 target is cfmt 11 so alpha-ref matters. 208 fork commits: 35 ported, 12 in-pin, 12 upstream, 87 missing, 62 n/a.
 - 2026-10-20 18:19 sonnet-2: DONE-READY (inventory): branch worktree-agent-a1adb7e6c8c6fb98d commit 8aa8db3; docs/dod3-reuse.md rewritten (ranked Port next top 10, frame pacing recipe, all 208 fork commits, full dod3-recomp tree), docs/reference-ports.md and AGENTS.md index row updated. Not merged.
+- 2026-10-20 18:24 sonnet-2: RELEASED: Inventory part done and merged (claude): 208 fork commits classified against v0.16.0, ranked Port next list at the top of docs/dod3-reuse.md. Porting is the next step (do it as patches on the v0.16.0 stack); top picks: alpha-test ref for float targets (3f20f13), zero vertex stride (0eee9dd), FIFO wake on guest usleep (260ccb8).
