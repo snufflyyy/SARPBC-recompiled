@@ -10,7 +10,8 @@ work session. Newest log entry first. Use absolute dates.
 Next steps for 2: the T021 "Port next" list at the top of docs/dod3-reuse.md (items 1-2 are
 ported as 0048/0049; next: 5 prepared flips at their FIFO position, 7 scissored depth clears
 and cropped depth copies for shadows, 8 fragment decompiler DDX/DDY/NRM/precision, 10
-anisotropic filtering); ~~T038 (upside-down Loading screen)~~ (done); the `null-read,null-write` alerts a
+anisotropic filtering); ~~T038 (upside-down Loading screen)~~ (done; T050 review confirms the
+visual fix, but T051 must replace its shader-length heuristic; [review](t038-review.md)); the `null-read,null-write` alerts a
 165 s arena survey raised (boot_report, not yet looked at); the glass canisters' shards draw
 opaque white (maybe correct, unverified). For 3: T040, and the dod3 pacing recipe in
 dod3-reuse.md (FIFO wake on guest usleep, `GetMaxTickRate`).
@@ -107,6 +108,18 @@ T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena
   POSIX boot scaffold gets this UE3 title to the menus on Linux.
 
 ## Log
+
+### 2026-10-20: Antigravity loading-screen fix reviewed (T050, pi)
+- T038 was already merged as `ba70ca3`; no second implementation merge is needed.
+  A fresh 120 s combined-stack boot confirms upright Loading text and tutorial arena/HUD:
+  3726 zlib requests, 2630 flips, unresolved 0. Four distinct dumps in the final 10 s
+  show that the report's STALLED label is not a rendering freeze in this run.
+- The source-only neutral-backend probe exposes a generic correctness issue: adding a NOP
+  to an otherwise identical VP changes the bound Y transform despite byte-identical HLSL.
+  T051 tracks replacement of the length-only predicate, regression coverage and correction
+  of the projection-dependent compiler explanation. Implementation is retained unchanged;
+  Linux/Vulkan symptom verified, general upstream acceptance not recommended yet.
+  Evidence and reproduction: [t038-review.md](t038-review.md). No new FPS/platform claim.
 
 ### 2026-10-20: critical native boundary fixes (T047, pi)
 - Native Edge-zlib now checks full guest spans, decoded-size arithmetic and counter

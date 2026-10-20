@@ -129,6 +129,7 @@ Details and every flag: [docs/pipeline.md](docs/pipeline.md).
 | [docs/subsystems.md](docs/subsystems.md) | Working on graphics, audio, input, SPU/SPURS, saves, video, network, trophies |
 | [docs/debugging.md](docs/debugging.md) | Something hangs, crashes or draws wrong; `tools/boot_check.sh` (paste the first line of `analysis/boot_report.txt` into task notes), env vars, triage recipes |
 | [docs/project-audit.md](docs/project-audit.md) | Maintainability audit (T046): evidence, safety/tooling gaps, and a minimal cleanup sequence |
+| [docs/t038-review.md](docs/t038-review.md) | Review of the loading-screen fix (T050): verified captures, shader-length counterexample, and T051 follow-up |
 | [docs/workflow.md](docs/workflow.md) | Before any work: task board, claiming, worktrees, locks, merging, **pausing and resuming** |
 | [docs/hle-coverage.md](docs/hle-coverage.md) | Which firmware imports have HLE handlers (stub/impl), named NIDs, ranked gaps (`tools/hle_coverage.py`) |
 
