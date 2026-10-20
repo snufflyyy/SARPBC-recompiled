@@ -1,0 +1,48 @@
+From d53a5319a98ac5096eeb87eaf17d1ec7dda76521 Mon Sep 17 00:00:00 2001
+From: antigravity <antigravity@localhost>
+Date: Tue, 20 Oct 2026 19:45:33 +0000
+Subject: [PATCH] video: flip viewport Y for unprojected passthrough shaders
+
+UE3's LOADSCREEN program (2-instruction raw passthrough: MOV HPOS, v0;
+MOV TEX0, v8) passes unprojected NDC coordinates with v=0 at y=-1 and
+v=1 at y=+1. On RSX with negative viewport scale (scale[1] = -360),
+y=-1 mapped to top (yw=720) and y=+1 to bottom (yw=0). In the host
+Vulkan pipeline (where shader.setInvertY(true) is active in
+rsx_shader_spirv.cpp for shaders with standard projection matrices),
+this unprojected quad gets inverted vertically, drawing the splash/loading
+screen upside down.
+
+Flip xf[1] and xf[5] for 2-instruction passthrough shaders without
+projection matrices so the splash/loading screen is upright while
+leaving all other passes (3D scene, offscreen composites, Canvas 2D/fonts)
+intact.
+---
+ libs/video/rsx_draw_engine.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 10f408c..f5fe0cc 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -2702,6 +2702,18 @@ static void sink_end(void* user, const rsx_dispatch* r)
+         xf[5] = -((vp.translate[1] - Hv * 0.5f) / (Hv * 0.5f));
+         xf[6] = vp.translate[2];
+     }
++    /* UE3's LOADSCREEN program (2-instruction raw passthrough: MOV HPOS, v0; MOV TEX0, v8)
++     * passes unprojected NDC coordinates with v=0 at y=-1 and v=1 at y=+1. On RSX with
++     * negative viewport scale, y=-1 mapped to top (yw=720) and y=+1 to bottom (yw=0).
++     * In the host Vulkan pipeline (where setInvertY is active for projection-matrix shaders),
++     * this unprojected quad gets inverted. Flip xf[1]/xf[5] for this passthrough shader. */
++    const u8* cur_vp = NULL;
++    u32 cur_vp_instrs = 0;
++    if (eng_guest_programs(&cur_vp, &cur_vp_instrs, NULL, NULL) && cur_vp_instrs == 2) {
++        xf[1] = -xf[1];
++        xf[5] = -xf[5];
++    }
++
+     memcpy(g.vp_cb, g.rsx.constants, RSX_DSP_NUM_CONSTANTS * 16u);
+     memcpy(g.vp_cb + RSX_DSP_NUM_CONSTANTS * 16u, xf, sizeof xf);
+ 
+-- 
+2.47.3
+

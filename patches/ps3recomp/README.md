@@ -152,6 +152,7 @@ numbers:
 | `0047-shadow-compare-direction.patch` | T045: depth-texture compares are `depth OP reference` (RSX), not ARB_shadow's `reference OP depth` (upstream 4033da8). SARPBC's car shadow (normal-Z map, zfunc GEQUAL) was a dark square over the whole shadow frustum. Helper, `docs/SHADOW_COMPARISON.md` and the Metal test's expected values flipped; the C shadow tests pass unchanged; Metal test not run on Linux | to offer (explain with the title evidence) |
 | `0048-fp-alpha-ref-float-formats.patch` | Alpha-test reference read in the SDK's float surface formats (0x0B half, 0x0C/0x0D float; it checked 14/15/16), as the fork's `3f20f13`. SARPBC's arena renders into FP16 (0x0B). Test `tools/test_fp_alpha_ref.py` | to offer |
 | `0049-zero-vertex-stride-constant.patch` | T021 port of fork `0eee9dd` (soyjxck, author kept): a zero vertex stride is a constant attribute, not a packed array (UE3's shared white vertex-colour stream). Draw-engine C tests pass | fork author's fix: offer with them |
+| `0050-loadscreen-passthrough-orientation.patch` | T038: flip viewport Y (`xf[1]`, `xf[5]`) for 2-instruction unprojected passthrough vertex programs (UE3 `LOADSCREEN.VPO`). With RSX negative viewport scale, `pos.y=-1` was top and `pos.y=+1` bottom; Vulkan `setInvertY` inverted this unprojected quad upside down | to offer |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `git -C external/ps3recomp format-patch -1 -o ../../patches/ps3recomp/ --start-number N`.

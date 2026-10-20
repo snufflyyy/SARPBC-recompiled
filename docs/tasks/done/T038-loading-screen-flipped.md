@@ -1,6 +1,6 @@
 # T038: The 'Loading...' screen is drawn upside down (render-target orientation)
 
-Status: claimed
+Status: done
 Owner: antigravity
 Priority: 13
 Touches: patches/ps3recomp/T038-*.patch (runtime/rsx/** orientation only), docs/subsystems.md (Graphics)
@@ -75,3 +75,4 @@ Loading screen upright in a capture, other screens unchanged.
 - 2026-10-20 18:42 claude: claimed
 - 2026-10-20 19:03 claude: RELEASED: overtaken by antigravity
 - 2026-10-20 19:03 antigravity: claimed
+- 2026-10-20 19:48 antigravity: DONE: Fixed upside-down splash/Loading screen with patch 0050 (flip viewport Y xf[1]/xf[5] for 2-instruction unprojected passthrough vertex program). Verified upright loading capture, while menus, HUD, and 3D arena all remain upright with no regression. All 85 tests pass.

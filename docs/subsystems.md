@@ -259,6 +259,24 @@ switch: the square goes, nothing else changes). Patch
 `0047-shadow-compare-direction`. If another title's shadows invert after this,
 suspect this patch first.
 
+### Loading / splash screen orientation (T038, 2026-10-20)
+
+The splash / "Loading..." screen was drawn upside down while all subsequent passes
+(ESRB screen, Psyonix logo, menus, HUD, and 3D arena) were upright.
+`LOADSCREEN` draws directly to the display buffer with a 2-instruction unprojected
+passthrough vertex program (`LOADSCREEN.VPO`: `MOV HPOS, v0; MOV TEX0, v8`) and 0
+constants. Its quad vertices pass unprojected NDC coordinates: `v=0` at `pos.y=-1`,
+and `v=1` at `pos.y=+1`.
+On RSX with negative viewport scale (`scale[1] = -360.0f`, `translate[1] = 360.0f`),
+`y=-1` maps to the top (`yw = (-1)*(-360)+360 = 720`), which samples `v=0` (row 0,
+the top of the decoded PNG).
+In ps3recomp's Vulkan pipeline, `shader.setInvertY(true)` (in `rsx_shader_spirv.cpp`)
+flips clip space Y for shaders with standard projection matrices. For unprojected
+passthrough programs, this inverted the quad vertically.
+Patch `0050-loadscreen-passthrough-orientation`: `rsx_draw_engine.c` flips `xf[1]` and
+`xf[5]` for 2-instruction passthrough vertex programs without projection matrices,
+rendering the loading/splash screen upright without affecting any other pass.
+
 ## Audio
 
 - `PS3Drv.PS3AudioDevice`, 32 voices, LPCM up to 7.1 + Dolby Digital per PARAM.SFO.

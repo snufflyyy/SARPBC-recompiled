@@ -10,7 +10,7 @@ work session. Newest log entry first. Use absolute dates.
 Next steps for 2: the T021 "Port next" list at the top of docs/dod3-reuse.md (items 1-2 are
 ported as 0048/0049; next: 5 prepared flips at their FIFO position, 7 scissored depth clears
 and cropped depth copies for shadows, 8 fragment decompiler DDX/DDY/NRM/precision, 10
-anisotropic filtering); T038 (upside-down Loading screen); the `null-read,null-write` alerts a
+anisotropic filtering); ~~T038 (upside-down Loading screen)~~ (done); the `null-read,null-write` alerts a
 165 s arena survey raised (boot_report, not yet looked at); the glass canisters' shards draw
 opaque white (maybe correct, unverified). For 3: T040, and the dod3 pacing recipe in
 dod3-reuse.md (FIFO wake on guest usleep, `GetMaxTickRate`).
@@ -40,7 +40,7 @@ boot_check is PROGRESSING with 3513 flips; the main menu runs at **29.5 fps** (1
 26.3-32.3), ~130% CPU, 28 threads. Where a menu frame's ~31 ms go, and what to try next:
 subsystems.md "Menu frame rate".
 
-**State of `main`:** 49 patch files (67 commits) on upstream `749182e` (v0.16.0, T043); every one of the
+**State of `main`:** 50 patch files (68 commits) on upstream `749182e` (v0.16.0, T043); every one of the
 85 test scripts (ours and ps3recomp's) passes on that stack (2026-10-20, `tools/lint.py --tests`). The upstream lifter did not
 change, so the lifts were kept. The big fixes of the last two days: the SPURS CreateTask race that started tasks twice
 (0036, T033: ~1500% CPU to ~100%) and Vulkan draw batching with a VRAM geometry cache (0038, T040:
@@ -107,6 +107,10 @@ T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena
   POSIX boot scaffold gets this UE3 title to the menus on Linux.
 
 ## Log
+
+### 2026-10-20: Loading screen orientation fixed (T038, antigravity)
+- Fixed the "Loading..." splash screen rendering upside down. UE3's `LOADSCREEN.VPO` is an unprojected 2-instruction passthrough shader (`MOV HPOS, v0; MOV TEX0, v8`) with 0 constants. On RSX with negative viewport scale (`scale[1] = -360`), `pos.y = -1` mapped to top (`yw = 720`, row 0 of texture) and `pos.y = +1` to bottom (`yw = 0`). In Vulkan, glslang's `shader.setInvertY(true)` inverted this unprojected quad vertically, drawing "Loading..." upside down.
+- Patch `0050-loadscreen-passthrough-orientation`: `rsx_draw_engine.c` flips `xf[1]` and `xf[5]` for 2-instruction passthrough vertex programs without projection matrices. Verified: `frame_first_lit.png` shows upright "Loading...", while all subsequent passes (ESRB car, Psyonix logo, safe-area screen, menus, HUD, and 3D arena) remain 100% upright without regression. All 85 lint tests pass.
 
 ### 2026-10-20: maintainability audit (T046, pi)
 - Read-only implementation review: keep generated lifts / title overrides / exported runtime
