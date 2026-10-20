@@ -8,8 +8,9 @@
 #
 #   1. merge main into your branch (stops on conflicts: resolve, commit, verify, rerun)
 #   2. renumber patches/ps3recomp/T###-*.patch to the next free 00NN- numbers, in
-#      their current (apply) order, and fix their names in patches/ps3recomp/README.md
-#   3. check the whole patch stack applies from the pin (tools/apply_patches.sh)
+#      their current (apply) order, and fix their names in the patch README and docs/
+#   3. check the whole patch stack applies from the pin (tools/apply_patches.sh) and
+#      that tools/lint.py passes
 #   4. fast-forward main in the main checkout, re-apply the patch stack there if it
 #      changed, and commit the task board (docs/tasks/ lives uncommitted in the main
 #      checkout)
@@ -45,17 +46,20 @@ for f in "$P"/T[0-9][0-9][0-9]-*.patch; do
     n=$((n + 1))
     new=$(printf '%04d-%s' "$n" "$(sed -E 's/^T[0-9]{3}-([0-9]+-)?//' <<<"$old")")
     git -C "$WT" mv "patches/ps3recomp/$old" "patches/ps3recomp/$new"
-    sed -i "s/$old/$new/g" "$P/README.md"
+    # The README row, and every doc that names the patch (with or without .patch).
+    grep -lF "${old%.patch}" "$P/README.md" "$WT"/AGENTS.md "$WT"/docs/*.md \
+        | xargs -r sed -i "s/${old%.patch}/${new%.patch}/g"
     renamed+=("$old -> $new")
 done
 if [ ${#renamed[@]} -gt 0 ]; then
-    git -C "$WT" add patches/ps3recomp/README.md
+    git -C "$WT" add patches/ps3recomp/README.md AGENTS.md docs/*.md
     git -C "$WT" commit -q -m "patches: renumber for merge ($(printf '%s; ' "${renamed[@]}" | sed 's/; $//'))"
     printf 'renumbered: %s\n' "${renamed[@]}"
 fi
 
-# 3. The whole stack must apply from the pin.
+# 3. The whole stack must apply from the pin, and the repo must lint clean.
 "$WT/tools/apply_patches.sh"
+"$WT/tools/lint.py" || { echo "tools/lint.py found problems: fix them, commit, rerun" >&2; exit 1; }
 
 # 4. Fast-forward main, sync its submodule, commit the board.
 before=$(git -C "$MAIN" rev-parse main)

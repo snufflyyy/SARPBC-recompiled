@@ -20,7 +20,7 @@ tool aborts.
 Usage:
   tools/hle_coverage.py                                  # defaults: 01.09 primary, 01.02 column
   tools/hle_coverage.py --hits 01.09=analysis/milestone.txt --hits 01.02=analysis/run.log
-  tools/hle_coverage.py --set 01.02 analysis/imports_named.json src/recomp/ppu_hle_nids.cpp
+  tools/hle_coverage.py --set 01.02 analysis/imports_named.json build/ppu_hle_nids.cpp
   tools/hle_coverage.py --format json --out analysis/hle_coverage.json
   tools/hle_coverage.py --check-names                    # only verify KNOWN_NAMES
   tools/hle_coverage.py --online                         # count PS3_NET_ONLINE handlers too
@@ -31,8 +31,9 @@ HLE_TABLE may be `regen`: the table gen_hle_nids.py --all would generate from th
 current external/ps3recomp tree (to see a toolkit patch before the lift's table is
 regenerated). --tree LABEL=DIR scans another ps3recomp checkout for that version
 (e.g. the main checkout's, to show the state before a patch).
-Defaults: 01.09 from <main checkout>/versions/0109 (if present) and 01.02 from this
-checkout's analysis/ and src/recomp/.
+Defaults: 01.09 from <main checkout>/versions/0109 and 01.02 from this checkout, each
+if its analysis/imports_named.json exists; the table is src/recomp/ppu_hle_nids.cpp,
+else build/ppu_hle_nids.cpp (where CMake generates it), else `regen`.
 """
 import argparse
 import glob
@@ -394,12 +395,21 @@ def main():
     sets = args.set
     if not sets:
         sets = []
+        # relift.sh no longer writes ppu_hle_nids.cpp into src/recomp: CMake generates it
+        # into the build directory. Take whichever exists, else regenerate it.
+        def table(base):
+            for p in (os.path.join(base, "src", "recomp", "ppu_hle_nids.cpp"),
+                      os.path.join(base, "build", "ppu_hle_nids.cpp")):
+                if os.path.exists(p):
+                    return p
+            return "regen"
         v9 = os.path.join(main_checkout(), "versions", "0109")
-        if os.path.exists(os.path.join(v9, "analysis", "imports_named.json")):
-            sets.append(["01.09", os.path.join(v9, "analysis", "imports_named.json"),
-                         os.path.join(v9, "src", "recomp", "ppu_hle_nids.cpp")])
-        sets.append(["01.02", os.path.join(ROOT, "analysis", "imports_named.json"),
-                     os.path.join(ROOT, "src", "recomp", "ppu_hle_nids.cpp")])
+        for label, base in (("01.09", v9), ("01.02", ROOT)):
+            if os.path.exists(os.path.join(base, "analysis", "imports_named.json")):
+                sets.append([label, os.path.join(base, "analysis", "imports_named.json"),
+                             table(base)])
+        if not sets:
+            sys.exit("no analysis/imports_named.json for 01.09 or 01.02: run tools/relift.sh")
     hits_by_label = {}
     for h in args.hits:
         label, _, path = h.partition("=")

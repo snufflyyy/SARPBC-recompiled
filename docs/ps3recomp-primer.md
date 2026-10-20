@@ -56,7 +56,7 @@ one left there. On 01.09 this happens all the time (boot of 2026-10-19 with
   (cellSaveData `funcStat`, OPD `0x01201DE0`, AutoLoad2 of `NPUB30035-PROFILE`) on
   SaveData (tid 9).
 
-**Now (patch `T026-ppu-guest-call-stacks.patch`)** every (host thread, nesting depth)
+**Now (patch `0030-ppu-guest-call-stacks.patch`)** every (host thread, nesting depth)
 pair has its own stack:
 - Carved from the **top of the PPU stack region** (0xD0000000-0xE0000000) by moving
   `g_vm_stack_alloc.region_end` down; thread stacks keep growing up from `VM_STACK_BASE`, so
@@ -144,7 +144,7 @@ passes all of them.
 
 | Port | Why it's relevant |
 |---|---|
-| [sp00nznet/simpsonsarcade-ps3](https://github.com/sp00nznet/simpsonsarcade-ps3) | PSN title (`NPUB`), playable; `tools/relift.sh`, SPU job capture flow, `src/spu_workloads.c` |
+| [sp00nznet/simpsonsarcade-ps3](https://github.com/sp00nznet/simpsonsarcade-ps3) | PSN title (`NPUB`), playable; `tools/relift.sh`, SPU job capture flow, `simpsonsarcade-ps3/src/spu_workloads.c` |
 | [sp00nznet/tornado](https://github.com/sp00nznet/tornado) | In-game with no per-title overrides; SPURS + Bink intro |
 | [sp00nznet/twistedmetal](https://github.com/sp00nznet/twistedmetal) | Closest to Linux/Vulkan bring-up |
 | [sp00nznet/flow](https://github.com/sp00nznet/flow) | The porting guide's case study |

@@ -244,7 +244,7 @@ Images that keep a section table get the same bogus seeds, but they are clipped 
 | `e33837bb…` image 0 (fp `0xC1759183E2FF7448`) | `0x171D0-0x1A1CC` | **MultiStream** mixer strings ("Skipping DSP (slot %d)...", "MP3 Size to do...", "ERROR! Multistream...", "STARVED OF DATA"), float tables at `0x17700-0x19200` | 50 |
 
 Image 0 is therefore MultiStream's main SPU mixer (MP3 decode and DSP slots); the strings
-say so. The fix (patch `T016-*.patch`) keeps a derived seed only if it decodes, is not a
+say so. The fix (patch `0006-spu-detector-rodata-seeds.patch`) keeps a derived seed only if it decodes, is not a
 NUL-padded C string, and a straight-line walk from it reaches a branch/return/stop before
 an undecodable word or the segment end. Result on 01.09: **14/15 registered**, the two
 images lift with 0 unsupported (625 and 1,151 functions); the other 12 lift byte-identical

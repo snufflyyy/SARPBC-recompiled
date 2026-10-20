@@ -68,7 +68,7 @@ next)
         printf '  P%-4s %s\n         Touches: %s\n' "$(field "$f" Priority)" "$(basename "$f" .md)" "$(field "$f" Touches)"
     done | head -9 ;;
 show)
-    f=$(find_task "$1" open claimed done); [ -n "$f" ] || { echo "no task $1" >&2; exit 1; }
+    f=$(find_task "$1" open claimed "done"); [ -n "$f" ] || { echo "no task $1" >&2; exit 1; }
     cat "$f" ;;
 claim)
     id=$1 agent=$2
@@ -99,7 +99,7 @@ release)
     echo "released $id" ;;
 new)
     slug=$1; shift
-    last=$(ls "$B"/*/ 2>/dev/null | grep -o '^T[0-9]\{3\}' | sort | tail -1)
+    last=$(find "$B"/open "$B"/claimed "$B"/done -name 'T[0-9][0-9][0-9]-*' -printf '%f\n' | cut -c1-4 | sort | tail -1)
     last=${last:-T000}
     n=$(( 10#${last#T} + 1 ))
     id=$(printf 'T%03d' "$n")

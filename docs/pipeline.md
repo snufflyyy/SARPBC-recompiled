@@ -116,7 +116,7 @@ For this title: 15 SPU ELFs embedded in the EBOOT (Edge zlib, PhysX, MultiStream
 | `SPUJOBS.SPRX` | decrypted in step 2; inspect: PPU PRX (`lift_prx.py`) or SPU images inside (`extract_spu_images.py`) | as above |
 | Raw job binaries built in memory | run with `SPU_DUMP_MISS=spu_dump`, one file per fingerprint | `find_spu_functions.py --raw --base 0` + `spu_lifter.py --symbol-prefix` |
 
-Lifted SPU images are registered by content fingerprint (see `src/spu_workloads.c` in
+Lifted SPU images are registered by content fingerprint (see `simpsonsarcade-ps3/src/spu_workloads.c` in
 simpsonsarcade-ps3 for the pattern). Until an image is lifted, a PPU-side fallback or the
 SPU interpreter can stand in (`SPU_FALLBACK.md` upstream).
 

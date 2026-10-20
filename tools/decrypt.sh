@@ -23,9 +23,10 @@ RAP=$(ls "$ROOT"/Supersonic*/*.rap)
 if [ ! -x "$R/squashfs-root/AppRun" ]; then
     mkdir -p "$R"
     gh release download -R RPCS3/rpcs3-binaries-linux --pattern '*linux64.AppImage' -D "$R" --clobber
-    chmod +x "$R"/*.AppImage
+    appimage=$(ls "$R"/*.AppImage | head -1)
+    chmod +x "$appimage"
     # Extracting avoids needing FUSE to mount the AppImage.
-    (cd "$R" && ./*.AppImage --appimage-extract >/dev/null)
+    (cd "$R" && "$appimage" --appimage-extract >/dev/null)
 fi
 
 mkdir -p "$CFG/rpcs3/dev_hdd0/home/00000001/exdata"

@@ -157,7 +157,7 @@ ea=0x0133B880`). The ShaderPatching job (chain `0x012B6F00`) then blocked in
 `pthread_rwlock_wrlock` for good. The FIFO park before `SET_SHADER_PROGRAM` was never released, and
 the legal/ESRB screen stopped after 8-25 s.
 
-**Fix:** patch `T027-win32-compat-srw-writer-preference.patch`. On glibc (`#ifdef __GLIBC__`),
+**Fix:** patch `0029-win32-compat-srw-writer-preference.patch`. On glibc (`#ifdef __GLIBC__`),
 `ps3__rwl_init` sets `PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP`. Only the `NONRECURSIVE`
 kind changes anything: glibc treats plain `PTHREAD_RWLOCK_PREFER_WRITER_NP` as reader preference.
 Windows is unchanged. Other POSIX libcs have no setkind call and keep their default. As far as

@@ -20,7 +20,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-SECS=60 WARMUP=0 VERSION= BDIR= EXTRA=()
+SECS=60 WARMUP=0 VERSION='' BDIR='' EXTRA=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --warmup) WARMUP=$2; shift ;;

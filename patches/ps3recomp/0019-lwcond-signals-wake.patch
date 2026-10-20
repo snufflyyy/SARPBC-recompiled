@@ -1,4 +1,4 @@
-From 9cefc59da6fd5bc6716358b9f65fb3eb9b98a5dc Mon Sep 17 00:00:00 2001
+From 4f846d4813de996393a9d1b6ff192c1b7df45c4c Mon Sep 17 00:00:00 2001
 From: soyjxck <soyjxck@users.noreply.github.com>
 Date: Thu, 8 Oct 2026 05:23:48 +0100
 Subject: [PATCH 1/2] sysPrxForUser: lwcond signals wake their waiters
@@ -35,8 +35,9 @@ for WaitOnAddress.]
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- runtime/ppu/ppu_sysprx.cpp | 88 ++++++++++++++++++++++++++++++++++----
- 1 file changed, 80 insertions(+), 8 deletions(-)
+ runtime/ppu/ppu_sysprx.cpp  | 88 +++++++++++++++++++++++++++++++++----
+ tools/test_lwcond_layout.py | 15 ++++++-
+ 2 files changed, 94 insertions(+), 9 deletions(-)
 
 diff --git a/runtime/ppu/ppu_sysprx.cpp b/runtime/ppu/ppu_sysprx.cpp
 index 2bcba4b..bb1936c 100644
@@ -155,11 +156,61 @@ index 2bcba4b..bb1936c 100644
          WaitForSingleObject(s, INFINITE);
          vm_write32(lwmutex + LWM_OWNER, own);
          vm_write32(lwmutex + LWM_RECUR, rc ? rc : 1);
+diff --git a/tools/test_lwcond_layout.py b/tools/test_lwcond_layout.py
+index 4a7c351..7cfddee 100644
+--- a/tools/test_lwcond_layout.py
++++ b/tools/test_lwcond_layout.py
+@@ -20,6 +20,12 @@ from pathlib import Path
+ ROOT = Path(__file__).resolve().parents[1]
+ 
+ 
++def wakeups(src):
++    # sys_lwcond_wait uses the signal/wait helpers above it (generation table,
++    # lwc_gen, lwc_wake, lwc_wait, ...): take that block verbatim too.
++    return src[src.index('enum { LWC_TAB'):src.index('static void sys_lwcond_signal(')]
++
++
+ def extract(src, name):
+     m = re.search(r'static void %s\(ppu_context\* ctx\)\s*\{' % name, src)
+     assert m, name + ' not found'
+@@ -31,9 +37,14 @@ def extract(src, name):
+ 
+ 
+ HARNESS = r'''
++#include <atomic>
++#include <chrono>
++#include <condition_variable>
+ #include <cstdint>
+ #include <cstdio>
++#include <cstdlib>
+ #include <cstring>
++#include <mutex>
+ static uint8_t mem[0x10000];
+ static void vm_write32(uint32_t a, uint32_t v) { for (int i = 0; i < 4; i++) mem[a + i] = (uint8_t)(v >> (24 - 8 * i)); }
+ static void vm_write64(uint32_t a, uint64_t v) { vm_write32(a, (uint32_t)(v >> 32)); vm_write32(a + 4, (uint32_t)v); }
+@@ -53,6 +64,7 @@ static void Sleep(unsigned) {}
+ static unsigned WaitForSingleObject(HANDLE, unsigned) { return 0; }
+ %s
+ %s
++%s
+ int main() {
+     const uint32_t LWC = 0x1000, MTX = 0x2468;
+     memset(mem, 0xAA, sizeof mem);
+@@ -85,7 +97,8 @@ def main():
+         print('SKIP: no C++ compiler')
+         return
+     src = (ROOT / 'runtime/ppu/ppu_sysprx.cpp').read_text()
+-    code = HARNESS % (extract(src, 'sys_lwcond_create'), extract(src, 'sys_lwcond_wait'))
++    code = HARNESS % (extract(src, 'sys_lwcond_create'), wakeups(src),
++                      extract(src, 'sys_lwcond_wait'))
+     with tempfile.TemporaryDirectory() as tmp:
+         c = Path(tmp) / 't.cpp'
+         exe = Path(tmp) / 't'
 -- 
-2.55.0
+2.47.3
 
 
-From 437035330a10887bc5e1b72623d8ef8a1fcf1ca2 Mon Sep 17 00:00:00 2001
+From b45b4f408889f5339a3eeaf87d80843ecda87731 Mon Sep 17 00:00:00 2001
 From: Braden <snufflyy@proton.me>
 Date: Mon, 19 Oct 2026 09:18:40 -0500
 Subject: [PATCH 2/2] tests: sys_lwcond signals wake their waiters
@@ -444,5 +495,5 @@ index 0000000..c7e79f8
 +if __name__ == "__main__":
 +    sys.exit(main())
 -- 
-2.55.0
+2.47.3
 

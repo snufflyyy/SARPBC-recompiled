@@ -18,10 +18,11 @@ tools/hle_coverage.py --set 01.09 versions/0109/analysis/imports_named.json rege
   --doc docs/hle-coverage.md
 ```
 
-With no `--set`, the tool reads the NID tables the lifts were built with
-(`src/recomp/ppu_hle_nids.cpp`); `regen` instead asks `gen_hle_nids.py --all` what the
-current `external/ps3recomp` tree would register (use it to see a toolkit patch before
-the coordinator regenerates the table). `--format json` gives the same data as JSON.
+With no `--set`, the tool reads the NID tables the builds use (CMake generates
+`<build>/ppu_hle_nids.cpp` with `gen_hle_nids.py --all` whenever a `libs/*.c` changes; `tools/relift.sh`
+deletes any copy in `src/recomp/`). `regen` instead asks `gen_hle_nids.py --all` what the
+current `external/ps3recomp` tree would register (use it to see a toolkit patch before the
+build regenerates the table). `--format json` gives the same data as JSON.
 
 ## How an import gets resolved (what the table columns mean)
 
@@ -152,7 +153,7 @@ Also found: upstream's `libs/misc/cellVideoExport.c` (`cellVideoExportInit/End/S
 invented names that match no SDK NID, so they can never resolve an import; there is no
 cellRec or cellMusic (utility) module at all.
 
-## What the T004 patch adds (`patches/ps3recomp/T004-hle-trivial-missing-imports.patch`)
+## What the T004 patch adds (`patches/ps3recomp/0003-hle-trivial-missing-imports.patch`)
 
 Only handlers whose correct behaviour is obvious (offline / "nothing to do"):
 
@@ -172,9 +173,8 @@ Only handlers whose correct behaviour is obvious (offline / "nothing to do"):
 | sysPrxForUser `_sys_spu_printf_initialize/_finalize` | CELL_OK (01.09 calls the init at boot) |
 
 The sys_net handlers are ctx registrations and take effect on the next build. The
-others are generic: **the coordinator must regenerate `ppu_hle_nids.cpp`**
-(`gen_hle_nids.py --all`, part of `tools/relift.sh`, for both `src/recomp/` and
-`versions/0109/src/recomp/`) — the table goes from 1,195 to 1,202 handlers. Verified:
+others are generic: they need a regenerated `ppu_hle_nids.cpp` (at the time a manual
+`gen_hle_nids.py --all`; the build now does it by itself) — the table goes from 1,195 to 1,202 handlers. Verified:
 the patch applies from the pin with `tools/apply_patches.sh`, builds, a scratch
 `gen_hle_nids.py --all` registers all 7 new generic NIDs, and a 90 s 01.02 boot calls
 exactly the same 90 imports as before the patch (no behaviour change on that path).

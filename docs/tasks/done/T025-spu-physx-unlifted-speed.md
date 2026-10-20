@@ -1,7 +1,7 @@
 # T025: PhysX unlifted LS 0x20180 + SPU x86 speed (SSE4.1 shufb, SIMD float helpers)
 
-Status: open
-Owner: -
+Status: done
+Owner: claude
 Priority: 6
 Touches: CMakeLists.txt (compile flags only), patches/ps3recomp/T025-*.patch (runtime/spu/spu_helpers.h, runtime/spu/tests/** new tests, tools/build_spu_workloads.py / find_spu_functions.py only; narrowed 2026-10-19 so T030/T032/T033 can own the rest of runtime/spu), tools/make_spu_overlays.py (only to add a PhysX overlay case), docs/subsystems.md (SPU/SPURS section only)
 Reads: docs/tasks/done/T007*, docs/tasks/done/T003*, docs/dod3-reuse.md
@@ -31,3 +31,5 @@ boot_check summary before/after; numbers in docs/subsystems.md.
 - 2026-10-19 10:31 agent-spuperf: Ctor test: patches/ps3recomp/T025-spu-ctor-dtor-seed-test.patch (tools/test_spu_find_functions_ctors.py, 7 tests OK). Speed: T025-spu-sse2-float-helpers.patch = SSE2 port of the NEON fa/fs/fm/fma fast path (needs no flag); test_spu_float_sse.c bit-identical vs exact path (clang+gcc, -O2/v2/v3); microbench fma+fm 12 ns vs 33 ns scalar fast path. shufb already had an SSE4.1 path: the runtime lib builds with -msse4.1, but the lifted SPU TUs (built in our CMakeLists) did not -> CMakeLists adds -march=x86-64-v2 (SARPBC_SPU_X86_ARCH) to SPU_SOURCES only. A/B boot runs under lock boot in progress (base / shufb-only / full).
 - 2026-10-19 11:14 agent-spuperf: HANDOFF: done=(1) ctor fix verified at run time on main 171c84d, no SPU_INTERP_UNLIFTED: 0 'unlifted' lines (boot_check 10:07: STALLED since 30.1s | last open TEXTURES.TFC@6.1s | pkgs 13 | zlib 3279 | unresolved 0); unit test patch T025-spu-ctor-dtor-seed-test. (2) speed: CMakeLists adds -march=x86-64-v2 (SARPBC_SPU_X86_ARCH) to SPU_SOURCES only (lifted SPU TUs had no ISA flag, so shufb was the byte loop; runtime lib already had -msse4.1); patch T025-spu-sse2-float-helpers = SSE2 port of the NEON fa/fs/fm/fma fast path, test_spu_float_sse.c bit-exact (clang+gcc, O2/v2/v3). A/B under lock boot, mixer PUT: base 15.0%/14.7% of real time, +v2 flags 45.2% (23.1% at load 134), +SSE2 float 52.7%. docs/subsystems.md SPU section updated. state=all committed; NEON block refactored (stats shared) but not compiled on arm64 here. Missing measurements: second 'full' A/B run, perf profile of the full build. next=perf the full build for the next hotspot (proposed: always_inline the SSE4.1 spu_shufb, 6 out-of-line copies remain in lifted TUs); Audio bullet in subsystems.md (27%/43%) is stale, outside my scope. Files outside narrowed scope: none in runtime/spu besides spu_helpers.h + tests/test_spu_float_sse.c; tools/test_spu_find_functions_ctors.py (finder test). branch=worktree-agent-a2ad17d433da76f44
 - 2026-10-19 11:14 agent-spuperf: RELEASED: paused; see HANDOFF
+- 2026-10-20 02:19 claude: claimed
+- 2026-10-20 02:19 claude: DONE: T039 audit: closing; done-when met (no unlifted LS 0x20180 since 0028/0031; mixer 15% -> 53% of real time with -march=x86-64-v2 + SSE2 floats 0032, numbers in subsystems.md). Leftover idea (always_inline the SSE4.1 spu_shufb) belongs to T031; upstream v0.16.0 has SSE2/AVX2 float paths (#369/#370), see T042.

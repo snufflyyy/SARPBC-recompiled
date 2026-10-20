@@ -8,18 +8,29 @@ a real upstream commit and a bump is a rebase of this folder.
 
 Upstream is the base. Features from the Drakengard 3 fork
 ([soyjxck/ps3recomp](https://github.com/soyjxck/ps3recomp), MIT) are ported over one at a
-time, **only when this title needs them**, as separate patches. Candidates, roughly in the
-order we expect to need them (details in `docs/reference-ports.md`):
+time, **only when this title needs them**, as separate patches (inventory:
+`docs/dod3-reuse.md`). Ported so far: the SDL pad thread (0016), the T023 generic fixes
+(0018-0021), the job-chain re-walk (0024) and GCM fixes (0025, 0026, part of 0034). Still
+open: the lifter's `--hook`/`--nonvolatile-locals` and the guest page-table fast path (T009),
+libsre's real `_cellSpursLFQueuePushBody` (ours is the Edge-zlib-only
+`src/overrides/edgezlib.cpp`).
 
-1. Vulkan draw engine (`libs/video/rsx_vulkan_engine.c`) — upstream has only the backend.
-2. SPURS Queue / LFQueue paths lifted from libsre (dod3's `tools/gen_libsre.py`).
-3. Lifter `--hook <addr>` (native replacements) and `--nonvolatile-locals` (performance).
-4. Guest memory page-table fast path, user-mode `sys_lwmutex`, `sys_lwcond` wakeups.
+**Upstream moved on (checked 2026-10-20):** v0.16.0 (`749182e`, 117 commits past our pin)
+merged 44 PRs, among them fixes we carry: the game type from PARAM.SFO CATEGORY (#359, our
+0002), the `CELL_FS_O_*` values (#349, our 0013/0014), the small motor (#372, part of 0017),
+SSE2/AVX2 SPU floats (#369/#370, our 0032), and a Vulkan present rework (#351). Replayed onto
+v0.16.0 in order (skipping the ones that fail), 32 of our 40 files apply and 8 conflict: 0013,
+0016, 0017, 0021, 0027, 0032, 0039, 0040. The bump is its own task (T042).
 
 ## Conventions
 
-- One change per patch, named `NNNN-short-description.patch` (`git format-patch` output),
-  applied in order with `git -C external/ps3recomp am ../../patches/ps3recomp/*.patch`.
+- One change per patch, named `NNNN-short-description.patch` (`git format-patch` output;
+  a file may hold a short series, e.g. a ported fork commit plus its test), applied in
+  order by `tools/apply_patches.sh` (`git am` from the pin; `./build.sh` runs it when the
+  stack changed).
+- Each patch keeps the upstream tests building and passing on the whole stack
+  (`tools/lint.py --tests`): a patch that changes a function a test extracts or links fixes
+  that test in the same patch.
 - Each patch's commit message says why we need it and where it came from (upstream PR,
   dod3 fork commit, or our own). Keep the original author on ported commits.
 - Generic fixes are also opened as upstream PRs; drop the patch once it lands.
@@ -34,10 +45,10 @@ order we expect to need them (details in `docs/reference-ports.md`):
 | `0002-cellGame-take-the-game-type-from-PARAM.SFO-CATEGORY-.patch` | cellGame reports HG titles as HDD games (01.09 builds its paths from BootCheck) | to offer |
 | `0003-hle-trivial-missing-imports.patch` | T004: offline sys_net model (connect/accept/send fail cleanly), cellKbRead, OSK device mask, SPURS queue detach, `_sys_spu_printf_initialize/finalize` | to offer |
 | `0004-sys-prx-load-module.patch` | T002: `sys_prx_load_module/start/stop/unload` with a PRX loader (`runtime/prx/prx_runtime.c`), relocations, exports, `module_start` via lifted code or a strict leaf evaluator | to offer |
+| `0005-sys-memory-reuse-freed-ranges.patch` | T001: the sys_memory/mmapper window is a sorted range table with first-fit reuse (the bump pointer ran out after ~256 MB of churn: UE3 OOM) | to offer |
 | `0006-spu-detector-rodata-seeds.patch` | T016: SPU function finder keeps an `ila`/branch/table seed only if it decodes as code, isn't a NUL-terminated string, and reaches a branch/stop (section-stripped images lifted .rodata as code); test added | to offer |
 | `0007-cellovis-overlay-table.patch` | T003: real `cellOvisGetOverlayTableSize`/`InitializeOverlayTable` (upstream's were invented API); test | to offer |
 | `0008-spu-overlay-lift.patch` | T003: build_spu_workloads lifts SPU images with overlays (resident code + one code overlay as one LS image); drops data-only ranges. Rebased onto 0006 by the coordinator (merged seed filter + cross-segment call seeds) | to offer |
-| `0005-sys-memory-reuse-freed-ranges.patch` | T001: the sys_memory/mmapper window is a sorted range table with first-fit reuse (the bump pointer ran out after ~256 MB of churn: UE3 OOM) | to offer |
 | `0009-cellMsgDialogOpenErrorCode.patch` | T020: `cellMsgDialogOpenErrorCode` prints the code and delivers BUTTON_OK on the next sysutil poll (the unresolved path never called back) | to offer |
 | `0010-cellVoice-InitEx-StartEx-notify-queue.patch` | T020: `cellVoiceInitEx/StartEx` and a real notify event queue (the faked CELL_OK left libvoice uninitialized and the queue id unwritten) | to offer |
 | `0011-cellMusic-utility.patch` | T020: cellMusic utility as an empty library whose result callbacks fire (01.09 polls a mailbox at 0x00092F10) | to offer |
@@ -69,7 +80,7 @@ order we expect to need them (details in `docs/reference-ports.md`):
 | `0037-spu-coherence-context-index.patch` | T030: private, unbounded context-pointer index for GETLLAR registry membership. Notification order, reservation semantics, and context ABI unchanged. 300-context lifecycle/collision tests and benchmark. 01.09: 588–589 vs 320–374 flips in 60 s, CPU unchanged | to offer |
 | `0038-spurs-task-runs-once.patch` | T033: `cellSpursCreateTask` marks a task running before its ready bit is published, and both dispatch sites pass the task id explicitly (`spu_workload_dispatch_task_async`); a task exiting in the window started a second copy (542 per 90 s on SARPBC 01.09; the copies spun forever, ~1500% CPU). Flips 404 -> 1920, CPU 1532% -> 96% | to offer |
 | `0039-vk-present-centre-readback.patch` | T024 (pi): `vk_cb_present` copies a 1x1 centre texel instead of the whole frame unless a PPM dump is due (3.6 MB + a round trip per present before). Test `libs/video/tests/test_vulkan_present_readback.py` (mocked Vulkan, `--sanitize`) | to offer |
-| `0040-vk-engine-draw-batching.patch` | T040: Vulkan engine draws batched into one command buffer (per-draw arena slices + descriptor sets; flushed by any other GPU op, destroy or `submit_and_wait`), vertex/index content cache in device-local host-visible memory, unchanged constants reused, no present readback on the engine path. `PS3RECOMP_VK_BATCH=0`, `PS3RECOMP_VK_GEO_CACHE=0`, diagnostics `PS3RECOMP_VK_BATCH_STATS`, `PS3RECOMP_VK_DRAW_TIMES`. SARPBC menus ~23 -> 32.5 fps | to offer |
+| `0040-vk-engine-draw-batching.patch` | T040: Vulkan engine draws batched into one command buffer (per-draw arena slices + descriptor sets; flushed by any other GPU op, destroy or `submit_and_wait`), vertex/index content cache in device-local host-visible memory, unchanged constants reused, no present readback on the engine path. `PS3RECOMP_VK_BATCH=0`, `PS3RECOMP_VK_GEO_CACHE=0`, diagnostics `PS3RECOMP_VK_BATCH_STATS`, `PS3RECOMP_VK_DRAW_TIMES`. SARPBC Choose Profile ~23 -> 32.5 fps, main menu 19.8 -> 29.5 (with 0038/0039) | to offer |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `git -C external/ps3recomp format-patch -1 -o ../../patches/ps3recomp/ --start-number N`.
@@ -87,6 +98,10 @@ Upstream's unit tests assume macOS's `-dead_strip`. On Linux, build them with
   `calloc` → 4 GB-aligned `mmap`; see docs/build-linux.md.
 - **`_cellSpursLFQueuePushBody`** has no HLE. Ours (`src/overrides/edgezlib.cpp`) is
   Edge-zlib specific; a general one needs libsre's push protocol.
+
+- **`tools/test_ppu_lift.py` rewrites `scratch/ppu_conformance.cpp`** in the source tree each
+  run (the file is tracked), so a test run leaves the submodule dirty and `apply_patches.sh`
+  then refuses to run. `tools/lint.py --tests` puts it back; upstream should write to a temp dir.
 
 - **Linker TOC-switch stubs** fold into the preceding function in `ppu_loader.py`, and
   the lifter turns each one into a wrapper running to the end of the run (3.6× source
