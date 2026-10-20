@@ -68,6 +68,7 @@ order we expect to need them (details in `docs/reference-ports.md`):
 | `0036-gcm-no-drain-recycle-runtime-callback.patch` | T024: no recycle from the drain thread while the title's context still uses the runtime buffer-full callback (raced it; one boot stuck on Loading) | to offer |
 | `0037-spu-coherence-context-index.patch` | T030: private, unbounded context-pointer index for GETLLAR registry membership. Notification order, reservation semantics, and context ABI unchanged. 300-context lifecycle/collision tests and benchmark. 01.09: 588–589 vs 320–374 flips in 60 s, CPU unchanged | to offer |
 | `0038-spurs-task-runs-once.patch` | T033: `cellSpursCreateTask` marks a task running before its ready bit is published, and both dispatch sites pass the task id explicitly (`spu_workload_dispatch_task_async`); a task exiting in the window started a second copy (542 per 90 s on SARPBC 01.09; the copies spun forever, ~1500% CPU). Flips 404 -> 1920, CPU 1532% -> 96% | to offer |
+| `T024-vk-present-centre-readback.patch` | T024 (pi): `vk_cb_present` copies a 1x1 centre texel instead of the whole frame unless a PPM dump is due (3.6 MB + a round trip per present before). Test `libs/video/tests/test_vulkan_present_readback.py` (mocked Vulkan, `--sanitize`) | to offer |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `git -C external/ps3recomp format-patch -1 -o ../../patches/ps3recomp/ --start-number N`.

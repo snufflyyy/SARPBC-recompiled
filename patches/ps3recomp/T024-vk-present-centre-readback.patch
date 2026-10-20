@@ -1,0 +1,257 @@
+From 16a1c3dbacf804d5bdc952462e826fb3df4d7977 Mon Sep 17 00:00:00 2001
+From: Pi <pi@localhost>
+Date: Tue, 20 Oct 2026 00:43:24 +0000
+Subject: [PATCH] vulkan: present reads back the centre texel only, unless a
+ dump is due
+
+vk_cb_present copied the whole colour target to the host on every
+present (3.6 MB at 720p plus a GPU round trip), although only a due PPM
+dump needs all pixels; the public centre probe needs one texel. Copy a
+1x1 region at the centre otherwise, keep the same waits, and refresh the
+probe on every successful present.
+
+Test: libs/video/tests/test_vulkan_present_readback.py (no GPU: the
+runner extracts vk_dump_ppm/vk_cb_present verbatim and runs them against
+mocked entry points; covers the probe, the dump cadence, the dumped
+pixels and the failure paths; also with --sanitize). Runner extraction
+finished by claude after pi paused.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_vulkan_backend.c               |  12 +-
+ .../tests/test_vulkan_present_readback.c      | 129 ++++++++++++++++++
+ .../tests/test_vulkan_present_readback.py     |  48 +++++++
+ 3 files changed, 186 insertions(+), 3 deletions(-)
+ create mode 100644 libs/video/tests/test_vulkan_present_readback.c
+ create mode 100644 libs/video/tests/test_vulkan_present_readback.py
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 8fac7ed..a217f8f 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -1851,11 +1851,17 @@ static void vk_cb_present(void* ud, u32 buffer_id)
+     (void)ud; (void)buffer_id;
+     if (!s_vk.device) return;
+ 
++    /* Only a due PPM dump needs all pixels on the host. Window presentation
++     * blits the GPU image; the public probe needs just its center texel.
++     * Keep the same waits and refresh the probe on every successful present. */
++    const int dump = s_vk.dump_path && ((s_vk.presented + 1u) % s_vk.dump_every) == 0;
+     if (vk_begin()) return;
+     vk_barrier_image(s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+     VkBufferImageCopy region = {
+         .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+-        .imageExtent = { s_vk.width, s_vk.height, 1 },
++        .imageOffset = { dump ? 0 : (int32_t)(s_vk.width / 2u),
++                         dump ? 0 : (int32_t)(s_vk.height / 2u), 0 },
++        .imageExtent = { dump ? s_vk.width : 1u, dump ? s_vk.height : 1u, 1 },
+     };
+     pvkCmdCopyImageToBuffer(s_vk.cmd, s_vk.color.img, VK_IMAGE_LAYOUT_GENERAL,
+                             s_vk.readback.buf, 1, &region);
+@@ -1871,12 +1877,12 @@ static void vk_cb_present(void* ud, u32 buffer_id)
+ 
+     vk_invalidate(&s_vk.readback);
+     const unsigned char* px = (const unsigned char*)s_vk.readback.ptr;
+-    size_t c = ((size_t)(s_vk.height / 2) * s_vk.width + s_vk.width / 2) * 4;
++    size_t c = dump ? ((size_t)(s_vk.height / 2) * s_vk.width + s_vk.width / 2) * 4 : 0;
+     s_vk.last_center = ((u32)px[c] << 16) | ((u32)px[c + 1] << 8) | (u32)px[c + 2];
+     s_vk.presented++;
+     s_g.last_draws = s_g.draws;
+     s_g.draws = 0;
+-    if (s_vk.dump_path && (s_vk.presented % s_vk.dump_every) == 0) vk_dump_ppm(px);
++    if (dump) vk_dump_ppm(px);
+     vk_present_window();
+ }
+ 
+diff --git a/libs/video/tests/test_vulkan_present_readback.c b/libs/video/tests/test_vulkan_present_readback.c
+new file mode 100644
+index 0000000..a90e76f
+--- /dev/null
++++ b/libs/video/tests/test_vulkan_present_readback.c
+@@ -0,0 +1,129 @@
++/* No GPU required. The runner extracts the production dump/present functions
++ * verbatim; unrelated backend globals otherwise keep shader/FIFO dependencies
++ * alive under ASan. Only the state fields these functions touch are modeled.
++ * Real-GPU host tests separately cover the actual backend and its full state.
++ */
++#define VK_NO_PROTOTYPES
++#include <vulkan/vulkan.h>
++#include <assert.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++typedef uint32_t u32;
++typedef struct { VkBuffer buf; void* ptr; int coherent; } vk_buffer;
++static struct {
++    VkDevice device;
++    VkCommandBuffer cmd;
++    int eng_active;
++    u32 width, height, dump_every, presented, last_center;
++    const char* dump_path;
++    struct { VkImage img; } color;
++    vk_buffer readback;
++} s_vk;
++static struct { u32 draws, last_draws; } s_g;
++static PFN_vkCmdCopyImageToBuffer pvkCmdCopyImageToBuffer;
++static PFN_vkCmdPipelineBarrier pvkCmdPipelineBarrier;
++#define VK_LOG(...) fprintf(stderr, __VA_ARGS__)
++
++static unsigned char image[256], pixels[256];
++static unsigned copy_calls, window_calls;
++static VkBufferImageCopy copied;
++static int fail_begin, fail_submit;
++static int vk_begin(void) { return fail_begin ? -1 : 0; }
++static int vk_submit_and_wait(void) { return fail_submit ? -1 : 0; }
++static void vk_barrier_image(VkImage image, VkImageAspectFlags aspect, VkImageLayout layout) {}
++static void vk_invalidate(vk_buffer* buffer) { assert(buffer->coherent); }
++static void vk_present_window(void) { window_calls++; }
++static void fake_barrier(VkCommandBuffer cmd, VkPipelineStageFlags src, VkPipelineStageFlags dst,
++                         VkDependencyFlags dep, u32 nm, const VkMemoryBarrier* m,
++                         u32 nb, const VkBufferMemoryBarrier* b, u32 ni, const VkImageMemoryBarrier* im)
++{}
++static void fake_copy(VkCommandBuffer cmd, VkImage img, VkImageLayout layout,
++                      VkBuffer buf, u32 count, const VkBufferImageCopy* region)
++{
++    assert(count == 1);
++    copied = *region;
++    copy_calls++;
++    assert(region->bufferOffset == 0 && region->bufferRowLength == 0 && region->bufferImageHeight == 0);
++    assert(region->imageOffset.x >= 0 && region->imageOffset.y >= 0 && region->imageOffset.z == 0);
++    assert(region->imageExtent.depth == 1);
++    assert((u32)region->imageOffset.x + region->imageExtent.width <= s_vk.width);
++    assert((u32)region->imageOffset.y + region->imageExtent.height <= s_vk.height);
++    for (u32 y = 0; y < region->imageExtent.height; y++)
++        for (u32 x = 0; x < region->imageExtent.width; x++)
++            memcpy(pixels + (y * region->imageExtent.width + x) * 4u,
++                   image + (((u32)region->imageOffset.y + y) * s_vk.width +
++                            (u32)region->imageOffset.x + x) * 4u, 4);
++}
++#include "present_under_test.inc"
++
++static void expect_region(int full)
++{
++    assert(copied.imageOffset.x == (full ? 0 : (int32_t)(s_vk.width / 2u)));
++    assert(copied.imageOffset.y == (full ? 0 : (int32_t)(s_vk.height / 2u)));
++    assert(copied.imageExtent.width == (full ? s_vk.width : 1));
++    assert(copied.imageExtent.height == (full ? s_vk.height : 1));
++    const size_t c = ((size_t)(s_vk.height / 2u) * s_vk.width + s_vk.width / 2u) * 4u;
++    assert(s_vk.last_center == ((u32)image[c] << 16 | (u32)image[c + 1] << 8 | image[c + 2]));
++}
++static void expect_dump(const char* path, unsigned base)
++{
++    FILE* f = fopen(path, "rb");
++    assert(f);
++    char want[64], got[64];
++    int n = snprintf(want, sizeof want, "P6\n%u %u\n255\n", s_vk.width, s_vk.height);
++    assert(fread(got, 1, (size_t)n, f) == (size_t)n && memcmp(got, want, (size_t)n) == 0);
++    for (u32 i = 0; i < s_vk.width * s_vk.height * 4u; i += 4)
++        for (u32 c = 0; c < 3; c++) assert(fgetc(f) == (int)((i + c + base) & 255u));
++    assert(fgetc(f) == EOF);
++    fclose(f);
++}
++static void exercise(const char* path, u32 w, u32 h)
++{
++    memset(&s_vk, 0, sizeof s_vk);
++    s_vk.width = w; s_vk.height = h;
++    s_vk.device = (VkDevice)(uintptr_t)1;
++    s_vk.readback.ptr = pixels;
++    s_vk.readback.coherent = 1;
++    s_vk.dump_every = 2;
++    copy_calls = window_calls = 0; fail_begin = fail_submit = 0;
++    for (unsigned i = 0; i < sizeof image; i++) image[i] = (unsigned char)i;
++
++    vk_cb_present(NULL, 0);                 /* no dump configured */
++    assert(s_vk.presented == 1 && copy_calls == 1);
++    expect_region(0);
++    s_vk.dump_path = path;
++    vk_cb_present(NULL, 0);                 /* second present: full dump */
++    assert(s_vk.presented == 2 && copy_calls == 2);
++    expect_region(1); expect_dump(path, 0);
++
++    for (unsigned i = 0; i < sizeof image; i++) image[i] = (unsigned char)(i + 64);
++    vk_cb_present(NULL, 0);                 /* third: refresh probe, keep dump */
++    assert(s_vk.presented == 3 && copy_calls == 3);
++    expect_region(0); expect_dump(path, 0);
++    s_vk.dump_every = 1;
++    vk_cb_present(NULL, 0);                 /* dump-every=1 still copies all */
++    assert(s_vk.presented == 4 && copy_calls == 4);
++    expect_region(1); expect_dump(path, 64);
++
++    const u32 last = s_vk.last_center;
++    fail_begin = 1;
++    vk_cb_present(NULL, 0);
++    assert(s_vk.presented == 4 && copy_calls == 4 && s_vk.last_center == last);
++    fail_begin = 0; fail_submit = 1;
++    vk_cb_present(NULL, 0);
++    assert(s_vk.presented == 4 && copy_calls == 5 && s_vk.last_center == last);
++    expect_dump(path, 64);
++    assert(window_calls == 4);
++}
++int main(int argc, char** argv)
++{
++    assert(argc == 2);                      /* caller supplies a private temp path */
++    pvkCmdPipelineBarrier = fake_barrier;
++    pvkCmdCopyImageToBuffer = fake_copy;
++    exercise(argv[1], 5, 3);                /* odd dimensions */
++    exercise(argv[1], 4, 4);                /* even dimensions */
++    exercise(argv[1], 1, 1);                /* smallest legal surface */
++    puts("vulkan present readback: OK (probe, cadence, dump pixels, failure paths)");
++    return 0;
++}
+diff --git a/libs/video/tests/test_vulkan_present_readback.py b/libs/video/tests/test_vulkan_present_readback.py
+new file mode 100644
+index 0000000..a71b3a1
+--- /dev/null
++++ b/libs/video/tests/test_vulkan_present_readback.py
+@@ -0,0 +1,48 @@
++#!/usr/bin/env python3
++"""Exercise the real Vulkan present with mocked entry points (no GPU needed).
++
++Requires the normal Vulkan/SDL2 development headers. CC selects the compiler.
++All binaries and PPM output live in a private temporary directory.
++"""
++import argparse
++import os
++from pathlib import Path
++import shlex
++import subprocess
++import tempfile
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--sanitize", action="store_true")
++    args = parser.parse_args()
++    source = Path(__file__).resolve().with_suffix(".c")
++    sdk = source.parents[3]
++    compiler = shlex.split(os.environ.get("CC", "cc"))
++    sdl = shlex.split(subprocess.check_output(
++        ["pkg-config", "--cflags", "--libs", "sdl2"], text=True))
++    backend = (sdk / "libs/video/rsx_vulkan_backend.c").read_text()
++    with tempfile.TemporaryDirectory(prefix="vk-present-") as tmp:
++        # The functions under test, verbatim from the backend: from their
++        # definition line to the closing brace in column 0.
++        parts = []
++        for name in ("vk_dump_ppm", "vk_cb_present"):
++            start = backend.index(f"static void {name}(")
++            end = backend.index("\n}\n", start) + 3
++            parts.append(backend[start:end])
++        (Path(tmp) / "present_under_test.inc").write_text("\n".join(parts))
++        binary = str(Path(tmp) / "fixture")
++        cmd = compiler + ["-std=c17", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
++                          "-Wno-unused-parameter", "-ffunction-sections", "-fdata-sections"]
++        if args.sanitize:
++            cmd += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
++        for directory in ("include", "libs/video", "libs", "runtime", "runtime/platform"):
++            cmd += ["-I", str(sdk / directory)]
++        cmd += ["-I", tmp]
++        cmd += [str(source), "-Wl,--gc-sections", "-o", binary] + sdl + ["-ldl", "-lm"]
++        subprocess.run(cmd, check=True)
++        subprocess.run([binary, str(Path(tmp) / "frame.ppm")], check=True)
++
++
++if __name__ == "__main__":
++    main()
+-- 
+2.47.3
+
