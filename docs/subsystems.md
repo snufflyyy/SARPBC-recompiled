@@ -259,23 +259,33 @@ switch: the square goes, nothing else changes). Patch
 `0047-shadow-compare-direction`. If another title's shadows invert after this,
 suspect this patch first.
 
-### Loading / splash screen orientation (T038, 2026-10-20)
+### Loading / splash screen orientation (T038/T050/T051, 2026-10-20)
 
-The splash / "Loading..." screen was drawn upside down while all subsequent passes
-(ESRB screen, Psyonix logo, menus, HUD, and 3D arena) were upright.
-`LOADSCREEN` draws directly to the display buffer with a 2-instruction unprojected
-passthrough vertex program (`LOADSCREEN.VPO`: `MOV HPOS, v0; MOV TEX0, v8`) and 0
-constants. Its quad vertices pass unprojected NDC coordinates: `v=0` at `pos.y=-1`,
-and `v=1` at `pos.y=+1`.
-On RSX with negative viewport scale (`scale[1] = -360.0f`, `translate[1] = 360.0f`),
-`y=-1` maps to the top (`yw = (-1)*(-360)+360 = 720`), which samples `v=0` (row 0,
-the top of the decoded PNG).
-In ps3recomp's Vulkan pipeline, `shader.setInvertY(true)` (in `rsx_shader_spirv.cpp`)
-flips clip space Y for shaders with standard projection matrices. For unprojected
-passthrough programs, this inverted the quad vertically.
-Patch `0050-loadscreen-passthrough-orientation`: `rsx_draw_engine.c` flips `xf[1]` and
-`xf[5]` for 2-instruction passthrough vertex programs without projection matrices,
-rendering the loading/splash screen upright without affecting any other pass.
+The root cause was **PNG scanline order, not shader projection**. A fresh 01.09 boot
+opens `LOADING.PNG`; both splash PNG decodes request ARGB (`outputColorSpace=20`)
+and bottom-to-top rows (`outputMode=1`). The HLE read that mode but always reported
+0 and copied rows top-to-bottom. This supplied the wrong texture layout.
+
+The captured loading draw honours `first=4`, with zero vertex base offset/index.
+Its viewport has scale Y=-360 and translate Y=360; the quad has `v=0` at position
+Y=-1 and `v=1` at Y=+1. The window formula maps Y=-1 to 720 (the **bottom** edge),
+so v=0 must sample the bottom source row, exactly as the requested decoder mode
+specifies. No special handling of `LOADSCREEN.VPO` is needed.
+
+Patch `T051-1-pngdec-output-mode` validates/reports output mode and selects source
+rows per decoder without changing stb global state. Channel swizzles and padded
+pitch are preserved. Patch `T051-2-shader-independent-viewports` fully removes
+0050's unsafe two-instruction Y-flip heuristic. The existing viewport formulas and
+compiler are unchanged: glslang's `setInvertY(true)` applies to **all** vertex
+stages, not just projection-matrix shaders.
+
+Synthetic regressions cover both row orders, grayscale/RGB/RGBA/ARGB, heights
+1/2/3, packed/padded/no-control pitch, invalid-mode atomicity, and viewport
+independence from shader instructions, NOP padding, constants and arithmetic.
+Both native fixtures pass ASan+UBSan. A 120 s Linux/Vulkan boot shows upright
+Loading and arena/HUD (3729 zlib requests, 2575 flips, unresolved 0). Full review,
+public ABI references and evidence: [t038-review.md](t038-review.md). Other backends
+are not visually verified.
 
 ## Audio
 

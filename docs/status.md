@@ -10,8 +10,8 @@ work session. Newest log entry first. Use absolute dates.
 Next steps for 2: the T021 "Port next" list at the top of docs/dod3-reuse.md (items 1-2 are
 ported as 0048/0049; next: 5 prepared flips at their FIFO position, 7 scissored depth clears
 and cropped depth copies for shadows, 8 fragment decompiler DDX/DDY/NRM/precision, 10
-anisotropic filtering); ~~T038 (upside-down Loading screen)~~ (done; T050 review confirms the
-visual fix, but T051 must replace its shader-length heuristic; [review](t038-review.md)); the `null-read,null-write` alerts a
+anisotropic filtering); ~~T038 (upside-down Loading screen)~~ (T051 done: correct PNG row
+order replaces the unsafe shader-length workaround; [resolution](t038-review.md)); the `null-read,null-write` alerts a
 165 s arena survey raised (boot_report, not yet looked at); the glass canisters' shards draw
 opaque white (maybe correct, unverified). For 3: T040, and the dod3 pacing recipe in
 dod3-reuse.md (FIFO wake on guest usleep, `GetMaxTickRate`).
@@ -41,8 +41,10 @@ boot_check is PROGRESSING with 3513 flips; the main menu runs at **29.5 fps** (1
 26.3-32.3), ~130% CPU, 28 threads. Where a menu frame's ~31 ms go, and what to try next:
 subsystems.md "Menu frame rate".
 
-**State of `main`:** 50 patch files (68 commits) on upstream `749182e` (v0.16.0, T043); every one of the
-85 test scripts (ours and ps3recomp's) passes on that stack (2026-10-20, `tools/lint.py --tests`). The upstream lifter did not
+**State of `main`:** 52 patch files (70 commits) on upstream `749182e` (v0.16.0, T043).
+All 88 discovered test scripts return zero (T051, 2026-10-20, `tools/lint.py --tests`), as do
+three explicitly run nested SDL/Vulkan suites; optional-tool skip visibility remains T048.
+The upstream lifter did not
 change, so the lifts were kept. The big fixes of the last two days: the SPURS CreateTask race that started tasks twice
 (0036, T033: ~1500% CPU to ~100%) and Vulkan draw batching with a VRAM geometry cache (0038, T040:
 menu 19.8 to 29.5 fps).
@@ -108,6 +110,24 @@ T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena
   POSIX boot scaffold gets this UE3 title to the menus on Linux.
 
 ## Log
+
+### 2026-10-20: loading-screen root cause fixed (T051, pi)
+- The game selects PNG, not BMP, and requests `outputMode=1` (bottom-to-top).
+  `cellPngDec` ignored it. The decoder now validates/reports row order and selects
+  source rows per handle, preserving ARGB swizzle and padded pitch without global stb
+  flip state. The entire shader-length viewport heuristic is removed; no replacement
+  classifier or backend special case is needed. Corrected rationale and evidence:
+  [t038-review.md](t038-review.md), subsystems.md Graphics.
+- Exported separate codec and viewport-regression patches; historical 0050 is fully
+  undone and must not be offered upstream. All 88 discovered scripts and three explicit
+  nested suites return zero. Synthetic PNG coverage: 72 color/order/pitch cases plus
+  invalid-mode atomicity at heights 1/2/3. Both PNG and renderer fixtures pass ASan+UBSan;
+  the renderer regression covers NOP equivalence, unrelated two-instruction programs,
+  fixed/guest paths, both scale signs and non-centered offsets.
+- Corrected-stack Release boot, 120 s: upright Loading and tutorial arena/car/HUD,
+  3729 zlib requests, 2575 flips, unresolved 0. An additional 55 s staged capture verifies
+  upright ESRB/car, Psyonix/Unreal logos, profile screen, main and Single Player menus.
+  No new FPS or Windows/macOS claim. No game data or generated lift is committed.
 
 ### 2026-10-20: Antigravity loading-screen fix reviewed (T050, pi)
 - T038 was already merged as `ba70ca3`; no second implementation merge is needed.

@@ -13,7 +13,7 @@ you are touching instead of re-scanning the tree or the game files.
 
 **Phase 7 done: 01.09 reaches the main menu; now performance, goal a steady 30 fps in the main menu** (user,
 2026-10-20: the game itself is capped at 30 fps; the earlier 60 fps goal is dropped). The PPU lift, all 15 SPU images, the 2 SPUJOBS jobs and the MultiStream overlay build
-on 01.02 and 01.09, with 50 ps3recomp patch files on upstream v0.16.0. New Game loads the arena, which renders with a working HUD, shadows and a drivable car (T045 done). The loading screen is upright (T038 done). The menu runs at 29.5 fps (2026-10-20, from 19.8)
+on 01.02 and 01.09, with 52 ps3recomp patch files on upstream v0.16.0. New Game loads the arena, which renders with a working HUD, shadows and a drivable car (T045 done). The loading screen is upright via correct PNG row order, without a shader-length workaround (T051 done). The menu runs at 29.5 fps (2026-10-20, from 19.8)
 after the SPURS CreateTask race fix (T033) and Vulkan draw batching with a VRAM geometry cache
 (T040, in progress; the GPU is on PCIe 2.0 x4). The pin moved to upstream v0.16.0 on 2026-10-20
 (T043). The project audit (T039) ran on 2026-10-20 and left `tools/lint.py` behind. Agents the user
@@ -129,7 +129,7 @@ Details and every flag: [docs/pipeline.md](docs/pipeline.md).
 | [docs/subsystems.md](docs/subsystems.md) | Working on graphics, audio, input, SPU/SPURS, saves, video, network, trophies |
 | [docs/debugging.md](docs/debugging.md) | Something hangs, crashes or draws wrong; `tools/boot_check.sh` (paste the first line of `analysis/boot_report.txt` into task notes), env vars, triage recipes |
 | [docs/project-audit.md](docs/project-audit.md) | Maintainability audit (T046): evidence, safety/tooling gaps, and a minimal cleanup sequence |
-| [docs/t038-review.md](docs/t038-review.md) | Review of the loading-screen fix (T050): verified captures, shader-length counterexample, and T051 follow-up |
+| [docs/t038-review.md](docs/t038-review.md) | Loading-screen review and resolution (T050/T051): PNG row-order root cause, regression tests and verified captures |
 | [docs/workflow.md](docs/workflow.md) | Before any work: task board, claiming, worktrees, locks, merging, **pausing and resuming** |
 | [docs/hle-coverage.md](docs/hle-coverage.md) | Which firmware imports have HLE handlers (stub/impl), named NIDs, ranked gaps (`tools/hle_coverage.py`) |
 

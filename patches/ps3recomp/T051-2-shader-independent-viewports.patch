@@ -1,0 +1,124 @@
+From 62fb8c4c714aa06e01bb7cfe762ec1076a4f7c53 Mon Sep 17 00:00:00 2001
+From: pi <pi@localhost>
+Date: Tue, 20 Oct 2026 20:38:37 +0000
+Subject: [PATCH] fix(video): keep viewport transforms independent of shader
+ length
+
+Remove the two-instruction Y-flip workaround. PNG bottom-to-top output fixes its actual cause; clip-space conversion must depend on viewport state, not vertex-program length or projection assumptions.
+
+Regress equivalent MOV/MOV and MOV/MOV/NOP shaders, unrelated constant/arithmetic VPs, fixed/guest paths, both viewport scale signs and a non-centered offset through the neutral backend.
+---
+ libs/video/rsx_draw_engine.c            | 12 -----
+ libs/video/tests/test_rsx_draw_engine.c | 66 +++++++++++++++++++++++++
+ 2 files changed, 66 insertions(+), 12 deletions(-)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index f5fe0cc..10f408c 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -2702,18 +2702,6 @@ static void sink_end(void* user, const rsx_dispatch* r)
+         xf[5] = -((vp.translate[1] - Hv * 0.5f) / (Hv * 0.5f));
+         xf[6] = vp.translate[2];
+     }
+-    /* UE3's LOADSCREEN program (2-instruction raw passthrough: MOV HPOS, v0; MOV TEX0, v8)
+-     * passes unprojected NDC coordinates with v=0 at y=-1 and v=1 at y=+1. On RSX with
+-     * negative viewport scale, y=-1 mapped to top (yw=720) and y=+1 to bottom (yw=0).
+-     * In the host Vulkan pipeline (where setInvertY is active for projection-matrix shaders),
+-     * this unprojected quad gets inverted. Flip xf[1]/xf[5] for this passthrough shader. */
+-    const u8* cur_vp = NULL;
+-    u32 cur_vp_instrs = 0;
+-    if (eng_guest_programs(&cur_vp, &cur_vp_instrs, NULL, NULL) && cur_vp_instrs == 2) {
+-        xf[1] = -xf[1];
+-        xf[5] = -xf[5];
+-    }
+-
+     memcpy(g.vp_cb, g.rsx.constants, RSX_DSP_NUM_CONSTANTS * 16u);
+     memcpy(g.vp_cb + RSX_DSP_NUM_CONSTANTS * 16u, xf, sizeof xf);
+ 
+diff --git a/libs/video/tests/test_rsx_draw_engine.c b/libs/video/tests/test_rsx_draw_engine.c
+index aee6109..86a1023 100644
+--- a/libs/video/tests/test_rsx_draw_engine.c
++++ b/libs/video/tests/test_rsx_draw_engine.c
+@@ -1593,6 +1593,71 @@ static void test_immediate_packed_zero_and_inline(void)
+     engine_down();
+ }
+ 
++/* Guest viewport mapping must not depend on instruction count, arithmetic,
++ * constants, or NOP padding. These programs are synthetic NV40 instructions. */
++static void orientation_fp_word(u8* p, u32 word)
++{
++    const u32 swapped = (word << 16) | (word >> 16);
++    p[0] = (u8)(swapped >> 24); p[1] = (u8)(swapped >> 16);
++    p[2] = (u8)(swapped >> 8); p[3] = (u8)swapped;
++}
++
++static void orientation_draw(const u32* vp, u32 count, float sy, float out[8])
++{
++    engine_up();
++    mf(M_VIEWPORT_TRANSLATE, 128); mf(M_VIEWPORT_TRANSLATE + 4, 64);
++    mf(M_VIEWPORT_SCALE, 128); mf(M_VIEWPORT_SCALE + 4, sy);
++    if (vp) {
++        /* One FP: MOV r0,COL0; END, fp32 colour export. */
++        orientation_fp_word(vm_base + 0x30000,
++            (1u << 24) | (15u << 9) | (1u << 13) | 1u);
++        orientation_fp_word(vm_base + 0x30004,
++            1u | (3u << 15) | (2u << 13) | (1u << 11) | (7u << 18));
++        memset(vm_base + 0x30008, 0, 8);
++        m(0x1E9C, 0); m(0x1EA0, 0); /* upload/start instruction slots */
++        for (u32 i = 0; i < count * 4; ++i)
++            m(0x0B80 + (i % 4) * 4, vp[i]);
++        m(0x08E4, 0x30002); m(0x1D60, 0x40);
++    }
++    draw_triangle();
++    CHECK(stub.n_draw == 1, "orientation fixture issues one %s draw",
++          vp ? "guest" : "fixed");
++    memcpy(out, stub.vp_xf, sizeof stub.vp_xf);
++    engine_down();
++}
++
++static void test_viewport_shader_independence(void)
++{
++    const u32 two[] = {
++        0x401F8000, 0x0040000D, 0x81000000, 0x0001E000, /* MOV HPOS,v0 */
++        0x401F8000, 0x0040080D, 0x81000000, 0x0001E01D  /* MOV TEX0,v8; END */
++    };
++    u32 three[12] = {0}, constant[8], arithmetic[8];
++    memcpy(three, two, sizeof two); three[7] &= ~1u;
++    three[8] = 63u << 15; three[11] = 1; /* NOP; END */
++    memcpy(constant, two, sizeof two);
++    constant[2] |= 1u << 23; /* MOV HPOS,c0 instead of v0 */
++    memcpy(arithmetic, two, sizeof two);
++    arithmetic[1] += 1u << 22; /* MUL HPOS,v0,c0 */
++    arithmetic[2] |= (3u | (3u << 8) | (2u << 10) | (1u << 12)) << 6;
++    const u32* programs[] = {NULL, two, three, constant, arithmetic};
++    const u32 counts[] = {0, 2, 3, 2, 2};
++    const float signs[] = {-128, 128};
++    for (u32 sign = 0; sign < 2; ++sign) {
++        float reference[8];
++        orientation_draw(NULL, 0, signs[sign], reference);
++        CHECK(reference[1] == -signs[sign] / 128 && reference[5] == 0.5f,
++              "fixed viewport honours sign %g and non-centred offset", signs[sign]);
++        for (u32 p = 1; p < 5; ++p) {
++            float actual[8];
++            orientation_draw(programs[p], counts[p], signs[sign], actual);
++            CHECK(!memcmp(actual, reference, sizeof actual),
++                  "guest program %u (%u instructions) preserves viewport sign %g",
++                  p, counts[p], signs[sign]);
++        }
++    }
++}
++
+ int main(void)
+ {
+     vm_base = (u8*)calloc(1, GUEST_BYTES);
+@@ -1627,6 +1692,7 @@ int main(void)
+     test_color_read_as_float();
+     test_immediate_compositor();
+     test_immediate_packed_zero_and_inline();
++    test_viewport_shader_independence();
+ 
+     free(vm_base);
+     printf(g_failures ? "\n%d check(s) FAILED\n" : "\nall checks passed\n",
+-- 
+2.47.3
+

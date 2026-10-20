@@ -1,0 +1,256 @@
+From a43b97d3357a7064824f633bbdd74cbfccd66ee9 Mon Sep 17 00:00:00 2001
+From: pi <pi@localhost>
+Date: Tue, 20 Oct 2026 20:38:16 +0000
+Subject: [PATCH] fix(codec): honor PNG output scanline order
+
+Validate and report outputMode, and select decoded source rows per handle without changing stb global flip state. Preserve channel swizzles and destination pitch/padding. Reject unsupported modes without mutating accepted parameters.
+
+Add source-only guest-ABI tests for 72 row-order/color/pitch cases at heights 1/2/3, plus invalid-mode atomicity. Mode values agree with the public PSL1GHT pngdec interface.
+---
+ libs/codec/cellPngDec.c                    |  24 +++--
+ libs/codec/cellPngDec.h                    |   4 +
+ libs/codec/tests/test_pngdec_output_mode.c | 106 +++++++++++++++++++++
+ tools/test_pngdec_output_mode.py           |  45 +++++++++
+ 4 files changed, 173 insertions(+), 6 deletions(-)
+ create mode 100644 libs/codec/tests/test_pngdec_output_mode.c
+ create mode 100644 tools/test_pngdec_output_mode.py
+
+diff --git a/libs/codec/cellPngDec.c b/libs/codec/cellPngDec.c
+index 99dba53..eed8324 100644
+--- a/libs/codec/cellPngDec.c
++++ b/libs/codec/cellPngDec.c
+@@ -392,8 +392,14 @@ s32 cellPngDecSetParameter(CellPngDecMainHandle mainHandle,
+     if (!sub->header_read)
+         return CELL_PNGDEC_ERROR_SEQ;
+ 
++    /* Reject an unsupported order without changing the last valid parameters. */
++    const u32 output_mode = vm_read32(inParam_addr + 4);
++    if (output_mode != CELL_PNGDEC_TOP_TO_BOTTOM &&
++        output_mode != CELL_PNGDEC_BOTTOM_TO_TOP)
++        return CELL_PNGDEC_ERROR_ARG;
++
+     sub->in_param.commandPtr        = vm_read32(inParam_addr + 0);
+-    sub->in_param.outputMode        = vm_read32(inParam_addr + 4);
++    sub->in_param.outputMode        = output_mode;
+     sub->in_param.outputColorSpace  = vm_read32(inParam_addr + 8);
+     sub->in_param.outputBitDepth    = vm_read32(inParam_addr + 12);
+     sub->in_param.outputPackFlag    = vm_read32(inParam_addr + 16);
+@@ -401,8 +407,8 @@ s32 cellPngDecSetParameter(CellPngDecMainHandle mainHandle,
+     sub->in_param.outputColorAlpha  = vm_read32(inParam_addr + 24);
+     sub->param_set = 1;
+ 
+-    printf("[cellPngDec] SetParameter(sub=%u, outputColorSpace=%u)\n",
+-           subHandle, sub->in_param.outputColorSpace);
++    printf("[cellPngDec] SetParameter(sub=%u, outputColorSpace=%u, outputMode=%u)\n",
++           subHandle, sub->in_param.outputColorSpace, sub->in_param.outputMode);
+ 
+     /* Compute output parameters */
+     u32 out_cs = sub->in_param.outputColorSpace;
+@@ -421,7 +427,7 @@ s32 cellPngDecSetParameter(CellPngDecMainHandle mainHandle,
+     vm_write32(outParam_addr + 12, sub->info.imageHeight);     /* outputHeight */
+     vm_write32(outParam_addr + 16, out_comp);                  /* outputComponents */
+     vm_write32(outParam_addr + 20, 8);                         /* outputBitDepth */
+-    vm_write32(outParam_addr + 24, 0);                         /* outputMode (top-to-bottom) */
++    vm_write32(outParam_addr + 24, output_mode);               /* outputMode */
+     vm_write32(outParam_addr + 28, out_cs);                    /* outputColorSpace */
+     vm_write32(outParam_addr + 32, (u32)(widthByte * sub->info.imageHeight)); /* useMemorySpace */
+ 
+@@ -493,9 +499,15 @@ s32 cellPngDecDecodeData(CellPngDecMainHandle mainHandle,
+          * a padded/tiled pitch is honoured. Pixel bytes are endian-neutral. */
+         u64 dst_pitch = dataCtrlParam_addr ? vm_read64(dataCtrlParam_addr + 0) : 0;
+         if (dst_pitch < row_bytes) dst_pitch = row_bytes;
+-        for (u32 y = 0; y < (u32)h; y++)
++        /* stb returns top-to-bottom pixels. Select rows per decoder rather
++         * than changing stb's global flip state (other decoders may run too).
++         * Row order is independent of channel order and destination padding. */
++        for (u32 y = 0; y < (u32)h; y++) {
++            const u32 src_y = sub->in_param.outputMode == CELL_PNGDEC_BOTTOM_TO_TOP
++                ? (u32)h - 1u - y : y;
+             memcpy(vm_base + data_addr + (u64)y * dst_pitch,
+-                   pixels + (u64)y * row_bytes, row_bytes);
++                   pixels + (u64)src_y * row_bytes, row_bytes);
++        }
+         stbi_image_free(pixels);
+ 
+         printf("[cellPngDec]   decoded %ux%u -> guest 0x%08X (pitch %llu, row %u)\n",
+diff --git a/libs/codec/cellPngDec.h b/libs/codec/cellPngDec.h
+index fc28f8c..8923366 100644
+--- a/libs/codec/cellPngDec.h
++++ b/libs/codec/cellPngDec.h
+@@ -50,6 +50,10 @@ extern "C" {
+ #define CELL_PNGDEC_COLOR_SPACE_RGBA            10
+ #define CELL_PNGDEC_COLOR_SPACE_ARGB            20
+ 
++/* Output scanline order */
++#define CELL_PNGDEC_TOP_TO_BOTTOM 0
++#define CELL_PNGDEC_BOTTOM_TO_TOP 1
++
+ /* Decode status */
+ #define CELL_PNGDEC_DEC_STATUS_FINISH   0
+ #define CELL_PNGDEC_DEC_STATUS_STOP     1
+diff --git a/libs/codec/tests/test_pngdec_output_mode.c b/libs/codec/tests/test_pngdec_output_mode.c
+new file mode 100644
+index 0000000..6a20efa
+--- /dev/null
++++ b/libs/codec/tests/test_pngdec_output_mode.c
+@@ -0,0 +1,106 @@
++/* Synthetic PNG row-order contract, using the public guest-memory ABI. */
++#include "cellPngDec.h"
++#include "cellFs.h"
++#include "../../../runtime/ppu/ppu_memory.h"
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++u8* vm_base;
++int g_resv_store_active;
++u32 g_ww_lo, g_ww_hi;
++void ppu_resv_break_store(uint64_t ea) { (void)ea; }
++int spu_coh_is_reserved(uint32_t addr) { (void)addr; return 0; }
++void spu_lockline_lock(void) {}
++void spu_lockline_unlock(void) {}
++void spu_coh_notify_write(uint32_t addr) { (void)addr; }
++void ps3_ww_report_inline(uint32_t a, uint64_t v, int w) { (void)a; (void)v; (void)w; }
++int cellfs_translate_path(const char* path, char* host, size_t cap)
++{ (void)path; (void)host; (void)cap; return -1; }
++
++#define REQUIRE(c) do { if (!(c)) { \
++    fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #c); exit(1); } } while (0)
++
++enum { MAIN = 0x100, SUB = 0x104, SRC = 0x200, INFO = 0x240,
++       IN = 0x280, OUT = 0x300, CTRL = 0x340, STATUS = 0x360,
++       PNG = 0x1000, DATA = 0x3000, VM_BYTES = 0x10000 };
++static const u8 rgba[3][8] = {
++    {255,0,0,17, 0,255,0,34},
++    {0,0,255,51, 255,255,0,68},
++    {255,0,255,85, 0,255,255,102}
++};
++
++static void expect_pixels(u32 cs, u32 mode, u32 height, u32 pitch)
++{
++    const u32 components = cs == 1 ? 1 : cs == 2 ? 3 : 4;
++    for (u32 y = 0; y < height; ++y) {
++        const u32 source_y = mode ? height - 1 - y : y;
++        const u8* expected = rgba[source_y];
++        const u8* actual = vm_base + DATA + y * pitch;
++        for (u32 x = 0; x < 2; ++x) {
++            const u8* p = expected + 4 * x;
++            if (cs == 1) {
++                REQUIRE(actual[x] == (p[0] * 77 + p[1] * 150 + p[2] * 29) / 256);
++            } else for (u32 c = 0; c < components; ++c) {
++                const u32 channel = cs == 20 ? (c + 3) % 4 : c;
++                REQUIRE(actual[x * components + c] == p[channel]);
++            }
++        }
++        for (u32 i = 2 * components; i < pitch; ++i) REQUIRE(actual[i] == 0xA7);
++    }
++    for (u32 i = 1; i <= 16; ++i) REQUIRE(vm_base[DATA - i] == 0xA7);
++    for (u32 i = 0; i < 16; ++i) REQUIRE(vm_base[DATA + height * pitch + i] == 0xA7);
++}
++
++static void decode_case(u32 main, u32 sub, u32 height, u32 cs, u32 mode, u32 padding)
++{
++    const u32 row = 2 * (cs == 1 ? 1 : cs == 2 ? 3 : 4);
++    const u32 pitch = row + (padding == 1 ? 5 : 0);
++    vm_write32(IN + 4, mode); vm_write32(IN + 8, cs); vm_write32(IN + 12, 8);
++    REQUIRE(cellPngDecSetParameter(main, sub, IN, OUT) == CELL_OK);
++    REQUIRE(vm_read32(OUT + 24) == mode);
++    REQUIRE(vm_read64(OUT) == row);
++    vm_write64(CTRL, pitch);
++    memset(vm_base + DATA - 16, 0xA7, height * pitch + 32);
++    vm_write32(STATUS + 12, 99);
++    REQUIRE(cellPngDecDecodeData(main, sub, DATA, padding == 2 ? 0 : CTRL, STATUS) == CELL_OK);
++    REQUIRE(vm_read32(STATUS + 12) == CELL_PNGDEC_DEC_STATUS_FINISH);
++    expect_pixels(cs, mode, height, pitch);
++}
++
++int main(int argc, char** argv)
++{
++    REQUIRE(argc == 2);
++    vm_base = calloc(1, VM_BYTES); REQUIRE(vm_base != NULL);
++    FILE* file = fopen(argv[1], "rb"); REQUIRE(file != NULL);
++    const size_t size = fread(vm_base + PNG, 1, 4096, file);
++    REQUIRE(size > 0 && size < 4096 && !ferror(file)); fclose(file);
++    REQUIRE(cellPngDecCreate(MAIN, 0, 0) == CELL_OK);
++    const u32 main = vm_read32(MAIN);
++    vm_write32(SRC, CELL_PNGDEC_BUFFER); vm_write32(SRC + 20, PNG);
++    vm_write32(SRC + 24, (u32)size);
++    REQUIRE(cellPngDecOpen(main, SUB, SRC, 0) == CELL_OK);
++    const u32 sub = vm_read32(SUB);
++    REQUIRE(cellPngDecReadHeader(main, sub, INFO) == CELL_OK);
++    const u32 height = vm_read32(INFO + 4);
++    REQUIRE(vm_read32(INFO) == 2 && height >= 1 && height <= 3);
++    const u32 spaces[] = {1, 2, 10, 20}; /* grayscale, RGB, RGBA, ARGB */
++    for (u32 cs = 0; cs < 4; ++cs)
++        for (u32 mode = 0; mode < 2; ++mode)
++            for (u32 padding = 0; padding < 3; ++padding)
++                decode_case(main, sub, height, spaces[cs], mode, padding);
++
++    /* Reject an invalid mode before mutating the last accepted parameters. */
++    vm_write32(IN + 4, 2); vm_write32(IN + 8, 1);
++    memset(vm_base + OUT, 0xA7, 36);
++    REQUIRE(cellPngDecSetParameter(main, sub, IN, OUT) == CELL_PNGDEC_ERROR_ARG);
++    for (u32 i = 0; i < 36; ++i) REQUIRE(vm_base[OUT + i] == 0xA7);
++    memset(vm_base + DATA - 16, 0xA7, height * 8 + 32);
++    REQUIRE(cellPngDecDecodeData(main, sub, DATA, 0, STATUS) == CELL_OK);
++    expect_pixels(20, 1, height, 8);
++    REQUIRE(cellPngDecClose(main, sub) == CELL_OK);
++    REQUIRE(cellPngDecDestroy(main) == CELL_OK);
++    free(vm_base);
++    printf("PASS PNG: 24 row-order/channel/pitch cases + invalid-mode atomicity, height=%u\n", height);
++    return 0;
++}
+diff --git a/tools/test_pngdec_output_mode.py b/tools/test_pngdec_output_mode.py
+new file mode 100644
+index 0000000..a75abed
+--- /dev/null
++++ b/tools/test_pngdec_output_mode.py
+@@ -0,0 +1,45 @@
++"""Decode synthetic PNGs through the guest ABI; no game data or GPU required."""
++import os
++from pathlib import Path
++import struct
++import subprocess
++import tempfile
++import zlib
++
++
++def png_chunk(kind, data):
++    return (struct.pack(">I", len(data)) + kind + data
++            + struct.pack(">I", zlib.crc32(kind + data)))
++
++
++def png_image(height):
++    rows = [bytes((255, 0, 0, 17, 0, 255, 0, 34)),
++            bytes((0, 0, 255, 51, 255, 255, 0, 68)),
++            bytes((255, 0, 255, 85, 0, 255, 255, 102))]
++    ihdr = struct.pack(">IIBBBBB", 2, height, 8, 6, 0, 0, 0)
++    raw = b"".join(b"\x00" + row for row in rows[:height])
++    return (b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", ihdr)
++            + png_chunk(b"IDAT", zlib.compress(raw)) + png_chunk(b"IEND", b""))
++
++
++def main():
++    if os.name == "nt":
++        print("SKIP: PNG C fixture requires a POSIX compiler; run on macOS/Linux")
++        return
++    root = Path(__file__).resolve().parents[1]
++    with tempfile.TemporaryDirectory(prefix="pngdec-output-mode-") as directory:
++        binary = Path(directory) / "test_pngdec_output_mode"
++        subprocess.run([os.environ.get("CC", "cc"), "-std=c17", "-Iinclude",
++                        "-Ilibs/codec", "-Ilibs/filesystem",
++                        "libs/codec/tests/test_pngdec_output_mode.c",
++                        "libs/codec/cellPngDec.c", "-lm", "-o", str(binary)],
++                       cwd=root, check=True, timeout=120)
++        for height in (1, 2, 3):
++            image = Path(directory) / f"rows-{height}.png"
++            image.write_bytes(png_image(height))
++            subprocess.run([str(binary), str(image)], cwd=root,
++                           check=True, timeout=30)
++
++
++if __name__ == "__main__":
++    main()
+-- 
+2.47.3
+

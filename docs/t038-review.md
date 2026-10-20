@@ -2,7 +2,53 @@
 
 Reviewed by pi on 2026-10-20 (T050), against main `9c72623`.
 
-## Decision
+## Resolution — T051 (2026-10-20)
+
+A fresh 01.09 boot selects **LOADING.PNG**, not the BMP assumed by T038. Both splash
+PNG decodes request `outputColorSpace=20, outputMode=1` (ARGB, bottom-to-top).
+`cellPngDec` reads that mode but reports mode 0 and always writes top-to-bottom rows.
+The loading quad therefore samples the wrong row layout. The generic correction
+belongs in the decoder, not in a shader classifier or backend viewport special case.
+
+The public [PSL1GHT PNG interface](https://github.com/ps3dev/PSL1GHT/blob/master/ppu/include/pngdec/pngdec.h)
+defines TOP_TO_BOTTOM=0 and BOTTOM_TO_TOP=1. Its
+[viewport documentation](https://github.com/ps3dev/PSL1GHT/blob/master/ppu/include/rsx/commands_inc.h)
+also agrees with the pre-workaround viewport math. Temporary draw instrumentation
+confirmed first=4 is honoured, base offset/index are zero, scale Y=-360 and translate
+Y=360, with v=0 at position Y=-1. No projection-dependent compiler behavior is needed
+to explain the failure. Evidence: pi worktree `analysis/t051-mode-boot.log` and its
+2026-10-20 20:30 boot log.
+
+**F01 and F02 are resolved:**
+- `patches/ps3recomp/T051-1-pngdec-output-mode.patch` validates and reports the requested
+  scanline order and selects source rows locally while preserving channel order and pitch.
+  It does not change stb's global flip state.
+- `patches/ps3recomp/T051-2-shader-independent-viewports.patch` removes the entire
+  instruction-count workaround. The original viewport formulas, shader compiler,
+  culling and scissor conventions remain unchanged for every backend and program.
+- The new PNG guest-ABI fixture covers 72 row-order/channel/pitch combinations across
+  heights 1/2/3, plus invalid-mode rejection without changing accepted parameters.
+  It fails against the old codec and passes against the fix. The neutral draw fixture
+  now covers fixed/guest programs, MOV/MOV versus MOV/MOV/NOP, unrelated two-instruction
+  constant/arithmetic programs, both scale signs and non-centered offsets. Six cases
+  failed with patch 0050; all pass after removing it.
+- Both fixtures pass ASan+UBSan. All 88 discovered test scripts return zero; the three
+  nested SDL/Vulkan suites omitted by discovery also pass explicitly. Existing skip
+  visibility limitations remain T048, not a claim that every optional tool was present.
+- The fixed Release executable completes a 120 s 01.09 run with upright Loading text
+  and arena/car/HUD: 3729 zlib requests, 2575 flips, unresolved 0. Capture directory:
+  `captures/boot_check/20261020-203420-1327469/` in the pi worktree. The report says
+  `STALLED since 102.4s (frames still presented)`; this heuristic is not a render freeze.
+- An additional 55 s boot with timed snapshots confirms upright ESRB/car, Psyonix and
+  Unreal logos, profile selection, main menu and Single Player menu. Local contact sheet:
+  `analysis/t051-orientation-stages.png`; run log: `analysis/t051-stages-boot.log`.
+
+PNG row order is a portable HLE contract, not a backend workaround. Linux/Vulkan is
+visually verified; Windows/macOS are not claimed as tested. No new FPS claim is made.
+Patch 0050 stays in historical stack order but is fully undone by T051's video patch;
+do not offer 0050 upstream. The codec correction can be offered independently.
+
+## Original review decision (T050, before T051)
 
 Antigravity's implementation is **already merged** as `ba70ca3`, including patch
 `0050-loadscreen-passthrough-orientation.patch`. No branch remains to merge, and no
@@ -14,7 +60,7 @@ F01 demonstrates that shader length changes rendering independently of shader
 semantics. T051 tracks correction and permanent regressions. This is not evidence
 of a new visual regression in the tested SARPBC sequence.
 
-## Findings, by priority
+## Original findings, by priority (both resolved by T051)
 
 ### F01 — P1: instruction count is not a passthrough-program predicate
 
@@ -63,7 +109,7 @@ on Metal/D3D12. Treat the cause as a hypothesis until the viewport/clip-space
 contract is demonstrated. T051 must correct the explanation along with the rule;
 this review does not rewrite historical claims as though they had been validated.
 
-## Verification
+## Original verification (T050)
 
 - **Fresh 120-second Linux/Vulkan boot on the combined stack**, using the already
   rebuilt private 01.09 executable containing patch 0050:
@@ -133,11 +179,11 @@ three[11] = 1; /* NOP; END */
    `draw_triangle()`. Record `stub.vp_xf[1]` and `[5]` before `engine_down()`.
 4. Build with the same six engine/dispatcher/decompiler source files and include
    directories used by `external/ps3recomp/tools/test_rsx_immediate_vertices.py`.
-   Require one draw in each case. The current patch produces the opposite Y
-   pairs recorded above; a correct permanent regression must instead require
+   Require one draw in each case. The pre-T051 patch produced the opposite Y
+   pairs recorded above; the permanent T051 regression instead requires
    semantically equivalent programs to retain the same transform.
 
-## Review checklist
+## Original review checklist (T050)
 
 | Area | Result |
 |---|---|
