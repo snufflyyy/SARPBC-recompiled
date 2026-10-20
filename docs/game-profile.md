@@ -132,14 +132,81 @@ decoder from console firmware that a port has to replace — check whether we hi
 **15 SPU ELFs embedded in the EBOOT** (`extract_spu_images.py` →
 `analysis/spu_EBOOT_elf/`, 1.28 MB total):
 
-| # | Offset | Size | Identified by strings |
+Image numbers are the EBOOT order (the same in both versions). The table is for **01.09**
+(`versions/0109/`; sha256 prefix, size, ELF EA = EBOOT file offset + `0x10000`). All 15 are
+identified (T010, 2026-10-20; strings per image, the PhysX name table, and the first reference
+to each ELF EA in the EBOOT's data). In 01.02 the PhysX images (2-11) are byte-identical; 0, 1
+and 12-14 are different builds (lift prefixes `0e193327`, `3077b344`, `0a01540b`, `6417c94e`,
+`7cc4abec`).
+
+| # | 01.09 image, EA | Size | What it is | How it runs | Confidence |
+|---|---|---|---|---|---|
+| 0 | `e33837bb`, `0x10AF300` | 95,636 | **MultiStream mixer** (build path string `spu/msngSPURS_MP3`; MP3 decode, DSP slots) | SPURS taskset `0x01370680`, task 0 (T007). EA stored beside two float constants at `0x1261A50` and in a `{3,0,EA,0}` record at `0x1268AEC` | high |
+| 1 | `d08b1ad8`, `0x10C6900` | 38,100 | **Edge zlib** inflate task (`edgezlib_inflate_task.cpp`) | Requests go through the SPURS LFQueue push, which `src/overrides/edgezlib.cpp` serves natively: this image is **never dispatched** at run time. EA referenced from a struct at `0x1239470` | high |
+| 2 | `11d77ed9`, `0x10D0600` | 9,968 | PhysX `SPU_FluidSpatialHash.elf` | SPURS task (PhysX taskset; `CellSPURSSupport`, SPURS queue to the PPU) | high (name table) |
+| 3 | `013103a1`, `0x10D2D00` | 138,888 | PhysX `SPU_FluidCollision.elf` | same | high |
+| 4 | `4b403ab6`, `0x10F4C00` | 42,232 | PhysX `SPU_RaycastRelease.elf` | same | high |
+| 5 | `2f214d8c`, `0x10FF100` | 162,872 | PhysX `SPU_HeightFieldRelease.elf` | same | high |
+| 6 | `239e932f`, `0x1126D80` | 39,016 | PhysX `SPU_ClothRelease.elf` | same | high |
+| 7 | `5af85a31`, `0x1130600` | 323,840 | PhysX **`SPU_DynamicsRelease.elf`**, entry `0x200F0`; two overlays at LS `0x3080` (`OverlaySmallIsland` code, LMA `0x40000`; `OverlayLargeIsland` zero scratch, LMA `0x5A480`) loaded via the cellOvis table, see [subsystems.md](subsystems.md#spu--spurs) | SPURS task on taskset `0x01335080`, 16 per frame; seen running | high |
+| 8 | `906761dc`, `0x117F780` | 131,328 | PhysX `SPU_NarrowPhase3Release.elf` (sphere/capsule/box vs mesh and heightfield: `PxcContactCapsuleMesh`, `...SphereMesh`) | same | high |
+| 9 | `034ddc73`, `0x119F900` | 135,488 | PhysX `SPU_NarrowPhase2Release.elf` (adds `PxcContactCapsuleConvex`, `SphereConvex`) | same | high |
+| 10 | `0e1192e6`, `0x11C0A80` | 141,436 | PhysX `SPU_NarrowPhase1Release.elf` (convex/hull/box pairs: `ConvexConvex`, `HullHull`, `BoxConvex`, `PlaneConvex`) | same | high |
+| 11 | `7bde2a3f`, `0x11E3300` | 20,304 | PhysX `SPU_IslandGenerationRelease.elf` | same; seen spinning at LS `0x68E0` (T030) | high |
+| 12 | `615f0131` | 10,828 | MultiStream DSP plugin `mstream_dsp_i3dl2.pic` | Not a SPURS image: position-independent plugin the mixer copies into a heap block and runs at LS `0x37000` (overlay `spu_ovl_msdsp_37000`, `tools/make_spu_overlays.py`). Registered as a stand-alone image too; nothing is known to dispatch it (guess) | high |
+| 13 | `16bab42d` | 1,932 | MultiStream DSP plugin `mstream_dsp_filter.pic` | same | high |
+| 14 | `8bec3b25` | 2,332 | MultiStream DSP plugin `mstream_dsp_para_eq.pic` | same | high |
+
+The PhysX table (`{name EA, ELF EA, overlay table EA}` x 10) is at `0x1261A90` in 01.09
+(`0x1CCB8E0` in 01.02, see subsystems.md); the order is IslandGeneration, Dynamics,
+NarrowPhase1, 2, 3, Cloth, HeightField, Raycast, FluidSpatialHash, FluidCollision. The six
+PhysX images that were "unknown" here (3-5, 8-10) are therefore confirmed by name; the new
+facts are the 01.09 addresses and the per-image string evidence above (PhysX 2.80 for PS3,
+`PS3-PhysX_280_` build path; `SPUNAME` strings in the DSP plugins).
+
+### SPU coverage audit (T010, 2026-10-20)
+
+`--allow-partial` was needed because the lifter's functions do not cover every byte of an
+image's executable range. `tools/spu_coverage.py` (read-only; `--version 0102` for the base
+game, `-v` for every range, `--strict` to fail on a missed-function candidate) subtracts the
+lifted functions from each image's executable ranges and classifies every uncovered range by
+disassembly and by who references it. On 01.09 (15 images + the two SPUJOBS jobs): **512
+uncovered ranges, 62,088 bytes**:
+
+| Verdict | Ranges | Bytes | What |
 |---|---|---|---|
-| 0 | `0x19F0700` | 85,300 | unknown |
-| 1 | `0x1A05480` | 37,708 | **Edge zlib** (package decompression) |
-| 2, 6, 11 | `0x1A0F000`, `0x1A65780`, `0x1B21D00` | 10–39 KB | **PhysX** SPU tasks (SPURS queue) |
-| 3–5, 8–10 | `0x1A11700`... | 42–163 KB | unknown, likely PhysX/engine tasks |
-| 7 | `0x1A6F000` | 323,840 | **PhysX `SPU_DynamicsRelease.elf`**, entry `0x200F0`; two overlays at LS `0x3080` (`OverlaySmallIsland` code, LMA `0x40000`; `OverlayLargeIsland` zero scratch, LMA `0x5A480`) loaded via the cellOvis table, see [subsystems.md](subsystems.md#spu--spurs) |
-| 12–14 | `0x1CBC400`... | 2–11 KB | **MultiStream DSP**: `mstream_dsp_i3dl2`, `_filter`, `_para_eq` |
+| padding | 370 | 1,676 | `nop`/`lnop` alignment between functions |
+| zero | 13 | 220 | zero words |
+| string | 7 | 34,208 | assertion/printf strings (Edge zlib, MultiStream, PhysX Dynamics `.rodata` inside the overlay) |
+| data | 55 | 16,232 | float tables, small-integer tables, switch jump tables (offsets decode as `stop N`), `lqr`-loaded constants, and the 16-byte image signature quad at the segment start (four `ila $r2,imm`-looking words at LS `0x3000`, `0x80` in the DSP plugins; never executed, the entry is `0x3050`/`0x3080`) |
+| post-stop | 7 | 240 | `bi $lr` after a function that ends in `stop`: the compiler's epilogue after a noreturn call (a `hbr` hint names it) |
+| code? (referenced) | 2 | 324 | see below |
+| dead (unreferenced code) | 58 | 9,188 | whole functions nothing calls or points to |
+
+Reading it: **no uncovered range is a missed function the lifted code reaches directly**
+(the pipeline already refuses an image when a direct branch/call target has no function
+entry). All string, table and padding bytes are literals as expected. Two classes need a
+caveat:
+
+- **Dead code (58 ranges, 14 in the Edge Geometry job).** Real, fully decodable functions
+  (e.g. a 120-byte MFC DMA helper in Edge zlib at `0xAD40`, 760 bytes at `0x16DD0` in
+  FluidCollision) that no `brsl`, branch, `ila`/`ilhu+iohl` constant, `lqr` or pointer word in
+  the image refers to: unused library functions linked in with the PhysX/Edge code. They would
+  matter only if the PPU passed their address in a task argument (not seen) or an indirect
+  branch computed it. Not a lifter fault; list below if a run ever logs `branched into
+  unlifted LS`.
+- **Two real candidates (`code?`), both PhysX NarrowPhase**: `906761dc` function at LS
+  `0x12E30` (260 B) and `034ddc73` function at LS `0x16130` (64 B). Each is referenced by one
+  32-bit pointer word in `.rodata` (`0x21C78` and `0x22CD4`, alone in an otherwise zero
+  table), i.e. a function pointer stored in data, which `find_spu_functions.py`'s pointer-table
+  seeder does not pick up. If the game ever calls through that slot the runtime would hit an
+  unlifted address (`SPU_INTERP_UNLIFTED` fallback or "ending the job"). Fix: pass them as
+  extra function seeds (`build_spu_workloads.py` `--extra-funcs name=ADDR`, kept in
+  `tools/relift.sh`), or teach the seeder to take single `.rodata` pointers that land on a
+  decodable 16-byte aligned prologue. Both exist identically in 01.02. Not yet observed to be
+  called.
+
+Re-run the tool after every relift; it needs the `src/spu_gen` lift output but no build.
 
 **`SPUJOBS.SPRX`** → `game/SPUJOBS.prx`: a PPU PRX (`e_type 0xFFA4`) with no SPU ELFs
 inside; its strings are **Edge Geometry** errors (vertex/index decompression, blend
