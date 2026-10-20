@@ -18,6 +18,11 @@
 #   tools/task.sh release <ID> <agent> <reason...>   # back to open/
 #   tools/task.sh new     <slug> <title...>           # next free ID
 #   tools/task.sh lock    <name> <command...>         # run under $MAIN/.locks/<name>.lock
+#
+# Every board mutation (claim, note, done, release, new) runs under the short `board`
+# lock, so two agents can never allocate the same ID or interleave a log write.
+# note/done/release must come from the task's owner; TASK_FORCE=1 overrides that
+# (for example to release a task whose agent is gone).
 set -euo pipefail
 
 MAIN=$(dirname "$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir)")
@@ -42,7 +47,18 @@ open_by_prio() {    # open task files, queue order
 }
 last_log() { grep -E '^- [0-9]{4}-' "$1" | tail -1 | cut -c3-18; }
 
+owned_by() {    # owned_by <file> <agent>: only the owner may change a claimed task
+    local o; o=$(field "$1" Owner)
+    if [ "${TASK_FORCE:-}" = 1 ] || [ "$o" = "$2" ]; then return 0; fi
+    echo "$(basename "$1" .md) is owned by '$o', not '$2' (TASK_FORCE=1 overrides)" >&2
+    return 1
+}
+
 cmd=${1:-list}; shift || true
+case "$cmd" in
+claim|note|done|release|new)
+    [ -n "${TASK_BOARD_LOCKED:-}" ] || exec flock "$MAIN/.locks/board.lock" env TASK_BOARD_LOCKED=1 "$0" "$cmd" "$@" ;;
+esac
 case "$cmd" in
 list)
     echo "== open (queue order)"
@@ -82,10 +98,12 @@ claim)
 note)
     id=$1 agent=$2; shift 2
     f=$(find_task "$id" claimed open); [ -n "$f" ] || { echo "no task $id" >&2; exit 1; }
+    case "$f" in "$B/claimed"/*) owned_by "$f" "$agent" || exit 1 ;; esac
     log "$f" "$agent" "$*" ;;
 done)
     id=$1 agent=$2; shift 2
     f=$(find_task "$id" claimed); [ -n "$f" ] || { echo "task $id is not claimed" >&2; exit 1; }
+    owned_by "$f" "$agent" || exit 1
     log "$f" "$agent" "DONE: $*"
     sed -i "s/^Status:.*/Status: done/" "$f"
     mv "$f" "$B/done/"
@@ -93,12 +111,14 @@ done)
 release)
     id=$1 agent=$2; shift 2
     f=$(find_task "$id" claimed); [ -n "$f" ] || { echo "task $id is not claimed" >&2; exit 1; }
+    owned_by "$f" "$agent" || exit 1
     log "$f" "$agent" "RELEASED: $*"
     sed -i "s/^Status:.*/Status: open/; s/^Owner:.*/Owner: -/" "$f"
     mv "$f" "$B/open/"
     echo "released $id" ;;
 new)
-    slug=$1; shift
+    slug=${1:?usage: task.sh new <slug> <title...>}; shift
+    case "$slug" in *[!a-z0-9-]*|-*) echo "slug must be lowercase letters, digits and dashes" >&2; exit 1 ;; esac
     last=$(find "$B"/open "$B"/claimed "$B"/done -name 'T[0-9][0-9][0-9]-*' -printf '%f\n' | cut -c1-4 | sort | tail -1)
     last=${last:-T000}
     n=$(( 10#${last#T} + 1 ))

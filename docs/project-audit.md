@@ -140,6 +140,8 @@ strict mode that makes missing required compilers/checkers fail rather than skip
 
 ### A04 — High: build provenance can silently diverge from the patch stack
 
+**Resolved by T049 (2026-10-20):** `tools/apply_patches.sh [--ensure]` builds pin + patches in a scratch worktree and compares tree hashes (stamp: `<hash of pin+patches> <tree>`), refuses a dirty runtime before touching anything (`SARPBC_ALLOW_DIRTY_RUNTIME=1` is the explicit override), leaves the checkout alone when a patch fails, and keeps a replaced tip under `refs/sarpbc-backup/*`. `build.sh` runs under a per-checkout `build-<id>` lock. `tools/test_build.py` proves it with throwaway repositories.
+
 **Evidence:** `build.sh:55-73` accepts an unstamped checkout if its branch, ancestry
 and commit count match. Equal commit counts do not prove equal patch contents.
 If the expected stack changes while the submodule is dirty, the script warns and
@@ -227,6 +229,8 @@ Keep the exportable patch model; split new behavioral features from diagnostics
 where practical, rather than rewriting or squashing the entire working series.
 
 ### A10 — Medium: task-board creation is not safe for concurrent writers
+
+**Resolved by T049 (2026-10-20):** claim/note/done/release/new run under a `board` flock; note/done/release verify the owner (`TASK_FORCE=1` overrides); `new` validates the slug. `tools/test_task.py` covers concurrency and ownership. The merge-commits-whole-board behavior is documented in workflow.md, not changed.
 
 **Evidence:** `tools/task.sh` computes the next ID from existing names and writes
 it without a board lock. Two agents can choose the same ID. Note/done/release do

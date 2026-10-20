@@ -130,8 +130,10 @@ See [build-linux.md](build-linux.md). The short way, from the repo root:
 ```
 
 `build.sh` re-applies `patches/ps3recomp/` only when the patches or the pin changed, or the
-submodule was moved off the commit it last patched. It keeps a stamp (`<hash of pin+patches>
-<HEAD>`) in the submodule's git dir. Re-applying rewrites the runtime headers, and every lifted
+submodule's tree differs from pin + patches (it compares tree hashes, built in a scratch worktree, so
+a wrong history with the right commit count is caught and a failing patch changes nothing). It keeps
+a stamp (`<hash of pin+patches> <tree>`) in the submodule's git dir, refuses a dirty submodule
+(`SARPBC_ALLOW_DIRTY_RUNTIME=1` builds it as is), and runs under a per-checkout lock. Re-applying rewrites the runtime headers, and every lifted
 file includes them, so an unneeded re-apply costs a full recompile (~1 min of ccache hits, more on
 a cold cache). It never runs `git submodule update` on an existing checkout: that detaches the
 submodule at the bare pin, and the next build fails to link against the unpatched runtime (seen

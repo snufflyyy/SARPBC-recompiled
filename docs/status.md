@@ -111,6 +111,9 @@ T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena
 
 ## Log
 
+### 2026-10-20: predictable tooling (T049, claude)
+- `apply_patches.sh --ensure` verifies tree identity in a scratch worktree, refuses a dirty runtime, and `build.sh` holds a per-checkout lock; `task.sh` serializes board writes and checks owners. Fixtures: `tools/test_build.py`, `tools/test_task.py`. Real submodule verified in 0.45 s, no rewrite. Note: `build.sh` now fails on a dirty `external/ps3recomp` (override `SARPBC_ALLOW_DIRTY_RUNTIME=1`).
+
 ### 2026-10-20: loading-screen root cause fixed (T051, pi)
 - The game selects PNG, not BMP, and requests `outputMode=1` (bottom-to-top).
   `cellPngDec` ignored it. The decoder now validates/reports row order and selects

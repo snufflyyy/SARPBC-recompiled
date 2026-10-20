@@ -12,6 +12,10 @@
 #   2. configures the build dir with clang + Ninja if it isn't configured yet
 #   3. builds under the shared `cpu` lock, so it never runs alongside an agent's build
 #
+# The whole script runs under a per-checkout `build-<id>` lock, so patching, configuring,
+# --clean and compiling of one checkout never interleave. A dirty external/ps3recomp is
+# refused (SARPBC_ALLOW_DIRTY_RUNTIME=1 builds it as is).
+#
 # Build dirs: versions/0109/build and build/ in the main checkout; build-0109/ and
 # build/ in an agent worktree (tools/agent_setup.sh). The lifted code comes from
 # tools/relift.sh (docs/pipeline.md); this script never relifts.
@@ -19,7 +23,11 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")" && pwd)
 MAIN=$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)")
-SUB=$ROOT/external/ps3recomp
+if [ -z "${SARPBC_BUILD_LOCKED:-}" ]; then
+    mkdir -p "$MAIN/.locks"
+    exec flock "$MAIN/.locks/build-$(printf %s "$ROOT" | sha256sum | cut -c1-12).lock" \
+        env SARPBC_BUILD_LOCKED=1 "$0" "$@"
+fi
 
 version=0109 clean=0
 while [ $# -gt 0 ]; do
@@ -42,36 +50,10 @@ case "$version" in
 esac
 [ -d "$RECOMP" ] || { echo "no lifted code at $RECOMP: run the pipeline first (docs/pipeline.md)" >&2; exit 1; }
 
-# 1. Patch stack, only when it changed. Never `git submodule update` an existing
-# checkout here: that detaches it at the bare pin and the build then fails to link.
-# The stamp ("<hash of pin + patches> <submodule HEAD>") lives in the submodule's git
-# dir, so every checkout (main or worktree) tracks its own, and a submodule moved
-# off the commit it was stamped for gets re-patched.
-[ -e "$SUB/.git" ] || git -C "$ROOT" submodule update --init external/ps3recomp
-PIN=$(git -C "$ROOT" ls-tree HEAD external/ps3recomp | awk '{print $3}')
-want=$( { echo "$PIN"; cat "$ROOT"/patches/ps3recomp/*.patch 2>/dev/null; } | sha256sum | cut -d' ' -f1)
-STAMP=$(git -C "$SUB" rev-parse --absolute-git-dir)/sarpbc-patches.stamp
-head=$(git -C "$SUB" rev-parse HEAD)
-read -r have stamped_head 2>/dev/null < "$STAMP" || have='' stamped_head=''
-if [ -z "$have" ] || [ -z "$stamped_head" ]; then
-    # No (valid) stamp yet: trust a checkout that is already the pin plus one commit
-    # per patch commit, rather than rebuild everything once for nothing.
-    ncommits=$(cat "$ROOT"/patches/ps3recomp/*.patch 2>/dev/null | grep -c -E '^From [0-9a-f]{40} ' || true)
-    if [ "$(git -C "$SUB" branch --show-current)" = sarpbc-patches ] \
-       && git -C "$SUB" merge-base --is-ancestor "$PIN" HEAD 2>/dev/null \
-       && [ "$(git -C "$SUB" rev-list --count "$PIN"..HEAD)" = "$ncommits" ]; then
-        have=$want stamped_head=$head
-        echo "$want $head" > "$STAMP"
-    fi
-fi
-if [ "$have" != "$want" ] || [ "$stamped_head" != "$head" ]; then
-    if ! git -C "$SUB" diff --quiet || ! git -C "$SUB" diff --cached --quiet; then
-        echo "warning: the patch stack needs re-applying but external/ps3recomp has uncommitted edits; not touching it" >&2
-    else
-        "$ROOT/tools/apply_patches.sh"
-        echo "$want $(git -C "$SUB" rev-parse HEAD)" > "$STAMP"
-    fi
-fi
+# 1. Patch stack: tools/apply_patches.sh --ensure compares the checkout's tree with
+# pin + patches (not a commit count), refuses a dirty runtime and leaves the checkout
+# untouched when a patch fails. It rewrites headers only when the stack really changed.
+"$ROOT/tools/apply_patches.sh" --ensure
 
 # 2. Configure.
 [ $clean = 1 ] && rm -rf "$BUILD"

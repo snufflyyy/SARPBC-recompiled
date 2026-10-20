@@ -15,7 +15,7 @@ agent picks its own task from the board, works in its own worktree, and merges i
 | Worktree per agent | `.worktrees/<agent>`, branch `<agent>/work` (`tools/agent_setup.sh <agent>`) | One agent's half-finished edit never breaks another agent's build. The main checkout stays on `main` and only receives merges |
 | Shared, read-only | `game/ vfs/ .venv/ src/recomp/ src/spu_gen/ versions/` | Symlinked or looked up from the main checkout. **Never write into them** |
 | Compiler cache | `<main>/.cache/ccache` | Shared by every worktree (`CMakeLists.txt`); a fresh worktree's build is mostly cache hits |
-| Locks | `tools/task.sh lock <name> <cmd...>` (flock on `<main>/.locks/<name>.lock`) | `cpu`: builds, one at a time (each uses all 16 threads). `boot`: game runs, one at a time. `merge`: merging into main |
+| Locks | `tools/task.sh lock <name> <cmd...>` (flock on `<main>/.locks/<name>.lock`) | `cpu`: builds, one at a time (each uses all 16 threads). `boot`: game runs, one at a time. `merge`: merging into main. Short internal locks need no action: `board` (every claim/note/done/release/new, so IDs stay unique) and `build-<id>` (one per checkout: `build.sh` patching, configuring and compiling never interleave). `merge_to_main.sh` commits the *whole* board, including other agents' current claims and notes |
 
 **Agent names**: short and lowercase, the harness plus a number if you run two of the same:
 `claude`, `pi`, `antigravity`, `pi-2`. Use the same name for the worktree, claims and notes.
@@ -96,7 +96,7 @@ verified and leaves main working; otherwise leave it on the branch (the note nam
 
 To run several at once, start each one with that prompt and a different agent name. Stale
 claims (an agent that died) show up in `tools/task.sh list` with their last log time. Release them
-with `tools/task.sh release <ID> <agent> "stale"`; the HANDOFF note, if any, names the branch
+with `TASK_FORCE=1 tools/task.sh release <ID> <agent> "stale"` (note/done/release refuse a caller who isn't the task's owner); the HANDOFF note, if any, names the branch
 that holds the work.
 
 ## Rules for every agent
