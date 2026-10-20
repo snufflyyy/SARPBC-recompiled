@@ -1,0 +1,28 @@
+# T047: Validate native zlib requests and VFS path bounds
+
+Status: claimed
+Owner: pi
+Priority: 2
+Touches: src/overrides/edgezlib.cpp, src/main.cpp (setup_vfs only), tools/test_edgezlib.py (new), tools/test_vfs.py (new), docs/project-audit.md (A01/A02), docs/build-linux.md
+Reads: docs/project-audit.md, docs/subsystems.md (SPURS/Edge zlib), docs/reference-ports.md, docs/dod3-reuse.md
+
+## Goal
+Address T046 A01/A02: check complete guest spans and size arithmetic at the native zlib boundary; define failure/completion behavior from ABI evidence; replace the undersized POSIX realpath destination. Preserve the working boot and keep runtime code title-agnostic where applicable.
+
+## Done when
+Synthetic tests cover valid copy/inflate, truncated streams, invalid spans, temporary-size overflow, counter alignment/completion, and long VFS paths without game data. Verify with lint/tests and a controlled 01.09 boot before claiming runtime success. Avoid uncontrolled crash reproductions.
+
+## Log
+- 2026-10-20 19:33 pi: claimed
+- 2026-10-20 19:33 pi: Starting user-requested critical fixes; isolated pi worktree. Scope is native zlib and setup_vfs only, no RSX patches or subsystems Graphics edits. Will use bounded synthetic tests, not uncontrolled crash probes.
+- 2026-10-20 19:35 pi: Impact/plan: edge override is reached through NID 0x8A85674D, caller func_00B55024 checks the return immediately at 0x00B55168 and calls its error path on nonzero. Reject invalid requests synchronously with SPURS error status and do not decrement counters/signal successful completion on decode failure. Keep full-space ppu_vm_size=0 convention, validate wide spans against nonzero backing size. Replace skip-sized vector with bounded streaming discard, require Z_STREAM_END. VFS uses dynamically owned canonical paths. No firmware-derived sources committed.
+- 2026-10-20 19:36 pi: RED/GREEN: synthetic Z_SYNC_FLUSH stream produces the requested 4096 bytes without stream termination; old override wrongly reports success, confirmed assertion failure (no crash). Requiring Z_STREAM_END and returning STAT without completion makes both unfinished-stream and valid-inflate tests pass.
+- 2026-10-20 19:40 pi: VFS RED/GREEN: both long existing paths and a long PS3_VFS_ROOT override failed old setup; guarded libc wrapper refused the undersized destination instead of overflowing it. Dynamic platform-allocated resolution and string-derived paths now pass all 4 tests; setup also reports environment-setting failures.
+- 2026-10-20 19:41 pi: 14 synthetic zlib tests and 4 VFS tests pass under clang++; g++ is unavailable, so GCC runs explicitly skip. Private 01.09 build started under cpu lock, ccache disabled for limited disk; no main runtime or Antigravity RSX changes touched.
+- 2026-10-20 19:45 pi: Boundary design documented in project-audit A01/A02: errors are synchronous port-side rejections, not fabricated completion events; caller checks status. Invalid descriptors/spans leave output/completion untouched; invalid streams may write partial output but never publish success. 32-bit end arithmetic and smaller ppu_vm_size backing are distinct checks; full-space=0 preserved. Added bounded streaming skips, max u16 skips/empty output, counter underflow, event error propagation, padded negative-span fixtures and pure high-address arithmetic checks.
+- 2026-10-20 19:50 pi: Verification green: private 01.09 Release build completed, final incremental build includes latest safety edits (exit 0). tools/lint.py --tests: 87 scripts pass; 3 omitted nested SDL/Vulkan suites explicitly pass; 16 zlib + 5 VFS tests additionally pass under ASan+UBSan. Runtime submodule clean. Controlled 120 s 01.09 arena/menu boot now runs under boot lock with established pad script.
+- 2026-10-20 19:50 pi: Self-review sweep: production src now has one realpath call, using allocation (nullptr destination); native memmove/inflate entry points are confined to edgezlib and now span-checked. MP3 retains separate ls_ok/args_ok local-store checks. No new dependencies, generic runtime edits, firmware, graphics changes or delegation. Test fixtures invoke registered zlib HLE and real VFS setup; original failures are captured without intentional host faults.
+- 2026-10-20 19:52 pi: boot_check 2026-10-20 19:52 v01.09 7e35016+dirty 120s: PROGRESSING | last open MP_SOCCARARENA.XXX@50.8s | pkgs 14 (MP_SOCCARARENA last) | zlib 3717 | dumps 47 lit 47 distinct 42 | flips 2463 | threads 17/9 alive | unresolved 0
+- 2026-10-20 19:53 pi: 120 s capture confirms rendered tutorial arena, car and tutorial overlay; 3717 zlib requests, zero rejected requests, zero unresolved imports. Antigravity independently finished and committed 0050 while our boot ran. Fast-forwarded private worktree to that main, applied only their new patch privately (preserving it unchanged), and rebuilt affected runtime objects. Re-running full tests and a 30 s smoke on combined latest main before merge.
+- 2026-10-20 19:55 pi: boot_check 2026-10-20 19:54 v01.09 ba70ca3+dirty 30s: PROGRESSING | last open TEXTURES.TFC@7.1s | pkgs 13 (GUIDCACHE last) | zlib 3279 | dumps 17 lit 17 distinct 12 | flips 717 | threads 13/9 alive | unresolved 0
+- 2026-10-20 19:55 pi: Combined latest-main verification exit 0: all 87 discovered scripts pass again; 0050 unchanged, private/runtime main tree IDs both 0979dd8f16b189ff239246a906506a48734e0dd7. Source-only memory/path regressions plus ASan/UBSan green. Ready to merge only native boundary code, tests and documentation.
