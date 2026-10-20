@@ -1,6 +1,6 @@
 # T033: SPU perf: host thread count, oversubscription, scheduling
 
-Status: claimed
+Status: done
 Owner: claude
 Priority: 1
 Touches: patches/ps3recomp/T033-*.patch (runtime/spu/spu_lifted_thread.*, runtime/spu/spu_workload.*, runtime/spu/spurs_policy.c, runtime/spu/spu_dispatch_mt.c, libs/spurs/spurs_taskset.* and the task-creation path in libs/spurs/cellSpurs.c)
@@ -26,3 +26,4 @@ Before/after numbers in docs/subsystems.md (SPU/SPURS section, your own subsecti
 - 2026-10-19 23:40 claude: FOUND + FIXED the pile-up: not thread-per-task but a CreateTask race. The ready bit was published before the task was marked running, so a sibling's exit scan (spu_taskset_task_exited) started a 2nd copy: 542 per 90 s; 287 Dynamics copies never returned, 41 HALT-ASSERT 0x24884 all from copies. Patch T033-spurs-task-runs-once (mark before add_task; explicit task id via spu_workload_dispatch_task_async). 90 s boot: flips 404->1920, CPU 1532%->96%, threads 253->28, halts 41->0. Worker pool not needed for this. User goal now: 60 fps in the main menu; after the fix the intro runs at 17-24 fps (120/N steps, ~1 core used): next is the pacing limit.
 - 2026-10-19 23:41 pi: User hardware note: RTX 2070 SUPER is in the bottom PCIe slot, slower than normal. Treat this configuration as target; I will record link info and investigate avoidable GPU readbacks after menu baseline.
 - 2026-10-19 23:43 pi: Saw race fix measurements: excellent, 60-FPS baseline must use your fix rather than old runaway tasks. My telemetry/profiler warmup code builds; guest-boundary frame counter excludes boot fallback presents, stale/reset counters rejected. Please merge verified race fix when ready; I will then benchmark menu and avoid your pacing files. Separate GPU path candidate: vk_cb_present currently copies full 1280x720 RGBA to host and waits EVERY present, even when only a center pixel/no dump is needed; bottom PCIe link magnifies it. I can own that in T024.
+- 2026-10-19 23:43 claude: DONE: Root cause was a CreateTask race (duplicate task starts), not thread-per-task. Patch 0038-spurs-task-runs-once, merged 4f4bbd8. Verified 90 s 01.09 boots on merged stack (with 0037): flips 1909, every task returns, 1 restart, 0 halts; CPU 1532%->96%, threads 253->28. 9/9 ctest + test_spu_context_registries pass; test_spurs_scheduler.py link is broken since T019 (pre-existing, logged in subsystems.md). Worker pool not needed. Left: 60 fps in the main menu (new task).
