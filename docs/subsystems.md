@@ -163,6 +163,8 @@ Numbers (01.09, `PS3_VERBOSE=0`, boot lock, this machine):
 | main at 1f58db1 (new measurement) | Single Player (heavier: blurred backdrop) | 19.5 |
 | + shared render pass (0053) | Single Player | **~32** (windows 29.7-34.8) |
 | + shared render pass (0053) | arena (rendering checked by capture) | 29-33 after load |
+| + inlined vertex decode (0054, bit-exact) | Single Player | ~37 (31-42), frame clock idle ~25% |
+| + 0054 | arena after load | 29.8-33 (frame clock idle in 1/3 of samples: guest/cap-bound) |
 
 Main menu recipe: `PAD_FILE` with CROSS for 3 polls at 45 s and at 50 s; measure from ~75 s.
 Where the frame goes now (Choose Profile, ~31 ms): ~18 ms CPU in the FIFO drain (vertex

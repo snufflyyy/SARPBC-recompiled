@@ -1,0 +1,150 @@
+From 42b633a6a018e7c9b7021db76ccd5cd13692f931 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Tue, 20 Oct 2026 22:27:21 +0000
+Subject: [PATCH] video: decode vertex attributes with the type switch hoisted
+ and inlined into fetch_one
+
+Bit-identical to the generic loop (2M random cases against the old
+function). It was ~40% of the RSX thread's samples in a UE3 menu.
+---
+ libs/video/rsx_vertex_compact.c | 110 ++++++++++++++++++--------------
+ 1 file changed, 61 insertions(+), 49 deletions(-)
+
+diff --git a/libs/video/rsx_vertex_compact.c b/libs/video/rsx_vertex_compact.c
+index 7ff67be..745245d 100644
+--- a/libs/video/rsx_vertex_compact.c
++++ b/libs/video/rsx_vertex_compact.c
+@@ -33,61 +33,73 @@ static float rsx_compact_be_f16(const u8* p)
+     return f;
+ }
+ 
+-int rsx_vertex_decode_element(
++/* The type switch sits outside the component loop and the body is inline, so
++ * rsx_vertex_fetch_one pays no call and no per-component dispatch: the generic
++ * form was ~40% of the RSX thread's samples in a UE3 menu (SARPBC 01.09). */
++static inline int rsx_vertex_decode_inline(
+     u32 type, u32 size, const u8* source, float out[4])
+ {
+-    if (!source || !out)
+-        return 0;
+     out[0] = out[1] = out[2] = 0.0f;
+     out[3] = 1.0f;
+-    for (u32 component = 0; component < size && component < 4;
+-         component++) {
+-        switch (type) {
+-        case RSX_VTX_TYPE_FLOAT:
+-            out[component] = rsx_compact_be_f32(source + component * 4);
+-            break;
+-        case RSX_VTX_TYPE_HALF:
+-            out[component] = rsx_compact_be_f16(source + component * 2);
+-            break;
+-        case RSX_VTX_TYPE_UNORM8:
+-            out[component] = source[component] / 255.0f;
+-            break;
+-        case RSX_VTX_TYPE_UINT8:
+-            out[component] = (float)source[component];
+-            break;
+-        case RSX_VTX_TYPE_SNORM16: {
+-            const s16 value = (s16)(
+-                (source[component * 2] << 8) | source[component * 2 + 1]);
+-            out[component] = value / 32767.0f;
+-            break;
+-        }
+-        case RSX_VTX_TYPE_SINT16: {
+-            const s16 value = (s16)(
+-                (source[component * 2] << 8) | source[component * 2 + 1]);
+-            out[component] = (float)value;
+-            break;
+-        }
+-        case RSX_VTX_TYPE_CMP32: {
+-            const u32 word =
+-                ((u32)source[0] << 24) | ((u32)source[1] << 16) |
+-                ((u32)source[2] << 8) | (u32)source[3];
+-            s32 x = (s32)(word & 0x7FF);
+-            s32 y = (s32)((word >> 11) & 0x7FF);
+-            s32 z = (s32)((word >> 22) & 0x3FF);
+-            if (x & 0x400) x -= 0x800;
+-            if (y & 0x400) y -= 0x800;
+-            if (z & 0x200) z -= 0x400;
+-            out[0] = (float)x / 1023.0f;
+-            out[1] = (float)y / 1023.0f;
+-            out[2] = (float)z / 511.0f;
+-            out[3] = 1.0f;
+-            return 1;
++    const u32 n = size < 4 ? size : 4;
++    switch (type) {
++    case RSX_VTX_TYPE_FLOAT:
++        for (u32 c = 0; c < n; c++)
++            out[c] = rsx_compact_be_f32(source + c * 4);
++        return 1;
++    case RSX_VTX_TYPE_HALF:
++        for (u32 c = 0; c < n; c++)
++            out[c] = rsx_compact_be_f16(source + c * 2);
++        return 1;
++    case RSX_VTX_TYPE_UNORM8:
++        for (u32 c = 0; c < n; c++)
++            out[c] = source[c] / 255.0f;     /* a divide, not a multiply: bit-exact */
++        return 1;
++    case RSX_VTX_TYPE_UINT8:
++        for (u32 c = 0; c < n; c++)
++            out[c] = (float)source[c];
++        return 1;
++    case RSX_VTX_TYPE_SNORM16:
++        for (u32 c = 0; c < n; c++) {
++            const s16 value = (s16)((source[c * 2] << 8) | source[c * 2 + 1]);
++            out[c] = value / 32767.0f;
+         }
+-        default:
+-            return 0;
++        return 1;
++    case RSX_VTX_TYPE_SINT16:
++        for (u32 c = 0; c < n; c++) {
++            const s16 value = (s16)((source[c * 2] << 8) | source[c * 2 + 1]);
++            out[c] = (float)value;
+         }
++        return 1;
++    case RSX_VTX_TYPE_CMP32: {
++        if (!n)
++            return 1;       /* the generic loop never reached the CMP32 case */
++        const u32 word =
++            ((u32)source[0] << 24) | ((u32)source[1] << 16) |
++            ((u32)source[2] << 8) | (u32)source[3];
++        s32 x = (s32)(word & 0x7FF);
++        s32 y = (s32)((word >> 11) & 0x7FF);
++        s32 z = (s32)((word >> 22) & 0x3FF);
++        if (x & 0x400) x -= 0x800;
++        if (y & 0x400) y -= 0x800;
++        if (z & 0x200) z -= 0x400;
++        out[0] = (float)x / 1023.0f;
++        out[1] = (float)y / 1023.0f;
++        out[2] = (float)z / 511.0f;
++        out[3] = 1.0f;
++        return 1;
+     }
+-    return 1;
++    default:
++        return n ? 0 : 1;   /* an unknown type fails on its first component */
++    }
++}
++
++int rsx_vertex_decode_element(
++    u32 type, u32 size, const u8* source, float out[4])
++{
++    if (!source || !out)
++        return 0;
++    return rsx_vertex_decode_inline(type, size, source, out);
+ }
+ 
+ void rsx_vertex_layout_plan_init(
+@@ -306,7 +318,7 @@ int rsx_vertex_fetch_one(
+                 fetch->elem_size);
+         }
+ 
+-        if (source && rsx_vertex_decode_element(
++        if (source && rsx_vertex_decode_inline(
+                 fetch->desc.type, fetch->desc.size, source, value))
+             continue;
+         if (attr == 0)
+-- 
+2.47.3
+

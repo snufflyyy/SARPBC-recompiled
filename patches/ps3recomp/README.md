@@ -156,6 +156,7 @@ numbers:
 | `0051-pngdec-output-mode.patch` | T051: honour and report per-decoder PNG top-to-bottom/bottom-to-top output order; reject invalid modes atomically. Synthetic guest-ABI coverage for 72 row-order/channel/pitch cases and invalid-mode handling | to offer |
 | `0052-shader-independent-viewports.patch` | T051: fully undo 0050's shader-length Y flip after fixing the decoder cause. Add neutral-backend regressions for equivalent NOP-padded VPs, constant/arithmetic VPs, both viewport signs and non-centered offsets | reversal is downstream-only; offer tests |
 | `0053-vulkan-shared-render-pass.patch` | T040: consecutive engine draws into one framebuffer share a render pass (a per-draw pass loaded/stored every attachment: ~33 us x 400 draws a menu frame); a draw sampling its own attachment still starts a new pass | Vulkan-only; offer upstream |
+| `0054-vertex-decode-inline.patch` | T040: `rsx_vertex_decode_element` with the type switch outside the component loop, inlined into `rsx_vertex_fetch_one`; bit-identical (2M random cases vs the old loop) | generic, offer upstream |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `git -C external/ps3recomp format-patch -1 -o ../../patches/ps3recomp/ --start-number N`.
