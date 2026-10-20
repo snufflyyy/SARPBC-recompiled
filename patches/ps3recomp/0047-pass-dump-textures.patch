@@ -1,7 +1,7 @@
-From 8a1ab5b1156754578ee2e8c83ee9c74180f662a5 Mon Sep 17 00:00:00 2001
+From a4627d0de05aff272d423cc6a2ae37209416df02 Mon Sep 17 00:00:00 2001
 From: Braden <snufflyy@proton.me>
 Date: Tue, 20 Oct 2026 17:06:08 +0000
-Subject: [PATCH 47/48] rsx engine: pass dump logs texture levels/filter and
+Subject: [PATCH 47/49] rsx engine: pass dump logs texture levels/filter and
  can dump decoded textures
 
 RSX_ENGINE_PASS_DUMP_DRAWS now also writes each sampled texture's mip
@@ -18,7 +18,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 68 insertions(+), 2 deletions(-)
 
 diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
-index 66c48ff..f49f01d 100644
+index 66c48ff..be53c88 100644
 --- a/libs/video/rsx_draw_engine.c
 +++ b/libs/video/rsx_draw_engine.c
 @@ -900,6 +900,55 @@ static int eng_staging_reserve(u32 bytes)
@@ -120,9 +120,9 @@ index 66c48ff..f49f01d 100644
              rsx_dsp_get_texture(&g.rsx, u, &t);
 -            fprintf(s_pd.draws_log, " t%u %u:0x%08X f%02X %ux%u", u, t.location, t.offset,
 -                    t.format & 0xFFu, t.width, t.height);
-+            fprintf(s_pd.draws_log, " t%u %u:0x%08X f%02X %ux%u l%u p%u flt%08X c0%08X",
++            fprintf(s_pd.draws_log, " t%u %u:0x%08X f%02X %ux%u l%u p%u flt%08X c0%08X w%08X",
 +                    u, t.location, t.offset, t.format & 0xFFu, t.width, t.height,
-+                    t.mipmaps, t.pitch, t.filter, t.control0);
++                    t.mipmaps, t.pitch, t.filter, t.control0, t.wrap);
          }
          fprintf(s_pd.draws_log, "\n");
      }

@@ -1,7 +1,7 @@
-From a8a5f1650dd160fb01a629db9edbe8da85bd7ca9 Mon Sep 17 00:00:00 2001
+From 3592e43d5b040aca84e75d827c59cd6ba6538752 Mon Sep 17 00:00:00 2001
 From: Braden <snufflyy@proton.me>
 Date: Tue, 20 Oct 2026 17:07:25 +0000
-Subject: [PATCH 48/48] gcm: perform NV0039 copies; only 3D-routed methods
+Subject: [PATCH 48/49] gcm: perform NV0039 copies; only 3D-routed methods
  reach the 3D state
 
 libgcm binds NV0039 (memory to memory format) to subchannel 1, and
@@ -233,7 +233,7 @@ index 3a37d33..63b0f2f 100644
                  }
              }
 diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
-index f49f01d..de25bb1 100644
+index be53c88..adef213 100644
 --- a/libs/video/rsx_draw_engine.c
 +++ b/libs/video/rsx_draw_engine.c
 @@ -730,9 +730,15 @@ void rsx_draw_engine_guest_read(u32 location, u32 offset, u32 pitch, u32 w, u32

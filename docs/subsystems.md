@@ -237,12 +237,26 @@ draw engine. Copies seen in the arena: VRAM to VRAM, e.g. 2048 B
 After it (run `20261020-170312`, 130 s, `--pad 'cross@40*4/5,cross@70,r2:200@90,r2:200@105,cross@100'`):
 the floor, walls and windows are clean, the HUD is right (timer, score, stars,
 boost meter), and the car is drawn and drives into the goal tunnel on throttle.
-**Still wrong:** the car's shadow is a dark square on the floor (a projected
-shadow texture or its depth compare: not looked at); the scene fills only the
+The car's shadow was then a dark square on the floor (next section). **Still
+wrong:** the scene fills only the
 middle 1088x612 (85%) of the 1280x720 frame with a black border, which may be
 the safe-area setting from the boot prompt and not a bug (not checked against
 hardware); D3D12 (`rsx_live_draw.c`) still gets every subchannel's methods and
 has the `!zs ? 1.0f` clear (T011).
+
+### Car shadow: depth-compare direction (T045, 2026-10-20)
+
+The car's shadow map is pass 003 of a frame: a 512x512 Z24S8 zeta at
+`0x0AC00000` (pitch 2048), cleared to 1.0 (`zs FFFFFF00`, normal-Z unlike the
+scene), scissor 320x320, LEQUAL. The next pass multiplies the scene (blend
+DST_COLOR x ZERO) by a lookup into it as DEPTH24_D8 (`fB0`), wrap
+`0x60010303`: zfunc 6, GEQUAL. Upstream's helper (4033da8, from ARB_shadow and
+synthetic tests) computed `reference >= depth`: any floor fragment in front of
+the far plane failed, so the whole frustum was dark. RSX compares the other way
+round, `depth >= reference` (A/B in the same kickoff scene with a temporary
+switch: the square goes, nothing else changes). Patch
+`0049-shadow-compare-direction`. If another title's shadows invert after this,
+suspect this patch first.
 
 ## Audio
 
