@@ -30,11 +30,10 @@ boot_check is PROGRESSING with 3513 flips; the main menu runs at **29.5 fps** (1
 26.3-32.3), ~130% CPU, 28 threads. Where a menu frame's ~31 ms go, and what to try next:
 subsystems.md "Menu frame rate".
 
-**State of `main`:** 49 patch files (67 commits) on upstream `39a3629` (v0.15.0); every one of the
-80 test scripts (ours and ps3recomp's) passes on that stack (2026-10-20, `tools/lint.py --tests`). Upstream is now at v0.16.0 with
-fixes and menu-relevant perf work we don't have yet: T043 bumps the pin. Both versions are
-relifted. The big fixes of the last two days: the SPURS CreateTask race that started tasks twice
-(0038, T033: ~1500% CPU to ~100%) and Vulkan draw batching with a VRAM geometry cache (0040, T040:
+**State of `main`:** 47 patch files (65 commits) on upstream `749182e` (v0.16.0, T043); every one of the
+84 test scripts (ours and ps3recomp's) passes on that stack (2026-10-20, `tools/lint.py --tests`). The upstream lifter did not
+change, so the lifts were kept. The big fixes of the last two days: the SPURS CreateTask race that started tasks twice
+(0036, T033: ~1500% CPU to ~100%) and Vulkan draw batching with a VRAM geometry cache (0038, T040:
 menu 19.8 to 29.5 fps).
 
 **This machine (since 2026-10-19 evening):** Debian 13 container, 16 threads, 15 GB RAM, ~14 GB
@@ -99,16 +98,27 @@ T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena
 
 ## Log
 
+### 2026-10-20 (session 10): pin bumped to v0.16.0 (T043); two Sonnet subagents (T010, T021)
+- claude: T043: the patch stack rebased onto upstream v0.16.0 (`749182e`): 65 commits in 47
+  files, renumbered (old -> new table and what was merged or dropped: patches README). A/B on
+  the same pad script and screen (Single Player, 110 s, `PS3_VERBOSE=0`): old stack 18.6 fps
+  median (min 17.7), new 19.6 (min 18.2): no regression. (T040's 29.5 was the main menu; this
+  recipe now lands one screen further.) Frame clock per 5 s: FIFO drain ~2.8 s, present ~1.5 s
+  (mostly the batch flush waiting for the GPU), sleep ~0.7 s.
+- At the user's request two Sonnet 5.5 subagents ran research-only tasks: T010 (every SPU image
+  identified, coverage gaps classified, `tools/spu_coverage.py`) and T021 (the full dod3/fork
+  inventory against v0.16.0, ranked "Port next" list in dod3-reuse.md).
+
 ### 2026-10-20 (session 10): arena textures and HUD fixed (NV0039); target is 30 fps, not 60
 - claude: T045: the arena's noisy textures and garbage HUD were stale VRAM. The game streams
   textures into local memory with NV0039 copies on subchannel 1 (libgcm's default binding), which
   the pin routed to NV4097: no copy ran and the words hit the blend registers. Patch
-  `0048-nv0039-copy-engine` (+ test) performs the copies and keeps 2D-engine methods out of the
-  draw engine's 3D state; `0047-pass-dump-textures` dumps decoded textures (how it was found).
+  `0046-nv0039-copy-engine` (+ test) performs the copies and keeps 2D-engine methods out of the
+  draw engine's 3D state; `0045-pass-dump-textures` dumps decoded textures (how it was found).
   The arena now has clean textures, the right HUD, and the car drives. subsystems.md "Arena
   textures: NV0039 copies on subchannel 1".
 - claude: T045: the car's shadow was a dark square: RSX compares depth textures `depth OP
-  reference`, upstream used ARB_shadow's `reference OP depth`. Patch `0049-shadow-compare-direction`.
+  reference`, upstream used ARB_shadow's `reference OP depth`. Patch `0047-shadow-compare-direction`.
 - User: the game is limited to 30 fps normally; the menu goal becomes a steady 30 fps (AGENTS.md,
   T040, subsystems.md updated). The menu is already at ~29.5 fps, so T040 is now about the dips
   (1 s windows down to 26) rather than throughput.
@@ -126,7 +136,7 @@ T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena
   6025 flips, frames presented to the end, unresolved 0. The arena frame was black.
 - claude: T045: the arena was black because UE3 here uses reversed-Z (clears depth with
   `ZSTENCIL_CLEAR_VALUE=0`, draws GEQUAL) and the draw engine read a zero clear value as 1.0.
-  Patch `0046-zstencil-clear-zero`; the arena now draws (subsystems.md "Arena renders black").
+  Patch `0044-zstencil-clear-zero`; the arena now draws (subsystems.md "Arena renders black").
   Still wrong: noisy textures on some surfaces, HUD garbage, no car in view (T045 HANDOFF).
 
 ### 2026-10-20 (session 9, cont.): project audit (T039)

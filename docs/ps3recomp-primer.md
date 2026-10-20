@@ -1,7 +1,7 @@
 # ps3recomp primer
 
 What the toolkit gives us, where to look inside it, and what it cannot do yet.
-Written against **v0.15.0, commit `39a3629` (2026-10-16)**. When the pin moves, re-check
+Written against **v0.15.0, commit `39a3629` (2026-10-16)**; the pin is v0.16.0 (`749182e`) since 2026-10-20 (T043: what changed is in `patches/ps3recomp/README.md`). When the pin moves, re-check
 the "limits" section and the CLI flags in [pipeline.md](pipeline.md).
 
 Upstream's own docs are good and long; this page tells you which one to open.
@@ -56,7 +56,7 @@ one left there. On 01.09 this happens all the time (boot of 2026-10-19 with
   (cellSaveData `funcStat`, OPD `0x01201DE0`, AutoLoad2 of `NPUB30035-PROFILE`) on
   SaveData (tid 9).
 
-**Now (patch `0030-ppu-guest-call-stacks.patch`)** every (host thread, nesting depth)
+**Now (patch `0028-ppu-guest-call-stacks.patch`)** every (host thread, nesting depth)
 pair has its own stack:
 - Carved from the **top of the PPU stack region** (0xD0000000-0xE0000000) by moving
   `g_vm_stack_alloc.region_end` down; thread stacks keep growing up from `VM_STACK_BASE`, so

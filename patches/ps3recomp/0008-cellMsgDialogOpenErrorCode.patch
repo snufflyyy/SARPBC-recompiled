@@ -1,0 +1,152 @@
+From b81a9e15ee121e2f8fb380ebf44d8119ea4a2b8f Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Sun, 18 Oct 2026 23:56:28 -0500
+Subject: [PATCH] cellMsgDialog: implement cellMsgDialogOpenErrorCode
+
+The system error dialog ("An error occurred (8001xxxx)") had no handler,
+so the import fell to the unresolved-NID path: CELL_OK and no callback,
+ever. A title that waits for the user to acknowledge the error waits
+forever. It now prints the code and, like Open2 with a single OK button,
+closes at once and delivers CELL_MSGDIALOG_BUTTON_OK on the next sysutil
+poll. Imported by Supersonic Acrobatic Rocket-Powered Battle-Cars
+(NPUB30035), NID 0x3E22CB4B computed from the SDK name.
+
+Test: libs/system/tests/test_dialog_error_code.c.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/system/cellMsgDialog.c                | 34 ++++++++++++
+ libs/system/cellMsgDialog.h                |  4 ++
+ libs/system/tests/test_dialog_error_code.c | 60 ++++++++++++++++++++++
+ 3 files changed, 98 insertions(+)
+ create mode 100644 libs/system/tests/test_dialog_error_code.c
+
+diff --git a/libs/system/cellMsgDialog.c b/libs/system/cellMsgDialog.c
+index ef3fae1..8c5620d 100644
+--- a/libs/system/cellMsgDialog.c
++++ b/libs/system/cellMsgDialog.c
+@@ -261,6 +261,40 @@ s32 cellMsgDialogOpen(CellMsgDialogType type, const char* msgString,
+     return cellMsgDialogOpen2(type, msgString, callback, userdata, extParam);
+ }
+ 
++/* cellMsgDialogOpenErrorCode(errorCode, callback, userData, extParam) -- the
++ * system's own "An error occurred (8001xxxx)" dialog. It has a single OK button
++ * the user must press, after which the callback gets CELL_MSGDIALOG_BUTTON_OK.
++ *
++ * Left unregistered it fell to the unresolved-NID path: CELL_OK and no
++ * callback ever, so a title that waits for the user to acknowledge an error
++ * (the usual shape: show it, then poll a flag the callback sets) waits
++ * forever. Answer it the way Open2 answers a BUTTON_TYPE_OK dialog: print the
++ * code, close at once and deliver OK on the next sysutil poll. */
++s32 cellMsgDialogOpenErrorCode(u32 errorCode, CellMsgDialogCallback callback,
++                               void* userdata, void* extParam)
++{
++    (void)extParam;
++    printf("[cellMsgDialog] OpenErrorCode(0x%08X)\n", errorCode);
++    printf("========================================\n");
++    printf("[DIALOG] An error occurred (%08X)\n", errorCode);
++    printf("========================================\n");
++
++    if (s_dialog_open)
++        printf("[cellMsgDialog] WARNING: dialog already open, closing previous\n");
++
++    /* Shown and dismissed in one step: no Close/Abort will follow for it. */
++    s_dialog_open = 0;
++    s_nobutton_deadline = 0;
++    s_callback = NULL;
++    s_userdata = NULL;
++    memset(s_progress, 0, sizeof(s_progress));
++
++    printf("[cellMsgDialog] Auto-responding: OK\n");
++    if (callback)
++        return queue_dialog_callback(callback, CELL_MSGDIALOG_BUTTON_OK, userdata);
++    return CELL_OK;
++}
++
+ s32 cellMsgDialogClose(float delayMs)
+ {
+     printf("[cellMsgDialog] Close(delay=%.1f ms)\n", delayMs);
+diff --git a/libs/system/cellMsgDialog.h b/libs/system/cellMsgDialog.h
+index 0f0c4e8..ce7be13 100644
+--- a/libs/system/cellMsgDialog.h
++++ b/libs/system/cellMsgDialog.h
+@@ -69,6 +69,10 @@ s32 cellMsgDialogOpen2(CellMsgDialogType type, const char* msgString,
+                         CellMsgDialogCallback callback, void* userdata,
+                         void* extParam);
+ 
++/* The system error dialog for a CELL error code; one OK button. */
++s32 cellMsgDialogOpenErrorCode(u32 errorCode, CellMsgDialogCallback callback,
++                               void* userdata, void* extParam);
++
+ s32 cellMsgDialogClose(float delayMs);
+ 
+ s32 cellMsgDialogAbort(void);
+diff --git a/libs/system/tests/test_dialog_error_code.c b/libs/system/tests/test_dialog_error_code.c
+new file mode 100644
+index 0000000..7d95ecf
+--- /dev/null
++++ b/libs/system/tests/test_dialog_error_code.c
+@@ -0,0 +1,60 @@
++/* macOS: clang -std=gnu17 -I include libs/system/tests/test_dialog_error_code.c
++ * libs/system/cellSysutil.c -Wl,-dead_strip -pthread -o /tmp/test_dialog_error_code && /tmp/test_dialog_error_code
++ * Linux: replace -Wl,-dead_strip with -ffunction-sections -fdata-sections -Wl,--gc-sections */
++#include "../cellMsgDialog.c"
++#include <assert.h>
++#include <stdlib.h>
++uint8_t* vm_base;
++uint32_t ppu_vm_size;
++int g_resv_store_active;
++uint32_t g_ww_lo, g_ww_hi;
++void ppu_resv_break_store(uint64_t ea) { (void)ea; }
++void ps3_ww_report_inline(uint32_t a, uint64_t v, int w) { (void)a; (void)v; (void)w; }
++int spu_coh_is_reserved(uint32_t a) { (void)a; return 0; }
++void spu_coh_notify_write(uint32_t a) { (void)a; }
++void spu_lockline_lock(void) {}
++void spu_lockline_unlock(void) {}
++void np_psnr_pump(void) {}
++
++static unsigned calls;
++static s32 last_result;
++static void callback(u32 opd, u64 result, u64 user, u64 c, u64 d,
++                     u64 e, u64 f, u64 g, u64 h)
++{
++    assert(opd == 0x100 && user == 0x1234 && !c && !d && !e && !f && !g && !h);
++    calls++; last_result = (s32)result;
++}
++
++int main(void)
++{
++    vm_base = calloc(1, 65536); assert(vm_base);
++    g_ps3_guest_caller = callback;
++
++    /* The error dialog is acknowledged with OK, on the next poll, not inside
++     * the call -- the title sets up its wait after opening. */
++    assert(cellMsgDialogOpenErrorCode(0x8001002B, (void*)0x100, (void*)0x1234, NULL) == CELL_OK);
++    assert(calls == 0);
++    cellSysutilCheckCallback();
++    assert(calls == 1 && last_result == CELL_MSGDIALOG_BUTTON_OK);
++    cellSysutilCheckCallback(); assert(calls == 1);
++
++    /* It does not leave a dialog open behind it: Close has nothing to close. */
++    assert(cellMsgDialogClose(0) == CELL_MSGDIALOG_ERROR_DIALOG_NOT_OPENED);
++
++    /* No callback (SARPBC passes NULL on its fatal-error path): still fine. */
++    assert(cellMsgDialogOpenErrorCode(0x80010006, NULL, NULL, NULL) == CELL_OK);
++    cellSysutilCheckCallback(); assert(calls == 1);
++
++    /* Opening it over a progress dialog drops that dialog's callback, as
++     * opening any dialog over another does. */
++    assert(cellMsgDialogOpen2(CELL_MSGDIALOG_TYPE_PROGRESSBAR_SINGLE,
++        NULL, (void*)0x100, (void*)0x1234, NULL) == CELL_OK);
++    assert(cellMsgDialogOpenErrorCode(0x8001002B, (void*)0x100, (void*)0x1234, NULL) == CELL_OK);
++    cellSysutilCheckCallback();
++    assert(calls == 2 && last_result == CELL_MSGDIALOG_BUTTON_OK);
++    assert(cellMsgDialogClose(0) == CELL_MSGDIALOG_ERROR_DIALOG_NOT_OPENED);
++    cellSysutilCheckCallback(); assert(calls == 2);
++
++    free(vm_base);
++    puts("Error-code dialog is acknowledged with OK on the next sysutil poll");
++}
+-- 
+2.47.3
+

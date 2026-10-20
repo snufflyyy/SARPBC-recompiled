@@ -1,0 +1,213 @@
+From e7bcc769a4c508d14e1594fa1e078d625d99f3c4 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Mon, 19 Oct 2026 23:38:46 +0000
+Subject: [PATCH] spurs: a created task runs once (mark it running before it is
+ ready)
+
+cellSpursCreateTask set the new task's enabled and ready bits
+(spurs_taskset_add_task) and then spawned its host thread, and the task
+was marked running in the taskset's run map only once that thread
+started. When any other task of the taskset exited in that window,
+spu_taskset_task_exited found an enabled, ready task that was not
+running and started it a second time. The task id also travelled
+through the g_ydkj_real_taskset_ea / g_ydkj_real_taskid globals, which
+the PPU's CreateTask and the SPU threads' exit scan both write right
+before dispatching, so a thread could also pick up another task's id.
+
+SARPBC 01.09 creates 16 PhysX tasks per frame on one taskset. In 90 s,
+542 tasks were started twice; 287 copies of the Dynamics task never
+returned (they spun on the step's sync line), and the ~250 spinning
+host threads took the process to ~1500% CPU. Every
+"HALT-ASSERT heqi pc=0x24884" came from such a copy too.
+
+Now CreateTask marks the task running before add_task publishes it
+(and unmarks it if no thread was started), and both dispatch sites pass
+the taskset and task id explicitly
+(spu_workload_dispatch_task_async; spu_workload_dispatch_async keeps
+its signature and reads the globals as before).
+
+SARPBC 01.09, 90 s headless boot: flips 404 -> 1920, duplicate starts
+542 -> 1, Dynamics tasks dispatched/returned 2649/2362 -> 5899/5899,
+halt-asserts 41 -> 0, CPU 1532% -> 96%, host threads 253 -> 28.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/spurs/cellSpurs.c                        | 15 ++++++++--
+ runtime/spu/spu_workload.c                    | 28 +++++++++++++------
+ runtime/spu/spu_workload.h                    | 18 ++++++++++++
+ .../spu/tests/test_spu_taskset_elf_flags.c    | 13 ++++++---
+ 4 files changed, 60 insertions(+), 14 deletions(-)
+
+diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+index e1c8e57..f3696bb 100644
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -1074,6 +1074,13 @@ s32 cellSpursCreateTask(CellSpursTaskset* taskset, CellSpursTaskId* taskId,
+             if (taskId) vm_write32((u32)(uintptr_t)taskId, i);
+             (void)taskId_h;
+ 
++            /* Running BEFORE ready: once add_task sets the ready bit below, any
++             * task of this taskset that exits on another thread starts every
++             * ready task not marked running (spu_taskset_task_exited). Marked
++             * only by the new thread, this task ran twice whenever an exit
++             * landed between here and that thread's start (spu_workload.h). */
++            spu_taskset_mark(taskset_ea, i, 1);
++
+             /* Register the task in the REAL BE taskset: writes task_info[slot]
+              * (args/elf/context/ls_pattern) + sets enabled+ready bits so the PM's
+              * SELECT_TASK picks it. Slot index i = the SPURS taskId (bitset bit). */
+@@ -1149,6 +1156,7 @@ s32 cellSpursCreateTask(CellSpursTaskset* taskset, CellSpursTaskId* taskId,
+              * suits create+join task patterns; a workload/taskset whose SPU job
+              * waits on concurrent PPU-side signals will want the async lv2
+              * SPU-thread path instead — wired when a title exercises it. */
++            int started = 0;
+             if (elf) {
+                 /* elf/context are guest effective addresses; translate the image
+                  * pointer to host memory for fingerprint+load, but keep context
+@@ -1158,9 +1166,12 @@ s32 cellSpursCreateTask(CellSpursTaskset* taskset, CellSpursTaskId* taskId,
+                 if (sz)
+                     /* Async: SPURS tasks are persistent workers — running them
+                      * inline would block this PPU thread forever (deadlock). */
+-                    spu_workload_dispatch_async(host_elf, (uint32_t)sz,
+-                                                (uint32_t)(uintptr_t)context);
++                    started = spu_workload_dispatch_task_async(host_elf, (uint32_t)sz,
++                                                               (uint32_t)(uintptr_t)context,
++                                                               taskset_ea, i);
+             }
++            /* No thread runs it: leave it to the exit scan, as before. */
++            if (!started) spu_taskset_mark(taskset_ea, i, 0);
+             return CELL_OK;
+         }
+     }
+diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
+index 77aec37..4db2436 100644
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -387,7 +387,9 @@ static uint8_t* ts_running(uint32_t taskset_ea)
+ static void ts_lock(void)   { while (InterlockedExchange(&s_ts_lock, 1)) Sleep(0); }
+ static void ts_unlock(void) { InterlockedExchange(&s_ts_lock, 0); }
+ 
+-static void spu_taskset_mark(uint32_t taskset_ea, uint32_t t, int on)
++/* Also called by cellSpursCreateTask, before the new task's ready bit is
++ * visible: see spu_workload.h. */
++void spu_taskset_mark(uint32_t taskset_ea, uint32_t t, int on)
+ {
+     if (!taskset_ea || t >= 128) return;
+     ts_lock();
+@@ -431,7 +433,9 @@ static void spu_taskset_task_exited(uint32_t taskset_ea, uint32_t done_task)
+         fprintf(stderr, "[taskset] start task %u of taskset 0x%08X elf=0x%08X "
+                         "(after task %u exited)\n", t, taskset_ea, elf, done_task);
+         g_ydkj_real_taskset_ea = taskset_ea; g_ydkj_real_taskid = t;
+-        spu_workload_dispatch_async(vm_base + elf, (uint32_t)sz, ctx);
++        if (!spu_workload_dispatch_task_async(vm_base + elf, (uint32_t)sz, ctx,
++                                              taskset_ea, t))
++            run[t / 8] &= (uint8_t)~m;                   /* nothing runs it */
+     }
+     ts_unlock();
+ }
+@@ -1236,6 +1240,15 @@ int spu_taskset_wait_signal(uint32_t taskset_ea, uint32_t taskId)
+ 
+ int spu_workload_dispatch_async(const uint8_t* image, uint32_t image_size,
+                                 uint32_t args_ea)
++{
++    extern uint32_t g_ydkj_real_taskset_ea, g_ydkj_real_taskid;
++    return spu_workload_dispatch_task_async(image, image_size, args_ea,
++                                            g_ydkj_real_taskset_ea, g_ydkj_real_taskid);
++}
++
++int spu_workload_dispatch_task_async(const uint8_t* image, uint32_t image_size,
++                                     uint32_t args_ea, uint32_t taskset_ea,
++                                     uint32_t taskid)
+ {
+     if (!image || image_size == 0) return 0;
+ 
+@@ -1275,12 +1288,11 @@ int spu_workload_dispatch_async(const uint8_t* image, uint32_t image_size,
+     if (!j) return 0;
+     j->image = image; j->image_size = image_size; j->args_ea = args_ea;
+     j->fn = fn; j->image_id = image_id;
+-    /* Capture the taskset+taskid NOW (PPU thread, right after cellSpursCreateTask
+-     * set the globals for THIS task). Reading them later in the async thread races
+-     * the next CreateTask overwriting the single-slot globals -- with two audio
+-     * tasks that made both run task 1's descriptor. */
+-    { extern uint32_t g_ydkj_real_taskset_ea, g_ydkj_real_taskid;
+-      j->taskset_ea = g_ydkj_real_taskset_ea; j->taskid = g_ydkj_real_taskid; }
++    /* The caller names the task. Reading it in the async thread raced the next
++     * CreateTask overwriting the single-slot globals (two audio tasks both ran
++     * task 1's descriptor); reading the globals here still raced task exits on
++     * SPU threads, which set them before starting the next ready task. */
++    j->taskset_ea = taskset_ea; j->taskid = taskid;
+     /* Capture the SPURS task r3 NOW (PPU thread, synchronous) from the game's
+      * descriptor at eaContext+0x10 = {0x40-marker handle, workload EAs}; the
+      * async SPU thread reading it later would race the PPU stack. word1 is
+diff --git a/runtime/spu/spu_workload.h b/runtime/spu/spu_workload.h
+index f8a726e..555fc53 100644
+--- a/runtime/spu/spu_workload.h
++++ b/runtime/spu/spu_workload.h
+@@ -129,6 +129,24 @@ int spu_workload_dispatch(const uint8_t* image, uint32_t image_size,
+ int spu_workload_dispatch_async(const uint8_t* image, uint32_t image_size,
+                                 uint32_t args_ea);
+ 
++/* Same, for SPURS task `taskid` of the taskset at guest EA `taskset_ea`.
++ * spu_workload_dispatch_async takes both from the g_ydkj_real_taskset_ea /
++ * g_ydkj_real_taskid globals, which PPU CreateTask calls and SPU-thread task
++ * exits both write; callers that know the task pass it here. */
++int spu_workload_dispatch_task_async(const uint8_t* image, uint32_t image_size,
++                                     uint32_t args_ea, uint32_t taskset_ea,
++                                     uint32_t taskid);
++
++/* Mark task `t` of the taskset at guest EA `taskset_ea` as running on a host
++ * thread (on=1) or not (on=0). When a task exits, the runtime starts every
++ * other enabled task that is ready or pending and NOT marked running. So
++ * whoever makes a task ready and then dispatches it must mark it FIRST:
++ * cellSpursCreateTask used to set the ready bit and spawn the thread, and the
++ * thread only marked itself once it ran. An exit in that window started a
++ * second copy of the same task (SARPBC 01.09: 542 duplicates in 90 s; 287
++ * copies of a PhysX task never returned and spun on its sync line). */
++void spu_taskset_mark(uint32_t taskset_ea, uint32_t t, int on);
++
+ /* Number of currently registered lifted SPU binaries (diagnostics/tests). */
+ unsigned spu_workload_count(void);
+ 
+diff --git a/runtime/spu/tests/test_spu_taskset_elf_flags.c b/runtime/spu/tests/test_spu_taskset_elf_flags.c
+index 9b88cc9..b50bc6a 100644
+--- a/runtime/spu/tests/test_spu_taskset_elf_flags.c
++++ b/runtime/spu/tests/test_spu_taskset_elf_flags.c
+@@ -14,11 +14,13 @@ uint8_t* vm_base;
+ uint32_t g_ydkj_real_taskset_ea, g_ydkj_real_taskid;
+ static unsigned dispatches;
+ static const uint8_t* dispatched_image;
+-static uint32_t dispatched_size, dispatched_context;
+-static int spu_workload_dispatch_async(const uint8_t* image, uint32_t size, uint32_t context)
++static uint32_t dispatched_size, dispatched_context, dispatched_taskset, dispatched_task;
++static int spu_workload_dispatch_task_async(const uint8_t* image, uint32_t size, uint32_t context,
++                                            uint32_t taskset_ea, uint32_t taskid)
+ {
+     dispatches++; dispatched_image = image; dispatched_size = size;
+-    dispatched_context = context; return 1;
++    dispatched_context = context; dispatched_taskset = taskset_ea; dispatched_task = taskid;
++    return 1;
+ }
+ /* PRODUCTION_FUNCTIONS */
+ static unsigned passed, failed;
+@@ -31,7 +33,8 @@ static void setup(uint32_t flags, int pending)
+ {
+     memset(vm_base, 0, 0x400000); memset(s_ts_run, 0, sizeof(s_ts_run));
+     s_ts_lock = 0; dispatches = 0; dispatched_image = NULL;
+-    dispatched_size = dispatched_context = 0;
++    dispatched_size = dispatched_context = dispatched_taskset = 0;
++    dispatched_task = ~0u;
+     g_ydkj_real_taskset_ea = g_ydkj_real_taskid = 0;
+     uint8_t* image = vm_base + ELF;
+     memcpy(image, "\177ELF", 4); image[4] = 1; image[5] = 2; image[6] = 1;
+@@ -59,6 +62,8 @@ int main(void)
+         CHECK(dispatched_image == vm_base + ELF, "dispatch uses ELF base, not tagged address");
+         CHECK(dispatched_size == 100, "real parser receives synthetic ELF header");
+         CHECK(dispatched_context == CONTEXT, "context argument is preserved");
++        CHECK(dispatched_taskset == TASKSET && dispatched_task == 0,
++              "the started task is named explicitly, not through the globals");
+         CHECK(g_ydkj_real_taskset_ea == TASKSET && g_ydkj_real_taskid == 0,
+               "requeued task keeps its taskset and slot identity");
+         CHECK(memcmp(before, vm_base + TASKSET + 0x80, sizeof(before)) == 0,
+-- 
+2.47.3
+

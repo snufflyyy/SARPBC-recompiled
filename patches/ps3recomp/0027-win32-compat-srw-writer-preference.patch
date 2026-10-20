@@ -1,0 +1,175 @@
+From a6fd8074166e6f3241b4ebf49ab355a387189912 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Mon, 19 Oct 2026 10:09:02 -0500
+Subject: [PATCH] win32_compat: SRW locks prefer writers on glibc
+
+A Windows SRW lock lets a waiting writer in ahead of readers that arrive
+after it; glibc's default rwlock prefers readers, so while read sections
+overlap the lock never goes idle and the writer waits as long as readers
+keep coming. In a UE3 title on Linux, dozens of spinning SPU threads took
+the shared side of the MFC slot registry (mfc_for) in every channel access,
+and an SPU job that needed the exclusive side to register its context never
+got in: the game stalled 8-25 s into its first screen.
+
+On glibc, initialise the lock with PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP.
+That makes the shared side non-recursive, as an SRW lock is. Every in-tree
+shared section (mfc_for, spurs_port_queue, sq_spurs_of, the lv2 SPU port
+lookup) is a leaf table lookup that takes no other lock and waits for
+nothing, so none of them can deadlock against a waiting writer. sys_rwlock,
+the guest's lock, uses its own pthread_rwlock on POSIX and is not affected.
+Windows is unchanged; other POSIX libcs keep their default policy (no
+setkind call).
+
+Test: four readers re-take the shared lock in overlapping 50 us sections
+while a writer needs it 20 times. Before: 0/20 writes in 3 s. After: all 20.
+Asserted on glibc only; other hosts print the result.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ runtime/platform/tests/test_win32_compat.c | 77 ++++++++++++++++++++++
+ runtime/platform/win32_compat.h            | 34 +++++++++-
+ 2 files changed, 110 insertions(+), 1 deletion(-)
+
+diff --git a/runtime/platform/tests/test_win32_compat.c b/runtime/platform/tests/test_win32_compat.c
+index 8f199fe..e1a7939 100644
+--- a/runtime/platform/tests/test_win32_compat.c
++++ b/runtime/platform/tests/test_win32_compat.c
+@@ -380,6 +380,82 @@ static void test_srw_and_cv(void)
+     for (int i = 0; i < 2; i++) CloseHandle(rs[i]);
+ }
+ 
++/* ---- SRW writer under steady reader load ----------------------------------
++ * Readers that re-take the shared lock as soon as they drop it, with their
++ * read sections overlapping, never let a reader-preferring lock go idle; a
++ * writer then waits for as long as the readers keep coming. Windows SRW locks
++ * let a waiting writer in, and the shim has to as well: dozens of SPU threads
++ * polling one registry lock is exactly this load. The writer runs on its own
++ * thread so a starved one fails the check instead of hanging the test: when
++ * the deadline passes the readers are told to stop, which frees the writer. */
++#define WP_READERS  4
++#define WP_WRITES   20
++static SRWLOCK       g_wp = SRWLOCK_INIT;
++static volatile LONG g_wp_stop, g_wp_readers_up, g_wp_writes;
++
++static void wp_spin_us(long us)
++{
++    struct timespec a, b;
++    clock_gettime(CLOCK_MONOTONIC, &a);
++    do clock_gettime(CLOCK_MONOTONIC, &b);
++    while ((b.tv_sec - a.tv_sec) * 1000000L + (b.tv_nsec - a.tv_nsec) / 1000 < us);
++}
++
++static DWORD WINAPI wp_reader(LPVOID a)
++{
++    (void)a;
++    InterlockedIncrement(&g_wp_readers_up);
++    while (!ReadAcquire(&g_wp_stop)) {
++        AcquireSRWLockShared(&g_wp);
++        wp_spin_us(50);
++        ReleaseSRWLockShared(&g_wp);
++    }
++    return 0;
++}
++
++static DWORD WINAPI wp_writer(LPVOID a)
++{
++    (void)a;
++    for (int i = 0; i < WP_WRITES && !ReadAcquire(&g_wp_stop); i++) {
++        AcquireSRWLockExclusive(&g_wp);
++        InterlockedIncrement(&g_wp_writes);
++        ReleaseSRWLockExclusive(&g_wp);
++        Sleep(1);                       /* let the readers pile back in */
++    }
++    return 0;
++}
++
++static void test_srw_writer_progress(void)
++{
++    HANDLE rs[WP_READERS], w;
++    g_wp_stop = 0; g_wp_readers_up = 0; g_wp_writes = 0;
++    for (int i = 0; i < WP_READERS; i++) rs[i] = CreateThread(NULL, 0, wp_reader, NULL, 0, NULL);
++    for (int spins = 0; g_wp_readers_up != WP_READERS && spins < 5000; spins++) Sleep(1);
++    Sleep(20);                          /* readers are now overlapping */
++
++    ULONGLONG t0 = now_ms();
++    w = CreateThread(NULL, 0, wp_writer, NULL, 0, NULL);
++    BOOL done = WaitForSingleObject(w, 3000) == WAIT_OBJECT_0;
++    ULONGLONG took = now_ms() - t0;
++    LONG writes = ReadAcquire(&g_wp_writes);
++    WriteRelease(&g_wp_stop, 1);
++    CHECK(WaitForSingleObject(w, 5000) == WAIT_OBJECT_0); CloseHandle(w);
++    CHECK(WaitForMultipleObjects(WP_READERS, rs, TRUE, 5000) == WAIT_OBJECT_0);
++    for (int i = 0; i < WP_READERS; i++) CloseHandle(rs[i]);
++
++#ifdef __GLIBC__
++    /* glibc: the shim asks for writer preference, so this must hold. */
++    if (!done) fprintf(stderr, "writer starved: %ld/%d writes in %llu ms\n",
++                       (long)writes, WP_WRITES, (unsigned long long)took);
++    CHECK(done && writes == WP_WRITES);
++#else
++    /* Elsewhere the policy is the libc default; report it, don't assert it. */
++    printf("SRW writer under reader load: %ld/%d writes in %llu ms (%s)\n",
++           (long)writes, WP_WRITES, (unsigned long long)took,
++           done ? "writer progressed" : "writer starved");
++#endif
++}
++
+ /* ---- one-time initialisation --------------------------------------------- */
+ static INIT_ONCE     g_once = INIT_ONCE_STATIC_INIT;
+ static volatile LONG g_once_runs;
+@@ -958,6 +1034,7 @@ int main(void)
+     test_semaphores();
+     test_wait_on_address();
+     test_srw_and_cv();
++    test_srw_writer_progress();
+     test_init_once();
+     test_timers();
+     test_timing();
+diff --git a/runtime/platform/win32_compat.h b/runtime/platform/win32_compat.h
+index 30538f1..7f997be 100644
+--- a/runtime/platform/win32_compat.h
++++ b/runtime/platform/win32_compat.h
+@@ -459,7 +459,39 @@ typedef void*  SRWLOCK;
+ typedef SRWLOCK* PSRWLOCK;
+ #define SRWLOCK_INIT NULL
+ 
+-static inline void ps3__rwl_init(void* p) { pthread_rwlock_init((pthread_rwlock_t*)p, NULL); }
++/* Writer preference. A Windows SRW lock lets a waiting writer in ahead of
++ * readers that arrive after it. glibc's default rwlock prefers readers: while
++ * read sections overlap, the lock never goes idle and a writer waits as long
++ * as readers keep coming. Many SPU threads polling one registry lock under its
++ * shared side is that load, and the thread that needs the exclusive side to
++ * register a new entry then never gets in. So on glibc ask for the writer-
++ * preferring kind, the one that matches SRW semantics.
++ *
++ * The cost is the one SRW locks already carry: the lock is non-recursive on
++ * the shared side. A thread that takes the shared lock again while it holds
++ * it, with a writer waiting in between, deadlocks against that writer, and so
++ * does a reader that waits for another thread that needs the same shared
++ * lock. Windows documents both as unsupported for SRW locks, so code written
++ * for this API must not do either. (PTHREAD_RWLOCK_PREFER_WRITER_NP, without
++ * NONRECURSIVE, is treated by glibc as reader preference and does nothing.)
++ *
++ * Other POSIX libcs have no setkind call and keep their default policy: musl
++ * prefers readers, as glibc does by default, so a writer can still starve
++ * there; Darwin and the BSDs have their own policies. Those hosts get the
++ * plain lock until one of them needs the same fix. */
++static inline void ps3__rwl_init(void* p)
++{
++#ifdef __GLIBC__
++    pthread_rwlockattr_t a;
++    if (pthread_rwlockattr_init(&a) == 0) {
++        pthread_rwlockattr_setkind_np(&a, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
++        int rc = pthread_rwlock_init((pthread_rwlock_t*)p, &a);
++        pthread_rwlockattr_destroy(&a);
++        if (rc == 0) return;
++    }
++#endif
++    pthread_rwlock_init((pthread_rwlock_t*)p, NULL);
++}
+ static inline pthread_rwlock_t* ps3_srw(SRWLOCK* l)
+ { return (pthread_rwlock_t*)ps3_lazy_obj((void**)l, sizeof(pthread_rwlock_t), ps3__rwl_init); }
+ 
+-- 
+2.47.3
+

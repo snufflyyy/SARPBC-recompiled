@@ -13,10 +13,10 @@ you are touching instead of re-scanning the tree or the game files.
 
 **Phase 7 done: 01.09 reaches the main menu; now performance, goal a steady 30 fps in the main menu** (user,
 2026-10-20: the game itself is capped at 30 fps; the earlier 60 fps goal is dropped). The PPU lift, all 15 SPU images, the 2 SPUJOBS jobs and the MultiStream overlay build
-on 01.02 and 01.09, with 49 ps3recomp patch files. New Game loads the arena, which renders with a working HUD, shadows and a drivable car (T045 done). The menu runs at 29.5 fps (2026-10-20, from 19.8)
+on 01.02 and 01.09, with 47 ps3recomp patch files on upstream v0.16.0. New Game loads the arena, which renders with a working HUD, shadows and a drivable car (T045 done). The menu runs at 29.5 fps (2026-10-20, from 19.8)
 after the SPURS CreateTask race fix (T033) and Vulkan draw batching with a VRAM geometry cache
-(T040, in progress; the GPU is on PCIe 2.0 x4). Upstream ps3recomp is at v0.16.0: the pin bump is
-T043. The project audit (T039) ran on 2026-10-20 and left `tools/lint.py` behind. Agents the user
+(T040, in progress; the GPU is on PCIe 2.0 x4). The pin moved to upstream v0.16.0 on 2026-10-20
+(T043). The project audit (T039) ran on 2026-10-20 and left `tools/lint.py` behind. Agents the user
 starts (Claude Code, pi, Antigravity) take tasks from the board by priority
 ([docs/workflow.md](docs/workflow.md)); **resume from [docs/status.md](docs/status.md) "Resume here"**.
 
@@ -31,7 +31,7 @@ starts (Claude Code, pi, Antigravity) take tasks from the board by priority
 | Executable | NPDRM SELF → `game/EBOOT.elf`: stripped PPC64; 01.02 has 47,602 functions and 274 imports from 20 libraries |
 | SPU code | 15 SPU ELFs in the EBOOT (Edge zlib, PhysX, MultiStream DSP) + Edge Geometry jobs in `game/SPUJOBS.prx` |
 | Platforms | **Linux is primary** (Fedora, clang + CMake + Ninja), rendering through **Vulkan**. Windows comes later on ps3recomp's D3D12 backend — keep code portable (`#ifdef _WIN32` for POSIX-only calls) |
-| Toolkit | `external/ps3recomp` = upstream `sp00nznet/ps3recomp` v0.15.0 (`39a3629`), pinned (upstream is at v0.16.0: T043). Features from the Drakengard 3 fork are brought over as patches ("middle path", see `patches/ps3recomp/README.md`) |
+| Toolkit | `external/ps3recomp` = upstream `sp00nznet/ps3recomp` v0.16.0 (`749182e`), pinned (since 2026-10-20, T043). Features from the Drakengard 3 fork are brought over as patches ("middle path", see `patches/ps3recomp/README.md`) |
 | Closest reference | Drakengard 3 ([soyjxck/dod3-recomp](https://github.com/soyjxck/dod3-recomp)), a playable UE3 port on ps3recomp |
 
 ## Hard rules

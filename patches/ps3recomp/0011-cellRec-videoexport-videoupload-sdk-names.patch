@@ -1,0 +1,739 @@
+From 2510b1c2b6fdf379236b933c4addd7cbcf32a8a8 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Mon, 19 Oct 2026 00:05:56 -0500
+Subject: [PATCH] cellRec/cellVideoExport/cellVideoUpload: use the SDK function
+ names
+
+cellGameRecording.c, cellVideoExport.c and cellVideoUpload.c defined
+invented names (cellGameRecordingInit, cellVideoExportInit/Start,
+cellVideoUploadInit/Start, ...) whose NIDs match no import, so real
+calls fell to the unresolved path (CELL_OK, no callback). They now
+define the SDK entry points, NIDs computed from the names and matching
+NPUB30035's imports: cellRecOpen/Close/Start/Stop/QueryMemSize,
+cellVideoExportInitialize(2)/FromFile(WithCopy)/Finalize,
+cellVideoUploadInitialize. Nothing is recorded, exported or uploaded,
+but every step answers through the title's callback on the next sysutil
+poll: rec OPEN/START/STOP/CLOSE, export init OK / export CANCEL /
+finalize OK, upload INITIALIZED then FINALIZED+CANCEL.
+
+Test: libs/misc/tests/test_video_export_upload_rec.c.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/misc/cellGameRecording.c                 | 114 +++++++++---------
+ libs/misc/cellGameRecording.h                 |  73 +++++------
+ libs/misc/cellVideoExport.c                   |  91 ++++++++------
+ libs/misc/cellVideoExport.h                   |  69 ++++++-----
+ libs/misc/cellVideoUpload.c                   |  61 +++-------
+ libs/misc/cellVideoUpload.h                   |  56 ++++-----
+ .../misc/tests/test_video_export_upload_rec.c | 101 ++++++++++++++++
+ 7 files changed, 332 insertions(+), 233 deletions(-)
+ create mode 100644 libs/misc/tests/test_video_export_upload_rec.c
+
+diff --git a/libs/misc/cellGameRecording.c b/libs/misc/cellGameRecording.c
+index d17a74b..c65ed3a 100644
+--- a/libs/misc/cellGameRecording.c
++++ b/libs/misc/cellGameRecording.c
+@@ -1,85 +1,91 @@
+ /*
+- * ps3recomp - cellGameRecording HLE implementation
++ * ps3recomp - in-game video recording HLE (cellRec) implementation
+  *
+- * Stub. Init/end lifecycle works, recording is a silent no-op.
++ * The recorder's state machine runs and answers every step -- OPEN, START,
++ * STOP, CLOSE, each through the title's callback on its next sysutil poll --
++ * but nothing is captured and Close writes no file. Recording is a silent
++ * no-op, as before; what changed is that the calls now resolve under their
++ * SDK names, so a title waiting for START or CLOSE gets it.
++ *
++ * A title that goes on to export or upload the "recorded" file finds nothing
++ * there; cellVideoExport and cellVideoUpload answer those as cancelled.
+  */
+ 
+ #include "cellGameRecording.h"
++#include "../system/cellSysutil.h"   /* cellSysutilQueueGuestCallbackArgs */
+ #include <stdio.h>
+-#include "../../runtime/ppu/ppu_memory.h"   /* vm_write*: guest EA -> host, byte-swapped */
+-
+-/* Internal state */
++#include "../../runtime/ppu/ppu_memory.h"   /* vm_base, vm_read32: guest EA -> host */
+ 
+-static int s_initialized = 0;
++static int s_open = 0;
+ static int s_recording = 0;
++static u32 s_cb = 0;        /* guest OPD */
++static u32 s_userdata = 0;
+ 
+-/* API */
+-
+-s32 cellGameRecordingInit(const CellGameRecordingParam* param)
+-{
+-    (void)param;
+-    printf("[cellGameRecording] Init()\n");
+-    if (s_initialized)
+-        return (s32)CELL_GAME_REC_ERROR_ALREADY_INITIALIZED;
+-    s_initialized = 1;
+-    s_recording = 0;
+-    return CELL_OK;
+-}
+-
+-s32 cellGameRecordingEnd(void)
++static s32 rec_status(s32 status, s32 error)
+ {
+-    printf("[cellGameRecording] End()\n");
+-    s_initialized = 0;
+-    s_recording = 0;
+-    return CELL_OK;
++    const u64 args[8] = { (u64)(u32)status, (u64)(u32)error, s_userdata, 0, 0, 0, 0, 0 };
++    return cellSysutilQueueGuestCallbackArgs(s_cb, args);
+ }
+ 
+-s32 cellGameRecordingStart(void)
++static const char* rec_str(u32 ea)
+ {
+-    printf("[cellGameRecording] Start()\n");
+-    if (!s_initialized)
+-        return (s32)CELL_GAME_REC_ERROR_NOT_INITIALIZED;
+-    s_recording = 1;
+-    return CELL_OK;
++    return (ea && vm_base) ? (const char*)(vm_base + ea) : "<null>";
+ }
+ 
+-s32 cellGameRecordingStop(void)
++/* The memory the title must put in the container it passes to Open. Nothing
++ * is allocated from it here, so this asks for little: 1 MB. */
++s32 cellRecQueryMemSize(u32 param_ea)
+ {
+-    printf("[cellGameRecording] Stop()\n");
+-    if (!s_initialized)
+-        return (s32)CELL_GAME_REC_ERROR_NOT_INITIALIZED;
+-    s_recording = 0;
+-    return CELL_OK;
++    if (!param_ea)
++        return (s32)CELL_REC_ERROR_INVALID_VALUE;
++    printf("[cellRec] QueryMemSize(videoFmt=0x%X audioFmt=0x%X) -> 1 MB\n",
++           vm_read32(param_ea), vm_read32(param_ea + 4));
++    return 0x100000;
+ }
+ 
+-s32 cellGameRecordingPause(void)
++s32 cellRecOpen(u32 dirName_ea, u32 fileName_ea, u32 param_ea, u32 container,
++                u32 cb_opd, u32 userdata)
+ {
+-    if (!s_initialized)
+-        return (s32)CELL_GAME_REC_ERROR_NOT_INITIALIZED;
++    printf("[cellRec] Open('%s' / '%s', container=0x%X) -- nothing will be captured\n",
++           rec_str(dirName_ea), rec_str(fileName_ea), container);
++    if (!dirName_ea || !param_ea || !cb_opd)
++        return (s32)CELL_REC_ERROR_INVALID_VALUE;
++    if (s_open)
++        return (s32)CELL_REC_ERROR_INVALID_STATE;
++    s_open = 1;
+     s_recording = 0;
+-    return CELL_OK;
++    s_cb = cb_opd;
++    s_userdata = userdata;
++    return rec_status(CELL_REC_STATUS_OPEN, CELL_OK);
+ }
+ 
+-s32 cellGameRecordingResume(void)
++s32 cellRecStart(void)
+ {
+-    if (!s_initialized)
+-        return (s32)CELL_GAME_REC_ERROR_NOT_INITIALIZED;
++    printf("[cellRec] Start()\n");
++    if (!s_open || s_recording)
++        return (s32)CELL_REC_ERROR_INVALID_STATE;
+     s_recording = 1;
+-    return CELL_OK;
++    return rec_status(CELL_REC_STATUS_START, CELL_OK);
+ }
+ 
+-s32 cellGameRecordingIsRecording(void)
++s32 cellRecStop(void)
+ {
+-    if (!s_initialized)
+-        return (s32)CELL_GAME_REC_ERROR_NOT_INITIALIZED;
+-    return s_recording;
++    printf("[cellRec] Stop()\n");
++    if (!s_open || !s_recording)
++        return (s32)CELL_REC_ERROR_INVALID_STATE;
++    s_recording = 0;
++    return rec_status(CELL_REC_STATUS_STOP, CELL_OK);
+ }
+ 
+-s32 cellGameRecordingGetDuration(float* duration)
++/* Close ends the session whether or not it was stopped. CLOSE is the last
++ * status: NPUB30035 treats a following UNLOAD as an error, so none is sent. */
++s32 cellRecClose(s32 isDiscard)
+ {
+-    if (!s_initialized)
+-        return (s32)CELL_GAME_REC_ERROR_NOT_INITIALIZED;
+-    if (!duration) return (s32)CELL_GAME_REC_ERROR_INVALID_ARGUMENT;
+-    vm_write_f32((u32)(uintptr_t)duration, 0.0f); /* No actual recording */
+-    return CELL_OK;
++    printf("[cellRec] Close(isDiscard=%d) -- no file written\n", isDiscard);
++    if (!s_open)
++        return (s32)CELL_REC_ERROR_INVALID_STATE;
++    s32 rc = rec_status(CELL_REC_STATUS_CLOSE, CELL_OK);
++    s_open = 0;
++    s_recording = 0;
++    return rc;
+ }
+diff --git a/libs/misc/cellGameRecording.h b/libs/misc/cellGameRecording.h
+index 82b9af2..144e654 100644
+--- a/libs/misc/cellGameRecording.h
++++ b/libs/misc/cellGameRecording.h
+@@ -1,8 +1,13 @@
+ /*
+- * ps3recomp - cellGameRecording HLE
++ * ps3recomp - in-game video recording HLE (the SDK's cellRec, libsysutil_rec)
+  *
+- * In-game video recording. Captures framebuffer output for replay/sharing.
+- * Stub — init/end lifecycle, recording is a no-op (no framebuffer capture).
++ * The title opens a recorder (cellRecOpen) for an output file, starts and
++ * stops it around the play it wants captured, and closes it, which writes the
++ * file. Each step answers asynchronously through the callback given to Open.
++ *
++ * The file keeps its old name, but it used to define cellGameRecordingInit/
++ * End/Start/Stop/...: names that exist in no SDK, so their NIDs matched no
++ * import and the real cellRec calls fell through to the unresolved path.
+  */
+ 
+ #ifndef PS3RECOMP_CELL_GAME_RECORDING_H
+@@ -15,39 +20,35 @@
+ extern "C" {
+ #endif
+ 
+-/* Error codes */
+-#define CELL_GAME_REC_ERROR_NOT_INITIALIZED     0x80610701
+-#define CELL_GAME_REC_ERROR_ALREADY_INITIALIZED 0x80610702
+-#define CELL_GAME_REC_ERROR_INVALID_ARGUMENT    0x80610703
+-#define CELL_GAME_REC_ERROR_OUT_OF_MEMORY       0x80610704
+-#define CELL_GAME_REC_ERROR_NOT_SUPPORTED       0x80610705
+-#define CELL_GAME_REC_ERROR_BUSY                0x80610706
+-
+-/* Recording quality */
+-#define CELL_GAME_REC_QUALITY_LOW     0
+-#define CELL_GAME_REC_QUALITY_MEDIUM  1
+-#define CELL_GAME_REC_QUALITY_HIGH    2
+-
+-/* Recording parameters */
+-typedef struct CellGameRecordingParam {
+-    u32 quality;
+-    u32 maxDuration; /* seconds */
+-    u32 width;
+-    u32 height;
+-    u32 fps;
+-    u32 flags;
+-    u32 reserved[4];
+-} CellGameRecordingParam;
+-
+-/* Functions */
+-s32 cellGameRecordingInit(const CellGameRecordingParam* param);
+-s32 cellGameRecordingEnd(void);
+-s32 cellGameRecordingStart(void);
+-s32 cellGameRecordingStop(void);
+-s32 cellGameRecordingPause(void);
+-s32 cellGameRecordingResume(void);
+-s32 cellGameRecordingIsRecording(void);
+-s32 cellGameRecordingGetDuration(float* duration);
++/* Callback status. NPUB30035 01.09's callback (0x000A38DC) maps 2/3/4 to its
++ * own started/stopped/closed states and everything else except 1 to "error". */
++#define CELL_REC_STATUS_UNLOAD 0
++#define CELL_REC_STATUS_OPEN   1
++#define CELL_REC_STATUS_START  2
++#define CELL_REC_STATUS_STOP   3
++#define CELL_REC_STATUS_CLOSE  4
++#define CELL_REC_STATUS_ERR    10
++
++/* Errors (error base 0x8002C500) */
++#define CELL_REC_ERROR_OUT_OF_MEMORY 0x8002C501
++#define CELL_REC_ERROR_FATAL         0x8002C502
++#define CELL_REC_ERROR_INVALID_VALUE 0x8002C503
++#define CELL_REC_ERROR_FILE_OPEN     0x8002C504
++#define CELL_REC_ERROR_FILE_WRITE    0x8002C505
++#define CELL_REC_ERROR_INVALID_STATE 0x8002C506
++#define CELL_REC_ERROR_FILE_NO_DATA  0x8002C507
++
++/* Pointer parameters are GUEST addresses, cb_opd a guest OPD:
++ *
++ *   void cb(int recStatus, int recError, void* userdata);
++ *
++ * CellRecParam: videoFmt @0, audioFmt @4, numOfOpt @8, pOpt @0xC. */
++s32 cellRecQueryMemSize(u32 param_ea);
++s32 cellRecOpen(u32 dirName_ea, u32 fileName_ea, u32 param_ea, u32 container,
++                u32 cb_opd, u32 userdata);
++s32 cellRecStart(void);
++s32 cellRecStop(void);
++s32 cellRecClose(s32 isDiscard);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/libs/misc/cellVideoExport.c b/libs/misc/cellVideoExport.c
+index d8c5cc5..872caf1 100644
+--- a/libs/misc/cellVideoExport.c
++++ b/libs/misc/cellVideoExport.c
+@@ -1,62 +1,79 @@
+ /*
+- * ps3recomp - cellVideoExport HLE implementation
++ * ps3recomp - cellVideoExport (cellVideoExportUtility) HLE implementation
+  *
+- * Stub. Init/term work, export returns NOT_SUPPORTED.
++ * There is no system video library to export into, so an export comes back
++ * the way it does when the user backs out of the system's export screen:
++ * RET_CANCEL. Initialize and Finalize succeed. Every answer goes through the
++ * title's finish callback on its next sysutil poll -- a title waits for it
++ * (NPUB30035 01.09: Initialize2 / FromFile / Finalize each set a phase number
++ * as userdata and its callback, 0x000A3974, records "phase done" on 0 and
++ * "failed" on anything else).
+  */
+ 
+ #include "cellVideoExport.h"
++#include "../system/cellSysutil.h"   /* cellSysutilQueueGuestCallback */
+ #include <stdio.h>
+-#include "../../runtime/ppu/ppu_memory.h"   /* vm_write*: guest EA -> host, byte-swapped */
++#include "../../runtime/ppu/ppu_memory.h"   /* vm_base: guest EA -> host */
+ 
+-/* Internal state */
+-
+-static int s_initialized = 0;
++static const char* export_str(u32 ea)
++{
++    return (ea && vm_base) ? (const char*)(vm_base + ea) : "<null>";
++}
+ 
+-/* API */
++static s32 finish(u32 opd, s32 result, u32 userdata)
++{
++    return cellSysutilQueueGuestCallback(opd, (u64)(u32)result, userdata);
++}
+ 
+-s32 cellVideoExportInit(void)
++static s32 export_init(int v2, u32 container, u32 funcFinish_opd, u32 userdata)
+ {
+-    printf("[cellVideoExport] Init()\n");
+-    if (s_initialized)
+-        return (s32)CELL_VIDEO_EXPORT_ERROR_ALREADY_INITIALIZED;
+-    s_initialized = 1;
+-    return CELL_OK;
++    printf("[cellVideoExport] Initialize%s(container=0x%X)\n", v2 ? "2" : "", container);
++    if (!funcFinish_opd)
++        return (s32)CELL_VIDEO_EXPORT_UTIL_ERROR_PARAM;
++    /* No "already initialized" refusal: a title that skipped Finalize after a
++     * failed export (NPUB30035 only finalizes after a successful one) must be
++     * able to start again. */
++    return finish(funcFinish_opd, CELL_VIDEO_EXPORT_UTIL_RET_OK, userdata);
+ }
+ 
+-s32 cellVideoExportEnd(void)
++s32 cellVideoExportInitialize(u32 container, u32 funcFinish_opd, u32 userdata)
+ {
+-    printf("[cellVideoExport] End()\n");
+-    s_initialized = 0;
+-    return CELL_OK;
++    return export_init(0, container, funcFinish_opd, userdata);
+ }
+ 
+-s32 cellVideoExportStart(const CellVideoExportParam* param,
+-                          CellVideoExportCallback callback, void* userdata)
++s32 cellVideoExportInitialize2(u32 container, u32 funcFinish_opd, u32 userdata)
+ {
+-    (void)param;
+-    printf("[cellVideoExport] Start() - not supported\n");
+-    if (!s_initialized)
+-        return (s32)CELL_VIDEO_EXPORT_ERROR_NOT_INITIALIZED;
++    return export_init(1, container, funcFinish_opd, userdata);
++}
+ 
+-    /* Immediately call back with NOT_SUPPORTED */
+-    if (callback)
+-        callback((s32)CELL_VIDEO_EXPORT_ERROR_NOT_SUPPORTED, userdata);
++static s32 export_file(const char* fn, u32 dir_ea, u32 file_ea, u32 param_ea,
++                       u32 funcFinish_opd, u32 userdata)
++{
++    printf("[cellVideoExport] %s('%s' / '%s') -> CANCEL (no video library)\n",
++           fn, export_str(dir_ea), export_str(file_ea));
++    if (!dir_ea || !file_ea || !param_ea || !funcFinish_opd)
++        return (s32)CELL_VIDEO_EXPORT_UTIL_ERROR_PARAM;
++    return finish(funcFinish_opd, CELL_VIDEO_EXPORT_UTIL_RET_CANCEL, userdata);
++}
+ 
+-    return (s32)CELL_VIDEO_EXPORT_ERROR_NOT_SUPPORTED;
++s32 cellVideoExportFromFile(u32 srcHddDir_ea, u32 srcHddFile_ea, u32 param_ea,
++                            u32 funcFinish_opd, u32 userdata)
++{
++    return export_file("FromFile", srcHddDir_ea, srcHddFile_ea, param_ea,
++                       funcFinish_opd, userdata);
+ }
+ 
+-s32 cellVideoExportAbort(void)
++s32 cellVideoExportFromFileWithCopy(u32 srcHddDir_ea, u32 srcHddFile_ea, u32 param_ea,
++                                    u32 funcFinish_opd, u32 userdata)
+ {
+-    if (!s_initialized)
+-        return (s32)CELL_VIDEO_EXPORT_ERROR_NOT_INITIALIZED;
+-    return CELL_OK;
++    return export_file("FromFileWithCopy", srcHddDir_ea, srcHddFile_ea, param_ea,
++                       funcFinish_opd, userdata);
+ }
+ 
+-s32 cellVideoExportGetProgress(float* progress)
++s32 cellVideoExportFinalize(u32 funcFinish_opd, u32 userdata)
+ {
+-    if (!s_initialized)
+-        return (s32)CELL_VIDEO_EXPORT_ERROR_NOT_INITIALIZED;
+-    if (!progress) return (s32)CELL_VIDEO_EXPORT_ERROR_INVALID_ARGUMENT;
+-    vm_write_f32((u32)(uintptr_t)progress, 0.0f);
+-    return CELL_OK;
++    printf("[cellVideoExport] Finalize()\n");
++    if (!funcFinish_opd)
++        return (s32)CELL_VIDEO_EXPORT_UTIL_ERROR_PARAM;
++    return finish(funcFinish_opd, CELL_VIDEO_EXPORT_UTIL_RET_OK, userdata);
+ }
+diff --git a/libs/misc/cellVideoExport.h b/libs/misc/cellVideoExport.h
+index b20cf51..ba1024a 100644
+--- a/libs/misc/cellVideoExport.h
++++ b/libs/misc/cellVideoExport.h
+@@ -1,8 +1,13 @@
+ /*
+- * ps3recomp - cellVideoExport HLE
++ * ps3recomp - cellVideoExport (cellVideoExportUtility) HLE
+  *
+- * Video export utility for saving game-captured video to the XMB video column.
+- * Stub — init/end lifecycle, export returns NOT_SUPPORTED.
++ * Copies a video file the title wrote to its HDD area into the system's video
++ * library (XMB > Video). Every call answers through a finish callback,
++ * delivered on the title's next cellSysutilCheckCallback.
++ *
++ * This file used to define cellVideoExportInit/End/Start/Abort/GetProgress:
++ * names that exist in no SDK, so their NIDs matched no import and a title's
++ * real calls fell through to the unresolved-NID path (CELL_OK, no callback).
+  */
+ 
+ #ifndef PS3RECOMP_CELL_VIDEO_EXPORT_H
+@@ -15,38 +20,32 @@
+ extern "C" {
+ #endif
+ 
+-/* Error codes */
+-#define CELL_VIDEO_EXPORT_ERROR_NOT_INITIALIZED     0x80610501
+-#define CELL_VIDEO_EXPORT_ERROR_ALREADY_INITIALIZED 0x80610502
+-#define CELL_VIDEO_EXPORT_ERROR_INVALID_ARGUMENT    0x80610503
+-#define CELL_VIDEO_EXPORT_ERROR_OUT_OF_MEMORY       0x80610504
+-#define CELL_VIDEO_EXPORT_ERROR_NOT_SUPPORTED       0x80610505
+-#define CELL_VIDEO_EXPORT_ERROR_BUSY                0x80610506
+-
+-/* Export format */
+-#define CELL_VIDEO_EXPORT_FORMAT_AVI    0
+-#define CELL_VIDEO_EXPORT_FORMAT_MP4    1
+-
+-/* Export parameters */
+-typedef struct CellVideoExportParam {
+-    const char* filePath;
+-    const char* title;
+-    const char* gameTitle;
+-    u32 format;
+-    u32 flags;
+-    u32 reserved[4];
+-} CellVideoExportParam;
+-
+-/* Callback */
+-typedef void (*CellVideoExportCallback)(s32 result, void* userdata);
+-
+-/* Functions */
+-s32 cellVideoExportInit(void);
+-s32 cellVideoExportEnd(void);
+-s32 cellVideoExportStart(const CellVideoExportParam* param,
+-                          CellVideoExportCallback callback, void* userdata);
+-s32 cellVideoExportAbort(void);
+-s32 cellVideoExportGetProgress(float* progress);
++/* Results (error base 0x8002CA00) */
++#define CELL_VIDEO_EXPORT_UTIL_RET_OK            0
++#define CELL_VIDEO_EXPORT_UTIL_RET_CANCEL        1
++#define CELL_VIDEO_EXPORT_UTIL_ERROR_BUSY        0x8002CA01
++#define CELL_VIDEO_EXPORT_UTIL_ERROR_INTERNAL    0x8002CA02
++#define CELL_VIDEO_EXPORT_UTIL_ERROR_PARAM       0x8002CA03
++#define CELL_VIDEO_EXPORT_UTIL_ERROR_ACCESS_ERROR 0x8002CA04
++#define CELL_VIDEO_EXPORT_UTIL_ERROR_DB_INTERNAL 0x8002CA05
++#define CELL_VIDEO_EXPORT_UTIL_ERROR_DB_REGIST   0x8002CA06
++#define CELL_VIDEO_EXPORT_UTIL_ERROR_SET_META    0x8002CA07
++#define CELL_VIDEO_EXPORT_UTIL_ERROR_FLUSH_META  0x8002CA08
++#define CELL_VIDEO_EXPORT_UTIL_ERROR_MOVE        0x8002CA09
++#define CELL_VIDEO_EXPORT_UTIL_ERROR_INITIALIZE  0x8002CA0A
++
++/* Pointer parameters are GUEST addresses and funcFinish is a guest OPD
++ * (the generic HLE adapter passes r3..r10 through unchanged):
++ *
++ *   void funcFinish(int result, void* userdata);
++ */
++s32 cellVideoExportInitialize(u32 container, u32 funcFinish_opd, u32 userdata);
++s32 cellVideoExportInitialize2(u32 container, u32 funcFinish_opd, u32 userdata);
++s32 cellVideoExportFromFile(u32 srcHddDir_ea, u32 srcHddFile_ea, u32 param_ea,
++                            u32 funcFinish_opd, u32 userdata);
++s32 cellVideoExportFromFileWithCopy(u32 srcHddDir_ea, u32 srcHddFile_ea, u32 param_ea,
++                                    u32 funcFinish_opd, u32 userdata);
++s32 cellVideoExportFinalize(u32 funcFinish_opd, u32 userdata);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/libs/misc/cellVideoUpload.c b/libs/misc/cellVideoUpload.c
+index a0eae78..9a61a9f 100644
+--- a/libs/misc/cellVideoUpload.c
++++ b/libs/misc/cellVideoUpload.c
+@@ -1,54 +1,27 @@
+ /*
+  * ps3recomp - cellVideoUpload HLE implementation
+  *
+- * Stub. Init/term work, upload returns NOT_SUPPORTED.
++ * Offline: the upload dialog opens and the user backs out. The callback gets
++ * INITIALIZED / CELL_OK and then FINALIZED / CELL_VIDEO_UPLOAD_ERROR_CANCEL,
++ * both on the title's next sysutil poll. NPUB30035 01.09's callback
++ * (0x000A3940) marks success only on FINALIZED with error 0 and failure on
++ * any non-zero error, so it sees a clean "not uploaded" either way.
+  */
+ 
+ #include "cellVideoUpload.h"
++#include "../system/cellSysutil.h"   /* cellSysutilQueueGuestCallbackArgs */
+ #include <stdio.h>
+-#include "../../runtime/ppu/ppu_memory.h"   /* vm_write*: guest EA -> host, byte-swapped */
+ 
+-/* Internal state */
+-
+-static int s_initialized = 0;
+-
+-/* API */
+-
+-s32 cellVideoUploadInit(void)
+-{
+-    printf("[cellVideoUpload] Init()\n");
+-    if (s_initialized)
+-        return (s32)CELL_VIDEO_UPLOAD_ERROR_ALREADY_INITIALIZED;
+-    s_initialized = 1;
+-    return CELL_OK;
+-}
+-
+-s32 cellVideoUploadTerm(void)
+-{
+-    printf("[cellVideoUpload] Term()\n");
+-    s_initialized = 0;
+-    return CELL_OK;
+-}
+-
+-s32 cellVideoUploadStart(const CellVideoUploadParam* param,
+-                           CellVideoUploadCallback callback, void* arg)
+-{
+-    (void)param; (void)callback; (void)arg;
+-    printf("[cellVideoUpload] Start() - not supported\n");
+-    if (!s_initialized) return (s32)CELL_VIDEO_UPLOAD_ERROR_NOT_INITIALIZED;
+-    return (s32)CELL_VIDEO_UPLOAD_ERROR_NOT_SUPPORTED;
+-}
+-
+-s32 cellVideoUploadCancel(void)
+-{
+-    if (!s_initialized) return (s32)CELL_VIDEO_UPLOAD_ERROR_NOT_INITIALIZED;
+-    return CELL_OK;
+-}
+-
+-s32 cellVideoUploadGetStatus(s32* status)
++s32 cellVideoUploadInitialize(u32 param_ea, u32 cb_opd, u32 userdata)
+ {
+-    if (!s_initialized) return (s32)CELL_VIDEO_UPLOAD_ERROR_NOT_INITIALIZED;
+-    if (!status) return (s32)CELL_VIDEO_UPLOAD_ERROR_INVALID_ARGUMENT;
+-    vm_write32((u32)(uintptr_t)status, (u32)0); /* idle */
+-    return CELL_OK;
++    printf("[cellVideoUpload] Initialize(param=0x%08X) -> CANCEL (offline)\n", param_ea);
++    if (!param_ea || !cb_opd)
++        return (s32)CELL_VIDEO_UPLOAD_ERROR_INVALID_VALUE;
++
++    const u64 init[8] = { CELL_VIDEO_UPLOAD_STATUS_INITIALIZED, CELL_OK, userdata, 0, 0, 0, 0, 0 };
++    const u64 fini[8] = { CELL_VIDEO_UPLOAD_STATUS_FINALIZED,
++                          (u64)(u32)CELL_VIDEO_UPLOAD_ERROR_CANCEL, userdata, 0, 0, 0, 0, 0 };
++    s32 rc = cellSysutilQueueGuestCallbackArgs(cb_opd, init);
++    if (rc != CELL_OK) return rc;
++    return cellSysutilQueueGuestCallbackArgs(cb_opd, fini);
+ }
+diff --git a/libs/misc/cellVideoUpload.h b/libs/misc/cellVideoUpload.h
+index dd0a39e..4a93486 100644
+--- a/libs/misc/cellVideoUpload.h
++++ b/libs/misc/cellVideoUpload.h
+@@ -1,8 +1,12 @@
+ /*
+  * ps3recomp - cellVideoUpload HLE
+  *
+- * Video upload to social networking services (YouTube, etc.).
+- * Stub — init/term work, upload returns NOT_SUPPORTED.
++ * Uploads a video file to an online service (YouTube) through a system
++ * dialog. The whole operation is one call, cellVideoUploadInitialize, whose
++ * callback reports INITIALIZED and then FINALIZED with the outcome.
++ *
++ * This file used to define cellVideoUploadInit/Term/Start/Cancel/GetStatus:
++ * names that exist in no SDK, so the real import never resolved.
+  */
+ 
+ #ifndef PS3RECOMP_CELL_VIDEO_UPLOAD_H
+@@ -15,31 +19,29 @@
+ extern "C" {
+ #endif
+ 
+-/* Error codes */
+-#define CELL_VIDEO_UPLOAD_ERROR_NOT_INITIALIZED     0x8002C101
+-#define CELL_VIDEO_UPLOAD_ERROR_ALREADY_INITIALIZED 0x8002C102
+-#define CELL_VIDEO_UPLOAD_ERROR_INVALID_ARGUMENT    0x8002C103
+-#define CELL_VIDEO_UPLOAD_ERROR_NOT_SUPPORTED       0x8002C104
+-
+-/* Types */
+-typedef struct CellVideoUploadParam {
+-    const char* filePath;
+-    const char* title;
+-    const char* description;
+-    const char* tags;
+-    u32 reserved[4];
+-} CellVideoUploadParam;
+-
+-typedef void (*CellVideoUploadCallback)(s32 result, void* arg);
+-
+-/* Functions */
+-s32 cellVideoUploadInit(void);
+-s32 cellVideoUploadTerm(void);
+-
+-s32 cellVideoUploadStart(const CellVideoUploadParam* param,
+-                           CellVideoUploadCallback callback, void* arg);
+-s32 cellVideoUploadCancel(void);
+-s32 cellVideoUploadGetStatus(s32* status);
++/* Callback status */
++#define CELL_VIDEO_UPLOAD_STATUS_INITIALIZED 1
++#define CELL_VIDEO_UPLOAD_STATUS_FINALIZED   2
++
++/* Callback error codes (error base 0x8002D000) */
++#define CELL_VIDEO_UPLOAD_ERROR_CANCEL              0x8002D000
++#define CELL_VIDEO_UPLOAD_ERROR_NETWORK             0x8002D001
++#define CELL_VIDEO_UPLOAD_ERROR_SERVICE_STOP        0x8002D002
++#define CELL_VIDEO_UPLOAD_ERROR_SERVICE_BUSY        0x8002D003
++#define CELL_VIDEO_UPLOAD_ERROR_SERVICE_UNAVAILABLE 0x8002D004
++#define CELL_VIDEO_UPLOAD_ERROR_SERVICE_QUOTA       0x8002D005
++#define CELL_VIDEO_UPLOAD_ERROR_ACCOUNT_STOP        0x8002D006
++#define CELL_VIDEO_UPLOAD_ERROR_OUT_OF_MEMORY       0x8002D020
++#define CELL_VIDEO_UPLOAD_ERROR_FATAL               0x8002D021
++#define CELL_VIDEO_UPLOAD_ERROR_INVALID_VALUE       0x8002D022
++#define CELL_VIDEO_UPLOAD_ERROR_ACCESS_ERROR        0x8002D023
++#define CELL_VIDEO_UPLOAD_ERROR_INITIALIZE          0x8002D024
++
++/* param_ea is a guest CellVideoUploadParam*, cb_opd a guest OPD:
++ *
++ *   void cb(int status, int errorCode, void* userdata);
++ */
++s32 cellVideoUploadInitialize(u32 param_ea, u32 cb_opd, u32 userdata);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/libs/misc/tests/test_video_export_upload_rec.c b/libs/misc/tests/test_video_export_upload_rec.c
+new file mode 100644
+index 0000000..29d76b5
+--- /dev/null
++++ b/libs/misc/tests/test_video_export_upload_rec.c
+@@ -0,0 +1,101 @@
++/* clang -std=gnu17 -I include libs/misc/tests/test_video_export_upload_rec.c
++ *   libs/system/cellSysutil.c -Wl,-dead_strip -pthread -o /tmp/test_video_export_upload_rec
++ * Linux: replace -Wl,-dead_strip with -ffunction-sections -fdata-sections -Wl,--gc-sections
++ *
++ * cellRec, cellVideoExport and cellVideoUpload under their SDK names: each
++ * NID matches the import a shipping title makes (computed below from the
++ * name), and every step answers through the title's callback on the next
++ * sysutil poll. Call shapes follow NPUB30035 01.09 (0x000A07C8..0x000A33E0). */
++#include "../cellGameRecording.c"
++#include "../cellVideoExport.c"
++#include "../cellVideoUpload.c"
++#include "ps3emu/guest_call.h"
++#include <assert.h>
++#include <stdlib.h>
++#include <string.h>
++uint8_t* vm_base;
++uint32_t ppu_vm_size;
++int g_resv_store_active;
++uint32_t g_ww_lo, g_ww_hi;
++void ppu_resv_break_store(uint64_t ea) { (void)ea; }
++void ps3_ww_report_inline(uint32_t a, uint64_t v, int w) { (void)a; (void)v; (void)w; }
++int spu_coh_is_reserved(uint32_t a) { (void)a; return 0; }
++void spu_coh_notify_write(uint32_t a) { (void)a; }
++void spu_lockline_lock(void) {}
++void spu_lockline_unlock(void) {}
++void np_psnr_pump(void) {}
++void cellMsgDialog_tick(void) {}
++
++static struct { u32 opd; u64 a0, a1, a2; } got[16];
++static unsigned n;
++static void callback(u32 opd, u64 a0, u64 a1, u64 a2, u64 a3,
++                     u64 a4, u64 a5, u64 a6, u64 a7)
++{
++    assert(!a3 && !a4 && !a5 && !a6 && !a7 && n < 16);
++    got[n].opd = opd; got[n].a0 = a0; got[n].a1 = a1; got[n].a2 = a2; n++;
++}
++
++/* Poll once; expect exactly `count` new callbacks. */
++static unsigned poll(unsigned count)
++{
++    unsigned before = n;
++    cellSysutilCheckCallback();
++    assert(n == before + count);
++    return before;
++}
++
++int main(void)
++{
++    vm_base = calloc(1, 65536); assert(vm_base);
++    g_ps3_guest_caller = callback;
++    const u32 REC_CB = 0x12013E0, UP_CB = 0x12013E8, EX_CB = 0x12013F0;
++
++    /* ---- cellRec: OPEN, START, STOP, CLOSE; nothing after CLOSE. */
++    const u32 param = 0x100;
++    vm_write32(param + 0, 0x4660); vm_write32(param + 4, 1);
++    vm_write32(param + 8, 1);      vm_write32(param + 12, 0x180);
++    memcpy(vm_base + 0x200, "/dev_hdd0/game/X/USRDIR", 24);
++    assert(cellRecQueryMemSize(0) == (s32)CELL_REC_ERROR_INVALID_VALUE);
++    assert(cellRecQueryMemSize(param) > 0);
++    assert(cellRecStart() == (s32)CELL_REC_ERROR_INVALID_STATE);
++    assert(cellRecOpen(0x200, 0, param, 7, REC_CB, 0) == CELL_OK);
++    assert(cellRecOpen(0x200, 0, param, 7, REC_CB, 0) == (s32)CELL_REC_ERROR_INVALID_STATE);
++    unsigned i = poll(1);
++    assert(got[i].opd == REC_CB && got[i].a0 == CELL_REC_STATUS_OPEN && got[i].a1 == 0);
++    assert(cellRecStart() == CELL_OK);
++    i = poll(1); assert(got[i].a0 == CELL_REC_STATUS_START && got[i].a1 == 0);
++    assert(cellRecStop() == CELL_OK);
++    assert(cellRecStop() == (s32)CELL_REC_ERROR_INVALID_STATE);
++    i = poll(1); assert(got[i].a0 == CELL_REC_STATUS_STOP);
++    assert(cellRecClose(0) == CELL_OK);
++    i = poll(1); assert(got[i].a0 == CELL_REC_STATUS_CLOSE && got[i].a1 == 0);
++    poll(0);
++    assert(cellRecClose(0) == (s32)CELL_REC_ERROR_INVALID_STATE);
++
++    /* ---- cellVideoExport: init OK (userdata 1), export cancelled (2),
++     * finalize OK (3); each through the finish callback. */
++    memcpy(vm_base + 0x300, "VIDEO.MP4", 10);
++    assert(cellVideoExportInitialize2(0, EX_CB, 1) == CELL_OK);
++    i = poll(1); assert(got[i].opd == EX_CB && got[i].a0 == 0 && got[i].a1 == 1);
++    assert(cellVideoExportFromFile(0x200, 0x300, 0x400, EX_CB, 2) == CELL_OK);
++    i = poll(1); assert(got[i].a0 == CELL_VIDEO_EXPORT_UTIL_RET_CANCEL && got[i].a1 == 2);
++    assert(cellVideoExportFromFile(0x200, 0, 0x400, EX_CB, 2) == (s32)CELL_VIDEO_EXPORT_UTIL_ERROR_PARAM);
++    assert(cellVideoExportFinalize(EX_CB, 3) == CELL_OK);
++    i = poll(1); assert(got[i].a0 == 0 && got[i].a1 == 3);
++    /* Re-initializing without a Finalize is allowed. */
++    assert(cellVideoExportInitialize(0, EX_CB, 1) == CELL_OK);
++    assert(cellVideoExportInitialize2(0, EX_CB, 1) == CELL_OK);
++    poll(2);
++
++    /* ---- cellVideoUpload: INITIALIZED/OK, then FINALIZED/CANCEL. */
++    assert(cellVideoUploadInitialize(0, UP_CB, 0) == (s32)CELL_VIDEO_UPLOAD_ERROR_INVALID_VALUE);
++    assert(cellVideoUploadInitialize(0x500, UP_CB, 0x77) == CELL_OK);
++    i = poll(2);
++    assert(got[i].opd == UP_CB && got[i].a0 == CELL_VIDEO_UPLOAD_STATUS_INITIALIZED &&
++           got[i].a1 == 0 && got[i].a2 == 0x77);
++    assert(got[i + 1].a0 == CELL_VIDEO_UPLOAD_STATUS_FINALIZED &&
++           (u32)got[i + 1].a1 == CELL_VIDEO_UPLOAD_ERROR_CANCEL && got[i + 1].a2 == 0x77);
++
++    free(vm_base);
++    puts("cellRec/cellVideoExport/cellVideoUpload: SDK names, every step answered");
++}
+-- 
+2.47.3
+

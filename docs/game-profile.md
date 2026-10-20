@@ -210,7 +210,7 @@ and the frame rate is uncapped in the engine.
 | Entry OPD / TOC | `0x1BE8EC0` / `0x1C6EA28` | `0x12018A8` → `0xADB68` / `0x123C6D0` |
 | TOC-switch stub runs | 2 (4,242 stubs) | 0 |
 | Imports | 274 / 20 libs, 17 unnamed | 288 / 21 libs, 20 unnamed |
-| SPU images registered | 15/15 + 2 SPUJOBS jobs (patches 0006-0008) | 15/15 + 2 SPUJOBS jobs (12/15 before 0006) |
+| SPU images registered | 15/15 + 2 SPUJOBS jobs (patches 0006-0007) | 15/15 + 2 SPUJOBS jobs (12/15 before 0005) |
 
 Import changes in 01.09: **+cellGame** (BootCheck, DataCheck, ContentPermit,
 CreateGameData, GetParamString, GetSizeKB, ContentErrorDialog), **+cellPngDec** (7),
@@ -244,7 +244,7 @@ Images that keep a section table get the same bogus seeds, but they are clipped 
 | `e33837bb…` image 0 (fp `0xC1759183E2FF7448`) | `0x171D0-0x1A1CC` | **MultiStream** mixer strings ("Skipping DSP (slot %d)...", "MP3 Size to do...", "ERROR! Multistream...", "STARVED OF DATA"), float tables at `0x17700-0x19200` | 50 |
 
 Image 0 is therefore MultiStream's main SPU mixer (MP3 decode and DSP slots); the strings
-say so. The fix (patch `0006-spu-detector-rodata-seeds.patch`) keeps a derived seed only if it decodes, is not a
+say so. The fix (patch `0005-spu-detector-rodata-seeds.patch`) keeps a derived seed only if it decodes, is not a
 NUL-padded C string, and a straight-line walk from it reaches a branch/return/stop before
 an undecodable word or the segment end. Result on 01.09: **14/15 registered**, the two
 images lift with 0 unsupported (625 and 1,151 functions); the other 12 lift byte-identical

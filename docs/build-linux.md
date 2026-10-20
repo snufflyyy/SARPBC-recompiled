@@ -120,7 +120,7 @@ again five seconds later; no headless fallback or presentation error appeared.
 This checks an actual window, not just the scaffold's “window open” message.
 
 **Native Wayland verified (T042, 2026-10-20, Fedora / RX 7800 XT):** patch
-`0041-vk-wayland-surface-formats.patch` removes the 64-entry surface-format limit.
+`0039-vk-wayland-surface-formats.patch` removes the 64-entry surface-format limit.
 RADV exposes 99 format/colorspace pairs on this desktop. The old fill call returned
 `VK_INCOMPLETE` (5), which the backend treated as fatal, then continued headless.
 The scaffold still printed “window open”, so that line alone is not proof.
@@ -186,7 +186,7 @@ ea=0x0133B880`). The ShaderPatching job (chain `0x012B6F00`) then blocked in
 `pthread_rwlock_wrlock` for good. The FIFO park before `SET_SHADER_PROGRAM` was never released, and
 the legal/ESRB screen stopped after 8-25 s.
 
-**Fix:** patch `0029-win32-compat-srw-writer-preference.patch`. On glibc (`#ifdef __GLIBC__`),
+**Fix:** patch `0027-win32-compat-srw-writer-preference.patch`. On glibc (`#ifdef __GLIBC__`),
 `ps3__rwl_init` sets `PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP`. Only the `NONRECURSIVE`
 kind changes anything: glibc treats plain `PTHREAD_RWLOCK_PREFER_WRITER_NP` as reader preference.
 Windows is unchanged. Other POSIX libcs have no setkind call and keep their default. As far as

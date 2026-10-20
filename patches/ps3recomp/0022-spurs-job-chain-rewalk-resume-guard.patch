@@ -1,0 +1,314 @@
+From c28053c890a419eff2886bb5d4ea363e3acb9743 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Mon, 19 Oct 2026 09:41:09 -0500
+Subject: [PATCH] spurs job chains: queue a re-walk, resume at the END slot,
+ park on a closed guard
+
+A Run/Kick that arrived while the host walker was busy was coalesced into
+nothing, so jobs appended after the walker read past their slot never ran.
+SARPBC (like Drakengard 3) appends each ShaderPatching job and Runs the chain;
+those jobs release the JUMP-to-self park the PPU leaves in the GCM FIFO before
+SET_SHADER_PROGRAM, so a dropped Run stalled rendering for good. Queue a
+re-walk instead (after soyjxck/ps3recomp 26fdd50, MIT).
+
+Every walk also restarted at the chain's entry. The job manager keeps the pc
+across the halt an END causes and the next Run re-fetches that slot; resume
+there (SPURS_JC_RESTART_AT_ENTRY=1 restores the old behaviour). SARPBC: ~33%
+fewer job runs in 45 s.
+
+A guard nobody ever notified now waits SPURS_GUARD_FIRST_MS (default 200,
+from soyjxck/ps3recomp 6371138, MIT) instead of 20 s, and a walk that gives up
+parks the chain on the GUARD; the guard's next cellSpursJobGuardNotify restarts
+it there, so a late notify is no longer lost. A walk that only parked posts no
+completion event.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/spurs/cellSpurs.c | 157 ++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 141 insertions(+), 16 deletions(-)
+
+diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+index eb3e6fd..e1c8e57 100644
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -2259,8 +2259,39 @@ static struct {
+     u16 max_grab;
+     int run_count;
+     volatile long running;   /* 1 while a host thread walks this chain */
++    /* A Run/Kick that arrived while a walk was in progress. The title has
++     * appended jobs and expects them to execute; coalescing the request into
++     * the walk already under way loses every job written after the walker
++     * read past that slot. */
++    volatile long rerun;
++    /* Where the next walk starts. The job manager keeps a chain's pc across
++     * the halt an END command causes, and the next Run re-fetches the slot
++     * that held END; a chain parked on a closed GUARD resumes at the GUARD.
++     * 0 = the entry (a fresh chain). */
++    u32 resume_pc;
++    /* 1 while the chain is parked on a GUARD it gave up waiting for; the
++     * guard's next notify restarts the walk (cellSpursJobGuardNotify). */
++    volatile long parked;
+ } s_jobchains[MAX_JOBCHAINS];
+ 
++static s32 jc_start(u64 jc_ea, const char* who);
++
++/* SPURS_JC_RESTART_AT_ENTRY=1: the old behaviour, every Run walks the chain
++ * from its entry again instead of resuming where the last walk halted. */
++static int jc_restart_at_entry(void)
++{
++    static int v = -1;
++    if (v < 0) v = getenv("SPURS_JC_RESTART_AT_ENTRY") ? 1 : 0;
++    return v;
++}
++
++static int jc_slot_of(u32 jc_ea)
++{
++    for (int i = 0; i < MAX_JOBCHAINS; i++)
++        if (jc_ea && s_jobchains[i].jc_ea == jc_ea) return i;
++    return -1;
++}
++
+ static void jc_dump_commands(const char* tag, u32 ea, int max_words)
+ {
+     printf("[cellSpurs] %s chain@0x%08X commands:", tag, ea);
+@@ -2325,6 +2356,9 @@ static s32 jc_register(u32 jc_ea, u32 entry_ea, u16 size_desc, u16 max_grab,
+             s_jobchains[i].size_desc = size_desc;
+             s_jobchains[i].max_grab  = max_grab;
+             s_jobchains[i].run_count = 0;
++            s_jobchains[i].rerun     = 0;
++            s_jobchains[i].resume_pc = 0;
++            s_jobchains[i].parked    = 0;
+             return CELL_OK;
+         }
+     }
+@@ -2488,6 +2522,8 @@ static struct {
+     u32 reset;       /* value to restore when autoReset is set             */
+     u32 pending;     /* notifications received, not yet consumed        */
+     u32 auto_reset;
++    u32 jc_ea;       /* the chain the guard was initialised for            */
++    int ever_notified;   /* a notify has arrived at least once (jg_wait)  */
+     int active;
+ } s_jobguards[MAX_JOBGUARDS];
+ 
+@@ -2507,7 +2543,7 @@ static int jg_find(u32 ea)
+ s32 cellSpursJobGuardInitialize(u64 jc_ea, u64 guard_ea, u32 notify_count,
+                                 u32 request_spu_count, u32 auto_reset)
+ {
+-    (void)jc_ea; (void)request_spu_count;
++    (void)request_spu_count;
+     u32 ea = (u32)guard_ea;
+     if (!ea) return CELL_SPURS_TASK_ERROR_NULL_POINTER;
+ 
+@@ -2521,6 +2557,8 @@ s32 cellSpursJobGuardInitialize(u64 jc_ea, u64 guard_ea, u32 notify_count,
+     s_jobguards[i].reset      = notify_count;
+     s_jobguards[i].pending    = 0;
+     s_jobguards[i].auto_reset = auto_reset;
++    s_jobguards[i].jc_ea      = (u32)jc_ea;
++    s_jobguards[i].ever_notified = 0;
+     s_jobguards[i].active     = 1;
+ 
+     /* Mirror the count into guest memory. The SPU side reads the guard on
+@@ -2548,6 +2586,7 @@ s32 cellSpursJobGuardNotify(u64 guard_ea)
+      * was still running -- the title notified 6 times and the chain completed
+      * 2 laps, so the thread waiting on the other 4 completions never woke. */
+     s_jobguards[i].pending++;
++    s_jobguards[i].ever_notified = 1;
+     { u32 remaining = (s_jobguards[i].pending >= s_jobguards[i].reset)
+                     ? 0u : s_jobguards[i].reset - s_jobguards[i].pending;
+       s_jobguards[i].count = remaining;
+@@ -2556,6 +2595,17 @@ s32 cellSpursJobGuardNotify(u64 guard_ea)
+       if (_n++ < 8)
+           printf("[cellSpurs] JobGuardNotify(0x%08X) -> %u remaining\n",
+                  ea, s_jobguards[i].count); }
++    /* The chain's walker gives up on a guard nobody notifies and parks the
++     * chain there (jc_execute). On hardware the job manager simply sits on the
++     * guard until this notify, so resume the walk now. The walker marks the
++     * chain parked before its last look at `pending` and this side bumps
++     * `pending` before looking at `parked`, so one of the two always sees the
++     * other: a notify is never lost between the give-up and the park. */
++    if (s_jobguards[i].pending >= s_jobguards[i].reset) {
++        int c = jc_slot_of(s_jobguards[i].jc_ea);
++        if (c >= 0 && InterlockedCompareExchange(&s_jobchains[c].parked, 0L, 1L) == 1L)
++            jc_start(s_jobchains[c].jc_ea, "JobGuardNotify");
++    }
+     return CELL_OK;
+ }
+ 
+@@ -2574,11 +2624,26 @@ s32 cellSpursJobGuardReset(u64 guard_ea)
+  * chain then gives up this pass rather than spinning the walker thread
+  * forever). An unknown guard opens immediately -- a chain guarded by something
+  * we never saw initialised must not deadlock the walker. */
++static int jg_ready(u32 ea)
++{
++    int i = jg_find(ea);
++    return i < 0 || s_jobguards[i].pending >= s_jobguards[i].reset;
++}
++
+ static int jg_wait(u32 ea)
+ {
+     int i = jg_find(ea);
+     if (i < 0) return 1;
+-    for (int spin = 0; spin < 20000; spin++) {     /* ~20 s at 1 ms */
++    /* A guard nobody has ever notified is a chain parked for work the title
++     * has not produced yet; on hardware the SPU sits on it while the PPU goes
++     * on. Such a guard waits SPURS_GUARD_FIRST_MS (default 200) before the
++     * walker parks the chain; one that has been notified before keeps 20 s.
++     * Either way the next notify restarts a parked chain, so giving up loses
++     * nothing. (The first-wait rule is from soyjxck/ps3recomp 6371138, MIT.) */
++    static long first_ms = -1;
++    if (first_ms < 0) { const char* e = getenv("SPURS_GUARD_FIRST_MS"); first_ms = e ? atol(e) : 200; }
++    const int spins = s_jobguards[i].ever_notified ? 20000 : (int)first_ms;
++    for (int spin = 0; spin < spins; spin++) {     /* 1 ms each */
+         if (s_jobguards[i].pending >= s_jobguards[i].reset) {
+             /* Consume exactly one release worth of credits, so notifies that
+              * arrived during the previous lap still count. */
+@@ -2594,7 +2659,11 @@ static int jg_wait(u32 ea)
+         usleep(1000);
+ #endif
+     }
+-    printf("[cellSpurs] guard 0x%08X still closed after 20 s -- chain gives up\n", ea);
++    { static int _n = 0;
++      if (_n++ < 8)
++          printf("[cellSpurs] guard 0x%08X still closed after %d ms%s -- chain parks "
++                 "there until the next notify\n", ea, spins,
++                 s_jobguards[i].ever_notified ? "" : " (never notified)"); }
+     return 0;
+ }
+ 
+@@ -2684,9 +2753,15 @@ static void jc_signal_done(u32 jc_ea, int job_index)
+     }
+ }
+ 
+-static void jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc)
++/* Walks one run of the chain in `slot`. Returns the number of jobs run, or -1
++ * when the walk parked on a closed GUARD. */
++static int jc_execute(int slot)
+ {
+-    u32 pc = entry_ea, ret_pc = 0;
++    const u32 jc_ea = s_jobchains[slot].jc_ea, size_desc = s_jobchains[slot].size_desc;
++    u32 pc = s_jobchains[slot].resume_pc;
++    if (!pc || jc_restart_at_entry()) pc = s_jobchains[slot].entry_ea;
++    s_jobchains[slot].resume_pc = 0;
++    u32 ret_pc = 0;
+     int jobs = 0;
+     /* Bound IDLE steps, not total steps. A SPURS job chain is frequently a
+      * SERVICE LOOP -- guard, job, sync, next, repeat -- and is meant to run for
+@@ -2720,22 +2795,43 @@ static void jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc)
+         if (op == 4) { ret_pc = pc + 8; pc = (u32)(cmd & ~7ull); continue; }  /* CALL */
+         if (op == 7) {
+             if (ext == (7 | (15 << 3))) {                     /* END */
+-                printf("[cellSpurs] chain 0x%08X: END after %d job(s)\n", jc_ea, jobs);
++                { static int _n = 0; if (_n++ < 8)
++                    printf("[cellSpurs] chain 0x%08X: END after %d job(s) at pc=0x%08X "
++                           "(the next run resumes there)\n", jc_ea, jobs, pc); }
++                /* Halted: the next Run re-fetches this slot. A title that
++                 * appends by overwriting END with a JOB and writing a new END
++                 * behind it gets exactly the new job run, not every earlier
++                 * one again (which also re-patched FIFO memory the title had
++                 * since reused). */
++                s_jobchains[slot].resume_pc = pc;
+                 if (jobs) jc_signal_done(jc_ea, jobs - 1);
+-                return;
++                return jobs;
+             }
+             if (ext == (7 | (14 << 3))) {                     /* RET */
+-                if (!ret_pc) return;
++                if (!ret_pc) return jobs;
+                 pc = ret_pc; ret_pc = 0; continue;
+             }
+             if (ext == (7 | (0 << 3))) {                      /* ABORT */
+                 printf("[cellSpurs] chain 0x%08X: ABORT\n", jc_ea);
+-                return;
++                return jobs;
+             }
+         }
+         if (op == 7 && ext == (7 | (1 << 3))) {           /* GUARD */
+             u32 g_ea = (u32)(cmd & ~127ull);
+-            if (!jg_wait(g_ea)) return;                  /* still closed */
++            if (!jg_wait(g_ea)) {
++                /* Still closed: park the chain on this GUARD and end the walk;
++                 * cellSpursJobGuardNotify restarts it here. Mark it parked
++                 * BEFORE the last look at the guard, so a notify landing in
++                 * between is seen by one side or the other. */
++                s_jobchains[slot].resume_pc = pc;
++                InterlockedExchange(&s_jobchains[slot].parked, 1L);
++                if (jg_ready(g_ea) &&
++                    InterlockedCompareExchange(&s_jobchains[slot].parked, 0L, 1L) == 1L) {
++                    s_jobchains[slot].resume_pc = 0;
++                    continue;                            /* opened after all */
++                }
++                return jobs ? jobs : -1;
++            }
+             pc += 8; continue;
+         }
+         /* NOP(0) / SYNC+LWSYNC(2, one virtual SPU: nothing to wait for) /
+@@ -2745,6 +2841,7 @@ static void jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc)
+     printf("[cellSpurs] chain 0x%08X: 4096 commands with no job run after %d "
+            "job(s) -- malformed?\n",
+            jc_ea, jobs);
++    return jobs;
+ }
+ 
+ static DWORD WINAPI jc_thread(LPVOID p)
+@@ -2757,12 +2854,27 @@ static DWORD WINAPI jc_thread(LPVOID p)
+      * Confirms timing-vs-never before committing to the async rewrite. */
+     { const char* d = getenv("SPURS_JC_DELAY");
+       if (d && *d) Sleep((unsigned)atoi(d)); }
+-    jc_execute(s_jobchains[slot].entry_ea, s_jobchains[slot].jc_ea,
+-               s_jobchains[slot].size_desc);
+-    s_jobchains[slot].running = 0;
++    int ran;
++    /* Walk again while Runs arrived during the walk (ported from
++     * soyjxck/ps3recomp 26fdd50, MIT): each one stands for jobs the title
++     * appended and expects to execute. */
++    for (;;) {
++        ran = jc_execute(slot);
++        if (InterlockedExchange(&s_jobchains[slot].rerun, 0L)) continue;
++        s_jobchains[slot].running = 0;
++        /* A request that landed between the check above and the clear: take
++         * the chain back if nobody else has. */
++        if (s_jobchains[slot].rerun &&
++            InterlockedCompareExchange(&s_jobchains[slot].running, 1L, 0L) == 0L) {
++            InterlockedExchange(&s_jobchains[slot].rerun, 0L);
++            continue;
++        }
++        break;
++    }
+     /* Tell the application the chain is done. Without this the walk finishes
+-     * in silence and a thread waiting on the attached queue never runs again. */
+-    jc_signal_done(s_jobchains[slot].jc_ea, -1);
++     * in silence and a thread waiting on the attached queue never runs again.
++     * A walk that only parked on a closed guard did no work: say nothing. */
++    if (ran >= 0) jc_signal_done(s_jobchains[slot].jc_ea, -1);
+     return 0;
+ }
+ 
+@@ -2793,11 +2905,24 @@ static s32 jc_start(u64 jc_ea, const char* who)
+             jc_dump_commands(who, s_jobchains[i].entry_ea, 16);
+         }
+         if (s_off || !s_jobchains[i].entry_ea) return CELL_OK;
+-        /* Coalesce: a chain already being walked must not start twice. */
++        /* A chain already being walked must not start twice -- but a Run that
++         * arrives mid-walk is not nothing: the title has appended jobs and
++         * expects them to execute. SARPBC (and Drakengard 3) append each
++         * ShaderPatching job and Run the chain; one of those jobs releases a
++         * JUMP-to-self park in the GCM FIFO, so a dropped Run stopped
++         * rendering for good. Queue it; jc_thread walks again when the
++         * current pass ends. (After soyjxck/ps3recomp 26fdd50, MIT.) */
++        s_jobchains[i].parked = 0;
+         if (_InterlockedCompareExchange(&s_jobchains[i].running, 1, 0) == 0) {
+             HANDLE th = CreateThread(NULL, 1u << 20, jc_thread, (LPVOID)(intptr_t)i, 0, NULL);
+             if (th) CloseHandle(th);
+             else s_jobchains[i].running = 0;
++        } else {
++            InterlockedExchange(&s_jobchains[i].rerun, 1L);
++            static int n = 0;
++            if (n++ < 4)
++                printf("[cellSpurs] %s(jc=0x%08X) while a walk is in progress -- "
++                       "queued a re-walk\n", who, (u32)jc_ea);
+         }
+         return CELL_OK;
+     }
+-- 
+2.47.3
+

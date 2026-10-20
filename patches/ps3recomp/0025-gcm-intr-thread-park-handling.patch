@@ -1,0 +1,278 @@
+From 5cccdac4a920a36c2b659b98104076de2b92e19d Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Mon, 19 Oct 2026 09:40:28 -0500
+Subject: [PATCH] cellGcmSys: GCM interrupt thread, self-JUMP parks are not
+ stuck, park log
+
+GCM_INTR_THREAD=1 delivers the vblank/flip/user handlers on a host
+"interrupt" thread, kicked by every queued user command and tick, as
+libgcm's interrupt PPU thread does on the console. Pumping only at HLE
+boundaries starves the handlers while every guest thread sits in an lv2
+syscall (usleep poll, event queue receive). Off by default.
+
+The stuck-get watchdog no longer fires on a JUMP-to-self park: the
+jump-park path owns that case with its grace period, and the watchdog
+resynced ~30 ms (8 passes) after parking, before a title that patches
+parks from its user/flip handler had been called back.
+GCM_PARK_GRACE_MS=<ms> tunes that grace (default 50).
+
+GCM_PARK_LOG=1 logs each park and when/with what word it is patched.
+
+Rebased onto v0.16.0 (T043): upstream's new test_gcm_flip_stream.c and
+test_gcm_get_on_jump.c reach gcm_intr_kick, so they get the same SetEvent
+stub as the other fixtures.
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/cellGcmSys.c                 | 113 +++++++++++++++++++++++-
+ libs/video/tests/test_gcm_flip_stream.c |   3 +
+ libs/video/tests/test_gcm_get_on_jump.c |   3 +
+ 3 files changed, 116 insertions(+), 3 deletions(-)
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index b986493..aaf3783 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -773,6 +773,8 @@ static atomic_flag s_gcm_pumping = ATOMIC_FLAG_INIT;
+  * and mark a vblank+flip tick pending for the main thread to deliver. */
+ static u32 s_fifo_getoff;   /* tentative: defined below */
+ 
++static void gcm_intr_kick(void);   /* the interrupt thread, below */
++
+ void cellGcm_request_tick(void)
+ {
+     s_vblank_count++;
+@@ -793,6 +795,7 @@ void cellGcm_request_tick(void)
+           const int flip = s_fifo_getoff == put;
+           if (flip) { FLIP_LOCK(); s_flip_tick_seq = s_flip_req_seq; FLIP_UNLOCK(); }
+           GCM_PENDING_SET(flip ? 3 : 1);
++          gcm_intr_kick();
+           return;
+       } }
+     /* A flip queued in the command stream completes when the drain reaches
+@@ -808,6 +811,7 @@ void cellGcm_request_tick(void)
+     } else {
+         GCM_PENDING_SET(1);
+     }
++    gcm_intr_kick();
+ }
+ 
+ /* Deliver pending handlers on the calling host thread. Serialize the entire
+@@ -864,9 +868,74 @@ void ppu_gcm_pump(void)
+     GCM_PUMP_LEAVE();
+ }
+ 
++/* GCM_INTR_THREAD=1: deliver pending handlers on a host "interrupt" thread.
++ *
++ * On the console the vblank, flip and user handlers run on libgcm's interrupt
++ * PPU thread, as soon as the RSX raises the interrupt -- not on whichever game
++ * thread happens to call into the firmware next. Pumping only at HLE
++ * boundaries starves them when every guest thread sits in a syscall (event
++ * queue receive, usleep poll): those are lv2 calls, not HLE imports.
++ *
++ * UE3's PS3 RHI (Supersonic Acrobatic Rocket-Powered Battle-Cars 01.09) ends
++ * a command segment with GCM_SET_USER_COMMAND and a JUMP-to-self park right
++ * after it; its user handler calls cellGcmSetFlipImmediate, whose flip handler
++ * patches the park. Its render thread then sleep-polls a label in
++ * sys_timer_usleep, so no thread crossed an HLE boundary for tens of ms, the
++ * walker's stuck-get resync skipped the park, and the label write behind it
++ * was dropped. This thread is kicked by every queued user command and tick.
++ *
++ * Guest code then runs concurrently with the game's threads, as it does on the
++ * console. Off by default: a title that relies on the handlers running
++ * between its own HLE calls keeps the old behaviour. */
++static HANDLE s_gcm_intr_ev = NULL;
++#ifdef _WIN32
++static volatile LONG s_gcm_intr_started = 0;
++#define GCM_INTR_CLAIM() (InterlockedCompareExchange(&s_gcm_intr_started, 1, 0) == 0)
++#else
++static atomic_int s_gcm_intr_started = 0;
++static int gcm_intr_claim(void) { int z = 0; return atomic_compare_exchange_strong(&s_gcm_intr_started, &z, 1); }
++#define GCM_INTR_CLAIM() gcm_intr_claim()
++#endif
++
++static DWORD WINAPI gcm_intr_thread(LPVOID unused)
++{
++    (void)unused;
++    for (;;) {
++        /* The timeout is a backstop for a kick that raced the wait. */
++        WaitForSingleObject(s_gcm_intr_ev, 2);
++        ppu_gcm_pump();
++    }
++    return 0;
++}
++
++static int gcm_intr_enabled(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("GCM_INTR_THREAD"); on = (e && *e == '1') ? 1 : 0; }
++    return on;
++}
++
++/* Started by the first Set*Handler, so a title that never registers one never
++ * gets the thread. */
++static void gcm_intr_start(void)
++{
++    if (!gcm_intr_enabled() || !GCM_INTR_CLAIM()) return;
++    s_gcm_intr_ev = CreateEventA(NULL, FALSE, FALSE, NULL);
++    if (!s_gcm_intr_ev || !CreateThread(NULL, 1u << 20, gcm_intr_thread, NULL, 0, NULL)) {
++        fprintf(stderr, "[cellGcmSys] GCM_INTR_THREAD: could not start the interrupt thread\n");
++        return;
++    }
++    fprintf(stderr, "[cellGcmSys] GCM_INTR_THREAD: handlers are delivered on an interrupt thread\n");
++}
++
++static void gcm_intr_kick(void)
++{
++    if (s_gcm_intr_ev) SetEvent(s_gcm_intr_ev);
++}
++
+ /* Back-compat: the old direct entry points now just mark a tick pending (so any
+  * caller other than the ticker still works) -- delivery stays on the main thread. */
+-void cellGcmTickVBlank(void) { s_vblank_count++; GCM_PENDING_SET(1); }
++void cellGcmTickVBlank(void) { s_vblank_count++; GCM_PENDING_SET(1); gcm_intr_kick(); }
+ /* Only deliver a flip completion when a flip is actually outstanding.
+  *
+  * Ticking unconditionally at 60 Hz fires the guest's flip handler even when
+@@ -887,7 +956,10 @@ void cellGcmTickFlip(void)
+     const int waiting = s_flip_status == CELL_GCM_FLIP_STATUS_WAITING && gcm_flip_executed_take();
+     if (waiting) s_flip_tick_seq = s_flip_req_seq;
+     FLIP_UNLOCK();
+-    if (waiting) GCM_PENDING_SET(2);
++    if (waiting) {
++        GCM_PENDING_SET(2);
++        gcm_intr_kick();
++    }
+ }
+ 
+ /* Drain the game's GCM FIFO into the RSX backend. Called from the present thread
+@@ -934,6 +1006,18 @@ static int s_park_pass = 0;           /* this drain stopped on a self-JUMP park
+ /* How long a self-JUMP park may stand with `put` somewhere else before the
+  * drain gives up on it being patched and follows `put` instead. */
+ #define GCM_PARK_GRACE_MS 50ull
++/* GCM_PARK_GRACE_MS=<ms> overrides it. A title whose parks are patched by a
++ * handler (user command -> flip handler) needs that callback delivered first;
++ * with handlers on the interrupt thread (GCM_INTR_THREAD=1) that is quick, but
++ * the guest may still take a while to get there. */
++static unsigned long long gcm_park_grace_ms(void)
++{
++    static long long v = -1;
++    if (v < 0) { const char* e = getenv("GCM_PARK_GRACE_MS");
++                 v = (e && *e) ? strtoll(e, 0, 10) : (long long)GCM_PARK_GRACE_MS;
++                 if (v < 0) v = (long long)GCM_PARK_GRACE_MS; }
++    return (unsigned long long)v;
++}
+ /* How close `current` must get to `end` before the runtime will recycle a ring
+  * on the title's behalf. One gcmReserve is 8 bytes; a page of slack keeps a
+  * title that is merely near the end from being touched. */
+@@ -946,6 +1030,8 @@ static u32 gcm_ea2io(u32 ea);   /* defined with the wrap callback below */
+ static u32 s_fifo_getoff  = 0;
+ static u32 s_last_ring_off = 0;   /* last offset the walker actually consumed */
+ static u32 s_fifo_calloff = 0;
++static u32 s_park_log_io = 0;          /* GCM_PARK_LOG: the park being timed */
++static unsigned long long s_park_log_t0 = 0;
+ 
+ /* ---------------------------------------------------------------------------
+  * 2D transfer engines (FIFO subchannels != 0).
+@@ -1886,6 +1972,14 @@ static void gcm_rsx_process_fifo_unlocked(void)
+          * ring the title is writing. A park in another region is where the
+          * walker gave up, not how far it got through the ring. */
+         if (s_fifo_getoff < put) s_last_ring_off = s_fifo_getoff + 4;
++        /* GCM_PARK_LOG=1: a park the walker sat on has been patched. */
++        if (s_park_log_io && s_park_log_io == s_fifo_getoff &&
++            w != (0x20000000u | s_fifo_getoff)) {
++            extern unsigned long long ps3_ms_now(void);
++            fprintf(stderr, "[park] io=0x%08X patched -> %08X after %llu ms (put 0x%08X)\n",
++                    s_fifo_getoff, w, ps3_ms_now() - s_park_log_t0, put);
++            s_park_log_io = 0;
++        }
+         s_tr_off[s_tr_i % GCM_TRACE_N] = s_fifo_getoff;
+         s_tr_w[s_tr_i % GCM_TRACE_N] = w;
+         s_tr_i++;
+@@ -1954,6 +2048,15 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                * CPU the guest needs. Stop this pass instead; the next one
+                * re-reads the word, so a patched jump is still followed. */
+               if (tgt == s_fifo_getoff) {
++                  { static int pl = -1; if (pl < 0) pl = getenv("GCM_PARK_LOG") ? 1 : 0;
++                    if (pl && s_park_log_io != s_fifo_getoff && put != s_fifo_getoff) {
++                        extern unsigned long long ps3_ms_now(void);
++                        static unsigned n = 0;
++                        s_park_log_io = s_fifo_getoff; s_park_log_t0 = ps3_ms_now();
++                        if (n++ < 64)
++                            fprintf(stderr, "[park] parked at io=0x%08X ea=0x%08X put=0x%08X\n",
++                                    s_fifo_getoff, gcm_io2ea(s_fifo_getoff), put);
++                    } }
+                   /* Parked. If the title has meanwhile moved `put` somewhere
+                    * else, it has switched to its other segment and left this
+                    * park standing -- it only patches a park when it reuses that
+@@ -1978,7 +2081,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                       const unsigned long long now = ps3_ms_now();
+                       if (park_off != s_fifo_getoff || park_put != put) {
+                           park_off = s_fifo_getoff; park_put = put; park_since = now;
+-                      } else if (now - park_since >= GCM_PARK_GRACE_MS) {
++                      } else if (now - park_since >= gcm_park_grace_ms()) {
+                           park_off = 0;
+                           gcm_fifo_dump_around(s_fifo_getoff);
+                           gcm_fifo_resync_why("jump-park", &s_fifo_getoff, put);
+@@ -2779,6 +2882,7 @@ void cellGcmSetFlipHandler(CellGcmFlipHandler handler)
+     s_flip_handler = handler;
+     { u32 c = s_flip_handler_opd ? vm_read32(s_flip_handler_opd) : 0; if (c) s_flip_handler_code = c; }
+     gcm_update_handler_mask();
++    gcm_intr_start();
+ }
+ 
+ /* NID: 0xA547ADDE */
+@@ -2789,6 +2893,7 @@ void cellGcmSetVBlankHandler(CellGcmVBlankHandler handler)
+     s_vblank_handler = handler;
+     { u32 c = s_vblank_handler_opd ? vm_read32(s_vblank_handler_opd) : 0; if (c) s_vblank_handler_code = c; }
+     gcm_update_handler_mask();
++    gcm_intr_start();
+ }
+ 
+ /* NID: 0xF9BFCDA3 */
+@@ -2806,6 +2911,7 @@ void cellGcmSetUserHandler(CellGcmUserHandler handler)
+     s_user_handler_opd = (u32)(size_t)handler;
+     s_user_handler = handler;
+     gcm_update_handler_mask();
++    gcm_intr_start();
+ }
+ 
+ /* NID: 0x21AC3697 */
+@@ -3766,6 +3872,7 @@ void cellGcmQueueUserCommand(u32 cmd)
+ {
+     GCM_USER_STORE(cmd);
+     GCM_USER_PENDING_STORE((1ULL << 32) | cmd);
++    gcm_intr_kick();
+ }
+ 
+ /* Invalidate a tile region (unbind + clear) */
+diff --git a/libs/video/tests/test_gcm_flip_stream.c b/libs/video/tests/test_gcm_flip_stream.c
+index 455e2c6..d0ea735 100644
+--- a/libs/video/tests/test_gcm_flip_stream.c
++++ b/libs/video/tests/test_gcm_flip_stream.c
+@@ -38,6 +38,9 @@ int spu_coh_is_reserved(uint32_t a) { (void)a; return 0; }
+ void spu_coh_notify_write(uint32_t a) { (void)a; }
+ void spu_lockline_lock(void) {}
+ void spu_lockline_unlock(void) {}
++#ifndef _WIN32
++BOOL SetEvent(HANDLE h) { (void)h; return 1; }   /* the GCM interrupt worker (GCM_INTR_THREAD) */
++#endif
+ ps3_guest_caller_fn g_ps3_guest_caller;
+ /* The rest of the walker's world: no graphics backend, no lifted program. */
+ PPU_THREAD_LOCAL ppu_context* g_active_ctx;
+diff --git a/libs/video/tests/test_gcm_get_on_jump.c b/libs/video/tests/test_gcm_get_on_jump.c
+index c63febe..5b0fae7 100644
+--- a/libs/video/tests/test_gcm_get_on_jump.c
++++ b/libs/video/tests/test_gcm_get_on_jump.c
+@@ -29,6 +29,9 @@ int spu_coh_is_reserved(uint32_t a) { (void)a; return 0; }
+ void spu_coh_notify_write(uint32_t a) { (void)a; }
+ void spu_lockline_lock(void) {}
+ void spu_lockline_unlock(void) {}
++#ifndef _WIN32
++BOOL SetEvent(HANDLE h) { (void)h; return 1; }   /* the GCM interrupt worker (GCM_INTR_THREAD) */
++#endif
+ ps3_guest_caller_fn g_ps3_guest_caller;
+ /* The walker's other consumers: no graphics backend, no lifted program. */
+ PPU_THREAD_LOCAL ppu_context* g_active_ctx;
+-- 
+2.47.3
+

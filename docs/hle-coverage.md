@@ -153,7 +153,7 @@ Also found: upstream's `libs/misc/cellVideoExport.c` (`cellVideoExportInit/End/S
 invented names that match no SDK NID, so they can never resolve an import; there is no
 cellRec or cellMusic (utility) module at all.
 
-## What the T004 patch adds (`patches/ps3recomp/0003-hle-trivial-missing-imports.patch`)
+## What the T004 patch adds (`patches/ps3recomp/0002-hle-trivial-missing-imports.patch`)
 
 Only handlers whose correct behaviour is obvious (offline / "nothing to do"):
 

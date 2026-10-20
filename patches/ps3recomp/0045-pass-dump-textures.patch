@@ -1,0 +1,131 @@
+From 79a5c81bad9a9e583fad8f84057a67e45fc26e35 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Tue, 20 Oct 2026 17:06:08 +0000
+Subject: [PATCH] rsx engine: pass dump logs texture levels/filter and can dump
+ decoded textures
+
+RSX_ENGINE_PASS_DUMP_DRAWS now also writes each sampled texture's mip
+count, pitch, filter and control0 register. RSX_ENGINE_PASS_DUMP_TEX=1
+writes every texture level decoded while a capture runs to the dump
+directory (BC as .dds, colour as .ppm/.pgm), and makes the cached textures
+decode again once so the ones already in use are written too. This is what
+showed that SARPBC's scrambled arena textures were stale VRAM, not a
+decode bug.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_draw_engine.c | 70 ++++++++++++++++++++++++++++++++++--
+ 1 file changed, 68 insertions(+), 2 deletions(-)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 4f2022a..29a0fe7 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -1023,6 +1023,55 @@ static int eng_staging_reserve(u32 bytes)
+     return 1;
+ }
+ 
++/* RSX_ENGINE_PASS_DUMP_TEX=1 with a pass capture running: every texture level
++ * decoded while it runs goes to <dir>/tex_<offset>_f<fmt>_<w>x<h>_m<level>,
++ * exactly as handed to the backend: BC levels as .dds, colour as .ppm (R8 as
++ * .pgm, R8G8 with blue 0). It answers whether a wrong surface is wrong in the
++ * decode or later, in the sampling. */
++static const char* pd_texture_dir(void);
++
++static void eng_dump_texture_level(u32 offset, u32 fmt, u32 m, u32 w, u32 h,
++                                   const rsx_tex_layout* tl, const u8* data)
++{
++    const char* dir = pd_texture_dir();
++    if (!dir) return;
++    char path[1024];
++    const int bc = tl->compressed;
++    const char* ext = bc ? "dds" : tl->fmt == RSX_TEXFMT_R8 ? "pgm" : "ppm";
++    snprintf(path, sizeof path, "%s/tex_%08X_f%02X_%ux%u_m%u.%s", dir, offset,
++             fmt & 0xFFu, w, h, m, ext);
++    if (!bc && tl->fmt != RSX_TEXFMT_R8 && tl->fmt != RSX_TEXFMT_R8G8 &&
++        tl->fmt != RSX_TEXFMT_R8G8B8A8) return;
++    FILE* f = fopen(path, "wb");
++    if (!f) return;
++    if (bc) {
++        /* A minimal DDS: magic, the 124-byte header, one level of blocks. */
++        u32 hdr[32] = {0};
++        hdr[0] = 0x20534444u;                      /* "DDS " */
++        hdr[1] = 124; hdr[2] = 0x1007u | 0x80000u; /* caps|height|width|pf|linearsize */
++        hdr[3] = h; hdr[4] = w; hdr[5] = tl->row_bytes * tl->rows;
++        hdr[19] = 32; hdr[20] = 4u;                /* pixel format: FOURCC */
++        hdr[21] = tl->fmt == RSX_TEXFMT_BC1 ? 0x31545844u
++                : tl->fmt == RSX_TEXFMT_BC2 ? 0x33545844u : 0x35545844u;
++        hdr[27] = 0x1000u;                         /* DDSCAPS_TEXTURE */
++        fwrite(hdr, 4, 32, f);
++        fwrite(data, 1, (size_t)tl->row_bytes * tl->rows, f);
++    } else if (tl->fmt == RSX_TEXFMT_R8) {
++        fprintf(f, "P5\n%u %u\n255\n", w, h);
++        for (u32 y = 0; y < h; y++) fwrite(data + (size_t)y * tl->dst_row_bytes, 1, w, f);
++    } else {
++        fprintf(f, "P6\n%u %u\n255\n", w, h);
++        const u32 bpp = tl->dst_bytes_per_texel;
++        for (u32 y = 0; y < h; y++)
++            for (u32 x = 0; x < w; x++) {
++                const u8* p = data + (size_t)y * tl->dst_row_bytes + (size_t)x * bpp;
++                const u8 rgb[3] = { p[0], p[1], bpp > 2 ? p[2] : 0 };
++                fwrite(rgb, 1, 3, f);
++            }
++    }
++    fclose(f);
++}
++
+ /* Decode a guest texture out of guest memory and hand every face and level to
+  * the backend. Returns the backend handle, or 0. */
+ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+@@ -1093,6 +1142,8 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+             rsx_texture_decode(g.tex_staging, tl->dst_row_bytes,
+                                face + lv[m].offset, lv[m].w, lv[m].h, tl,
+                                rsx_texture_argb_is_rgba());
++            if (f == 0)
++                eng_dump_texture_level(offset, fmt, m, lv[m].w, lv[m].h, tl, g.tex_staging);
+             g.be->texture_upload(g.be->user, handle, f, m, lv[m].w, lv[m].h,
+                                  g.tex_staging, tl->dst_row_bytes, tl->rows);
+         }
+@@ -2236,6 +2287,13 @@ static struct {
+     char first[2048];
+ } s_pd;
+ 
++static const char* pd_texture_dir(void)
++{
++    static int want = -1;
++    if (want < 0) want = getenv("RSX_ENGINE_PASS_DUMP_TEX") != NULL;
++    return (want && s_pd.state == 2) ? s_pd.dir : NULL;
++}
++
+ static int pd_open_index(void)
+ {
+     char path[1024];
+@@ -2246,6 +2304,13 @@ static int pd_open_index(void)
+         snprintf(path, sizeof path, "%s/draws.txt", s_pd.dir);
+         s_pd.draws_log = fopen(path, "w");
+     }
++    /* The textures in use were decoded before the capture began: make each
++     * one mismatch its hash so its next use decodes, and dumps, it again. */
++    if (getenv("RSX_ENGINE_PASS_DUMP_TEX"))
++        for (u32 i = 0; i < g.n_textures; i++) {
++            g.textures[i].content_hash = ~g.textures[i].content_hash;
++            g.textures[i].last_hash_frame = g.frames - 1u;
++        }
+     s_pd.state = 2;
+     s_pd.open = 0;
+     return 1;
+@@ -2445,8 +2510,9 @@ static void pd_note(const u32* targets, u32 n_targets, u32 zslot,
+             if (!(tex_mask & (1u << u))) continue;
+             rsx_dsp_texture t;
+             rsx_dsp_get_texture(&g.rsx, u, &t);
+-            fprintf(s_pd.draws_log, " t%u %u:0x%08X f%02X %ux%u", u, t.location, t.offset,
+-                    t.format & 0xFFu, t.width, t.height);
++            fprintf(s_pd.draws_log, " t%u %u:0x%08X f%02X %ux%u l%u p%u flt%08X c0%08X w%08X",
++                    u, t.location, t.offset, t.format & 0xFFu, t.width, t.height,
++                    t.mipmaps, t.pitch, t.filter, t.control0, t.wrap);
+         }
+         fprintf(s_pd.draws_log, "\n");
+     }
+-- 
+2.47.3
+

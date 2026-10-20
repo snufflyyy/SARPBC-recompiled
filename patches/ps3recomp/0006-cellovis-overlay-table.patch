@@ -1,0 +1,407 @@
+From a4bc7040a1f08ffb252d2bcd702cf89167bb156b Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Sun, 18 Oct 2026 23:22:13 -0500
+Subject: [PATCH] cellOvis: implement the real overlay-table API
+
+The module exported invented functions (cellOvisInit/Term/CreateOverlay/...)
+and a cellOvisGetOverlayTableSize(path, u32*) that wrote its result through
+the caller's r4 and returned NOT_INITIALIZED, since no title calls the
+invented Init. A title that sizes and allocates the table from the return
+value then asks for ~2 GB and gives up ("Error allocating memory for overlay
+table"), and cellOvisInitializeOverlayTable (NID 0xA876C911) was not
+registered at all, so it faked CELL_OK and left the table uninitialised.
+
+libovis serves SPU ELFs linked with overlays: several PT_LOADs share one
+local-store range and each overlay's p_paddr is a load address outside LS.
+The SPU-side manager DMA-GETs an overlay from table + p_paddr, so:
+
+  cellOvisGetOverlayTableSize(elf EA)  -> highest overlay p_paddr + p_memsz,
+                                          rounded to 128; INVAL if the ELF has
+                                          no overlay segment (callers skip it)
+  cellOvisInitializeOverlayTable(t, elf) -> zero t, copy each overlay's file
+                                          bytes to t + p_paddr; ALIGN unless t
+                                          is 128-byte aligned
+
+Overlay segments are recognised by a p_paddr outside local store (>= 256 KiB)
+that differs from p_vaddr (resident ones have p_paddr == p_vaddr or 0).
+Reconstructed from a
+PhysX title (SARPBC): its PPU loop treats 0/INVAL as "no overlays", passes
+the table pointer verbatim to the SPU task, and the SPU manager reads
+{vma, size, lma, loaded} entries matching the ELF's overlay p_vaddr/p_paddr
+and DMAs from table + lma. FixSpuSegments / InvalidateOverlappedSegments are
+not implemented yet (no importer seen).
+
+The registration table must be regenerated (gen_hle_nids.py --all): it
+still names the removed functions.
+
+Test: tests/test_ovis_overlay_table.c (synthetic SPU ELF in guest memory).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ docs/MODULES_REFERENCE.md       |   2 +-
+ docs/MODULE_STATUS.md           |   2 +-
+ libs/misc/cellOvis.c            | 132 ++++++++++++++++++++++----------
+ libs/misc/cellOvis.h            |  56 +++++++++-----
+ tests/test_ovis_overlay_table.c |  88 +++++++++++++++++++++
+ 5 files changed, 219 insertions(+), 61 deletions(-)
+ create mode 100644 tests/test_ovis_overlay_table.c
+
+diff --git a/docs/MODULES_REFERENCE.md b/docs/MODULES_REFERENCE.md
+index 7ee551e..5135b97 100644
+--- a/docs/MODULES_REFERENCE.md
++++ b/docs/MODULES_REFERENCE.md
+@@ -1044,7 +1044,7 @@ Checks whether Remote Play streaming is available. Always reports unavailable in
+ |--------|---------|----------------|
+ | **cellScreenshot** | Screenshot capture | Enable/disable flag, parameter/overlay tracking |
+ | **cellBGDL** | Background downloads | Init/term, download list always empty |
+-| **cellOvis** | Overlay system | Init/term, create/destroy (no-op) |
++| **cellOvis** | SPU overlay table (libovis) | GetOverlayTableSize, InitializeOverlayTable: overlay PT_LOADs copied to table + p_paddr |
+ | **cellSheap** | Shared heap allocator | Bump allocator with block tracking, up to 8 heaps |
+ | **cellLicenseArea** | License region check | Americas default, all regions valid |
+ | **cellMusicDecode/2** | Music decoding | Init/finish, decode returns NOT_SUPPORTED |
+diff --git a/docs/MODULE_STATUS.md b/docs/MODULE_STATUS.md
+index b58012c..eceadc8 100644
+--- a/docs/MODULE_STATUS.md
++++ b/docs/MODULE_STATUS.md
+@@ -153,7 +153,7 @@ Status of HLE (High-Level Emulation) implementations for PS3 system modules in p
+ | Module | Category | Status | Notes |
+ |---|---|---|---|
+ | cellRtc | Real-Time Clock | **Complete** | Host time -> PS3 ticks, DateTime, time arithmetic, RFC formatting, day-of-week |
+-| cellOvis | Overlay | **Complete** | Init/term, overlay create/destroy/invalidate (no-op stubs) |
++| cellOvis | SPU overlays | **Partial** | GetOverlayTableSize, InitializeOverlayTable (overlay segments laid out by p_paddr); FixSpuSegments, InvalidateOverlappedSegments missing |
+ | cellSheap | Shared Heap | **Complete** | Bump allocator with block tracking, alloc/free/query, up to 8 heaps |
+ | cellKey2char | Key to Char | **Complete** | HID scancode to Unicode, US-101 layout, shift/caps handling, dead key mode |
+ | cellSubdisplay | Sub-display | **Complete** | PS Vita Remote Play stub — init/end/start/stop lifecycle, always reports not connected, touch data returns empty |
+diff --git a/libs/misc/cellOvis.c b/libs/misc/cellOvis.c
+index 7e6968a..a236d91 100644
+--- a/libs/misc/cellOvis.c
++++ b/libs/misc/cellOvis.c
+@@ -1,65 +1,119 @@
+ /*
+  * ps3recomp - cellOvis HLE implementation
+  *
+- * Stub. Init/term work, overlay creation succeeds as no-op.
++ * See cellOvis.h for the model. How it was pinned down (SARPBC, PhysX):
++ *  - The PPU walks its SPU programs, calls GetOverlayTableSize(elf EA), skips
++ *    the program when the result is 0 or CELL_OVIS_ERROR_INVAL, otherwise
++ *    allocates size bytes 128-aligned and calls InitializeOverlayTable(t, elf);
++ *    any non-zero result there is reported as a fatal init error.
++ *  - The table pointer is copied verbatim into the SPU task's argument block.
++ *  - The SPU overlay manager reads {vma 0x3080, size 0x1A480, lma 0x40000},
++ *    {0x3080, 0x1D000, 0x5A480} from its .data (the ELF's overlay p_vaddr /
++ *    p_paddr) and DMA-GETs from table + lma; it raises ALIGN unless the table
++ *    is 128-byte aligned.
++ * So the table is the overlay segments laid out by p_paddr. Overlay segments
++ * are recognised by a p_paddr outside local store (>= 256 KiB) that differs
++ * from p_vaddr. Resident segments have p_paddr == p_vaddr, or 0 from tools
++ * that leave it unset; neither can be a main-memory load address here.
++ *
++ * Not implemented (no title seen importing them): cellOvisFixSpuSegments and
++ * cellOvisInvalidateOverlappedSegments, which edit a sys_spu_image_t segment
++ * list so overlays are not loaded at thread start.
+  */
+ 
+ #include "cellOvis.h"
+ #include <stdio.h>
+-#include "../../runtime/ppu/ppu_memory.h"   /* vm_write*: guest EA -> host, byte-swapped */
+-
+-/* Internal state */
++#include "../../runtime/ppu/ppu_memory.h"   /* vm_read*, vm_memcpy_*: guest EA -> host */
+ 
+-static int s_initialized = 0;
+-static u32 s_next_handle = 1;
++#define OVIS_PT_LOAD   1u
++#define OVIS_EM_SPU    23u
++#define OVIS_DMA_ALIGN 128u
++#define OVIS_LS_SIZE   0x40000u
+ 
+-/* API */
++/* Walks the PT_LOAD headers of the SPU ELF at `elf` and reports each overlay
++ * segment to `fn`. Returns the number of overlays, or -1 if the header is not
++ * a 32-bit big-endian SPU ELF. */
++typedef void (*ovis_seg_fn)(void* user, u32 paddr, u32 offset, u32 filesz, u32 memsz);
+ 
+-s32 cellOvisInit(void)
++static int ovis_walk_overlays(u32 elf, ovis_seg_fn fn, void* user)
+ {
+-    printf("[cellOvis] Init()\n");
+-    if (s_initialized)
+-        return (s32)CELL_OVIS_ERROR_ALREADY_INITIALIZED;
+-    s_initialized = 1;
+-    s_next_handle = 1;
+-    return CELL_OK;
+-}
++    if (!elf) return -1;
++    if (vm_read32(elf) != 0x7F454C46u) return -1;               /* "\x7FELF" */
++    if (vm_read8(elf + 4) != 1 || vm_read8(elf + 5) != 2)     /* ELFCLASS32, MSB */
++        return -1;
++    if (vm_read16(elf + 0x12) != OVIS_EM_SPU) return -1;
+ 
+-s32 cellOvisTerm(void)
+-{
+-    printf("[cellOvis] Term()\n");
+-    s_initialized = 0;
+-    return CELL_OK;
++    u32 phoff  = vm_read32(elf + 0x1C);
++    u16 phent  = vm_read16(elf + 0x2A);
++    u16 phnum  = vm_read16(elf + 0x2C);
++    if (phent < 32 || !phnum) return -1;
++
++    int count = 0;
++    for (u32 i = 0; i < phnum; ++i) {
++        u32 ph = elf + phoff + i * phent;
++        if (vm_read32(ph + 0x00) != OVIS_PT_LOAD) continue;
++        u32 offset = vm_read32(ph + 0x04);
++        u32 vaddr  = vm_read32(ph + 0x08);
++        u32 paddr  = vm_read32(ph + 0x0C);
++        u32 filesz = vm_read32(ph + 0x10);
++        u32 memsz  = vm_read32(ph + 0x14);
++        if (paddr == vaddr || paddr < OVIS_LS_SIZE || !memsz) continue;  /* resident */
++        if (filesz > memsz) return -1;
++        if (fn) fn(user, paddr, offset, filesz, memsz);
++        ++count;
++    }
++    return count;
+ }
+ 
+-s32 cellOvisGetOverlayTableSize(const char* filePath, u32* tableSize)
++static void ovis_extent(void* user, u32 paddr, u32 offset, u32 filesz, u32 memsz)
+ {
+-    (void)filePath;
+-    if (!s_initialized) return (s32)CELL_OVIS_ERROR_NOT_INITIALIZED;
+-    if (!tableSize) return (s32)CELL_OVIS_ERROR_INVALID_ARGUMENT;
+-    vm_write32((u32)(uintptr_t)tableSize, (u32)0);
+-    return CELL_OK;
++    (void)offset; (void)filesz;
++    u64* end = (u64*)user;
++    /* The manager DMAs whole 16-byte multiples (0x1A470 bytes of code are
++     * fetched as 0x1A480), so round each segment's end to the DMA boundary. */
++    u64 e = ((u64)paddr + memsz + OVIS_DMA_ALIGN - 1) & ~(u64)(OVIS_DMA_ALIGN - 1);
++    if (e > *end) *end = e;
+ }
+ 
+-s32 cellOvisCreateOverlay(const void* table, u32 tableSize, CellOvisHandle* handle)
++/* NID: 0x82F294B2 */
++s32 cellOvisGetOverlayTableSize(u32 elf)
+ {
+-    (void)table; (void)tableSize;
+-    if (!s_initialized) return (s32)CELL_OVIS_ERROR_NOT_INITIALIZED;
+-    if (!handle) return (s32)CELL_OVIS_ERROR_INVALID_ARGUMENT;
+-    vm_write32((u32)(uintptr_t)handle, (u32)s_next_handle++);
+-    return CELL_OK;
++    u64 end = 0;
++    int n = ovis_walk_overlays(elf, ovis_extent, &end);
++    if (n <= 0 || end > 0x7FFFFFFFu) {
++        /* No overlays is reported as INVAL: callers treat it as "nothing to
++         * allocate" (SARPBC checks for exactly this code). */
++        return (s32)CELL_OVIS_ERROR_INVAL;
++    }
++    printf("[cellOvis] GetOverlayTableSize(elf=0x%08X) -> 0x%X (%d overlay segment%s)\n",
++           elf, (u32)end, n, n == 1 ? "" : "s");
++    return (s32)(u32)end;
+ }
+ 
+-s32 cellOvisDestroyOverlay(CellOvisHandle handle)
++typedef struct { u32 table; u32 elf; } ovis_copy_ctx;
++
++static void ovis_copy(void* user, u32 paddr, u32 offset, u32 filesz, u32 memsz)
+ {
+-    (void)handle;
+-    if (!s_initialized) return (s32)CELL_OVIS_ERROR_NOT_INITIALIZED;
+-    return CELL_OK;
++    const ovis_copy_ctx* c = (const ovis_copy_ctx*)user;
++    (void)memsz;  /* the tail past filesz is the zero fill done up front */
++    /* Source and table are distinct allocations; vm_memcpy_to keeps any SPU
++     * reservation on the table lines coherent. */
++    if (filesz)
++        vm_memcpy_to(c->table + paddr, vm_ptr8(c->elf + offset), filesz);
+ }
+ 
+-s32 cellOvisInvalidateOverlay(CellOvisHandle handle)
++/* NID: 0xA876C911 */
++s32 cellOvisInitializeOverlayTable(u32 ea_ovly_table, u32 elf)
+ {
+-    (void)handle;
+-    if (!s_initialized) return (s32)CELL_OVIS_ERROR_NOT_INITIALIZED;
++    if (!ea_ovly_table) return (s32)CELL_OVIS_ERROR_INVAL;
++    if (ea_ovly_table & (CELL_OVIS_TABLE_ALIGN - 1)) return (s32)CELL_OVIS_ERROR_ALIGN;
++    s32 size = cellOvisGetOverlayTableSize(elf);
++    if (size < 0) return size;
++
++    vm_memset(ea_ovly_table, 0, (size_t)size);
++    ovis_copy_ctx c = { ea_ovly_table, elf };
++    ovis_walk_overlays(elf, ovis_copy, &c);
++    printf("[cellOvis] InitializeOverlayTable(table=0x%08X, elf=0x%08X) size=0x%X\n",
++           ea_ovly_table, elf, (u32)size);
+     return CELL_OK;
+ }
+diff --git a/libs/misc/cellOvis.h b/libs/misc/cellOvis.h
+index 550f74d..8e8a1bd 100644
+--- a/libs/misc/cellOvis.h
++++ b/libs/misc/cellOvis.h
+@@ -1,8 +1,22 @@
+ /*
+- * ps3recomp - cellOvis HLE
++ * ps3recomp - cellOvis HLE (libovis: SPU overlays loaded from main memory)
+  *
+- * System overlay notifications. Stub — init/term work,
+- * overlay operations are no-ops.
++ * An SPU ELF linked with overlays has several PT_LOAD segments sharing one
++ * local-store range (same p_vaddr). Each overlay segment's p_paddr is a load
++ * address OUTSIDE local store (>= 0x40000 in the images seen so far). The
++ * SPU-side overlay manager keeps an {vma, size, lma, loaded} table in its own
++ * .data and, to bring an overlay in, DMA-GETs `size` bytes from
++ * `ea_ovly_table + lma` to `vma`. The PPU builds that main-memory image with
++ * this library:
++ *
++ *   int size = cellOvisGetOverlayTableSize(elf);       // bytes, or an error
++ *   void* t  = memalign(128, size);                    // SPU checks 128 alignment
++ *   cellOvisInitializeOverlayTable(t, elf);            // copy overlays to t + p_paddr
++ *   ... pass t to the SPU program (title-defined argument) ...
++ *
++ * `elf` is the EA of the SPU ELF image in main memory (an embedded image, not
++ * a file path). Behaviour below was reconstructed from a title's use of the
++ * API and its SPU overlay manager (see the .c file); there is no public spec.
+  */
+ 
+ #ifndef PS3RECOMP_CELL_OVIS_H
+@@ -15,23 +29,25 @@
+ extern "C" {
+ #endif
+ 
+-/* Error codes */
+-#define CELL_OVIS_ERROR_NOT_INITIALIZED     0x80410701
+-#define CELL_OVIS_ERROR_ALREADY_INITIALIZED 0x80410702
+-#define CELL_OVIS_ERROR_INVALID_ARGUMENT    0x80410703
+-
+-/* Types */
+-typedef u32 CellOvisHandle;
+-
+-/* Functions */
+-s32 cellOvisInit(void);
+-s32 cellOvisTerm(void);
+-
+-s32 cellOvisGetOverlayTableSize(const char* filePath, u32* tableSize);
+-s32 cellOvisCreateOverlay(const void* table, u32 tableSize, CellOvisHandle* handle);
+-s32 cellOvisDestroyOverlay(CellOvisHandle handle);
+-
+-s32 cellOvisInvalidateOverlay(CellOvisHandle handle);
++/* Error codes. INVAL is what a caller sees for an ELF without overlays (and
++ * tests for explicitly as "nothing to do"); ALIGN is also what the SPU-side
++ * manager reports when the table it is handed is not 128-byte aligned. */
++#define CELL_OVIS_ERROR_INVAL               0x80410402
++#define CELL_OVIS_ERROR_ABORT               0x8041040C
++#define CELL_OVIS_ERROR_ALIGN               0x80410410
++
++/* The table is DMA'd from directly, so it must sit on a DMA-friendly
++ * boundary; titles allocate it 128-byte aligned. */
++#define CELL_OVIS_TABLE_ALIGN               128
++
++/* Returns the number of bytes cellOvisInitializeOverlayTable() will write for
++ * `elf` (the highest overlay p_paddr + p_memsz, rounded up to 128), or
++ * CELL_OVIS_ERROR_INVAL if `elf` is not an SPU ELF or has no overlay segment. */
++s32 cellOvisGetOverlayTableSize(u32 elf);
++
++/* Fills the table at `ea_ovly_table`: zero, then each overlay segment's file
++ * bytes at offset p_paddr (its BSS tail stays zero). */
++s32 cellOvisInitializeOverlayTable(u32 ea_ovly_table, u32 elf);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/tests/test_ovis_overlay_table.c b/tests/test_ovis_overlay_table.c
+new file mode 100644
+index 0000000..8c4d66c
+--- /dev/null
++++ b/tests/test_ovis_overlay_table.c
+@@ -0,0 +1,88 @@
++/* cellOvis builds the main-memory overlay image an SPU overlay manager DMAs
++ * from: each overlay PT_LOAD (p_paddr != p_vaddr) lands at table + p_paddr.
++ * Includes the real implementation; a synthetic SPU ELF lives in guest memory. */
++#include "../libs/misc/cellOvis.c"
++#include <assert.h>
++#include <stdlib.h>
++#include <string.h>
++
++uint8_t* vm_base;
++uint32_t g_ww_lo, g_ww_hi;
++void ps3_ww_report_inline(uint32_t a, uint64_t v, int w) { (void)a; (void)v; (void)w; abort(); }
++int g_resv_store_active;
++void ppu_resv_break_store(uint64_t addr) { (void)addr; abort(); }
++int spu_coh_is_reserved(uint32_t addr) { (void)addr; return 0; }
++void spu_coh_notify_write(uint32_t addr) { (void)addr; abort(); }
++void spu_lockline_lock(void) { abort(); }
++void spu_lockline_unlock(void) { abort(); }
++
++#define ELF   0x1000u
++#define TABLE 0x100000u   /* 128-aligned */
++
++static void phdr(u32 i, u32 off, u32 vaddr, u32 paddr, u32 filesz, u32 memsz, u32 flags)
++{
++    u32 ph = ELF + 0x34 + i * 0x20;
++    vm_write32(ph + 0x00, 1);  vm_write32(ph + 0x04, off);
++    vm_write32(ph + 0x08, vaddr); vm_write32(ph + 0x0C, paddr);
++    vm_write32(ph + 0x10, filesz); vm_write32(ph + 0x14, memsz);
++    vm_write32(ph + 0x18, flags); vm_write32(ph + 0x1C, 0x80);
++}
++
++static void make_elf(int with_overlays)
++{
++    memset(vm_base + ELF, 0, 0x2000);
++    vm_write32(ELF, 0x7F454C46u);
++    vm_write8(ELF + 4, 1); vm_write8(ELF + 5, 2); vm_write8(ELF + 6, 1);
++    vm_write16(ELF + 0x10, 2); vm_write16(ELF + 0x12, 23);   /* ET_EXEC, EM_SPU */
++    vm_write32(ELF + 0x18, 0x3000); vm_write32(ELF + 0x1C, 0x34);
++    vm_write16(ELF + 0x28, 0x34); vm_write16(ELF + 0x2A, 0x20);
++    vm_write16(ELF + 0x2C, with_overlays ? 3 : 1);
++    phdr(0, 0x100, 0x3000, 0x3000, 0x40, 0x80, 5);           /* resident text */
++    memset(vm_base + ELF + 0x100, 0x11, 0x40);
++    if (with_overlays) {
++        /* Code overlay with a BSS tail, then a data overlay at the same VMA. */
++        phdr(1, 0x200, 0x3080, 0x40000, 0x24, 0x40, 7);
++        memset(vm_base + ELF + 0x200, 0xC0, 0x24);
++        phdr(2, 0x300, 0x3080, 0x40080, 0x10, 0x100, 6);
++        memset(vm_base + ELF + 0x300, 0xDA, 0x10);
++    }
++}
++
++int main(void)
++{
++    vm_base = calloc(1, 0x200000); assert(vm_base);
++
++    /* Not an ELF, and an ELF without overlays: INVAL, nothing to allocate. */
++    assert(cellOvisGetOverlayTableSize(0) == (s32)CELL_OVIS_ERROR_INVAL);
++    assert(cellOvisGetOverlayTableSize(ELF) == (s32)CELL_OVIS_ERROR_INVAL);
++    make_elf(0);
++    assert(cellOvisGetOverlayTableSize(ELF) == (s32)CELL_OVIS_ERROR_INVAL);
++    /* p_paddr left 0 by the linker is not a main-memory load address. */
++    phdr(0, 0x100, 0x3000, 0, 0x40, 0x80, 5);
++    assert(cellOvisGetOverlayTableSize(ELF) == (s32)CELL_OVIS_ERROR_INVAL);
++
++    make_elf(1);
++    /* Highest overlay end = 0x40080 + 0x100, already 128-aligned. */
++    assert(cellOvisGetOverlayTableSize(ELF) == 0x40180);
++    assert(cellOvisInitializeOverlayTable(TABLE + 0x10, ELF) == (s32)CELL_OVIS_ERROR_ALIGN);
++    assert(cellOvisInitializeOverlayTable(0, ELF) == (s32)CELL_OVIS_ERROR_INVAL);
++
++    memset(vm_base + TABLE, 0xEE, 0x40200);
++    assert(cellOvisInitializeOverlayTable(TABLE, ELF) == CELL_OK);
++    for (u32 i = 0; i < 0x40000; i += 0x1000)              /* below the first LMA */
++        assert(vm_read8(TABLE + i) == 0);
++    for (u32 i = 0; i < 0x24; ++i) assert(vm_read8(TABLE + 0x40000 + i) == 0xC0);
++    for (u32 i = 0x24; i < 0x80; ++i) assert(vm_read8(TABLE + 0x40000 + i) == 0);
++    for (u32 i = 0; i < 0x10; ++i) assert(vm_read8(TABLE + 0x40080 + i) == 0xDA);
++    for (u32 i = 0x10; i < 0x100; ++i) assert(vm_read8(TABLE + 0x40080 + i) == 0);
++    assert(vm_read8(TABLE + 0x40180) == 0xEE);              /* nothing past the size */
++    /* The resident text segment is not part of the table. */
++    for (u32 i = 0; i < 0x40180; ++i) assert(vm_read8(TABLE + i) != 0x11);
++
++    /* An overlay end that is not 128-aligned rounds the size up (DMA unit). */
++    vm_write32(ELF + 0x34 + 2 * 0x20 + 0x14, 0x104);
++    assert(cellOvisGetOverlayTableSize(ELF) == 0x40200);
++
++    puts("PASS: cellOvis overlay table size, layout by p_paddr, INVAL/ALIGN errors");
++    return 0;
++}
+-- 
+2.47.3
+

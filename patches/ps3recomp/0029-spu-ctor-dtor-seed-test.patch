@@ -1,0 +1,203 @@
+From b62bac560318c3c925e9209b0344586d1d4f7bb7 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Mon, 19 Oct 2026 10:09:40 -0500
+Subject: [PATCH] tools: test for find_spu_functions constructor/destructor
+ seeds
+
+Synthetic SPU ELFs (no guest assets) for collect_ctor_dtor_targets: framed
+-1/code/0 lists in a stripped image's data segment are seeded; framing that
+is not a list (no terminator, non-code word, misaligned, empty, past the code,
+inside the code segment) is not; a sectioned image seeds from .ctors/.dtors
+and does not fall back to the framing scan.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ tools/test_spu_find_functions_ctors.py | 176 +++++++++++++++++++++++++
+ 1 file changed, 176 insertions(+)
+ create mode 100644 tools/test_spu_find_functions_ctors.py
+
+diff --git a/tools/test_spu_find_functions_ctors.py b/tools/test_spu_find_functions_ctors.py
+new file mode 100644
+index 0000000..cecd8d8
+--- /dev/null
++++ b/tools/test_spu_find_functions_ctors.py
+@@ -0,0 +1,176 @@
++#!/usr/bin/env python3
++"""find_spu_functions: static constructors/destructors are function entries.
++
++GCC's crt0 calls every .ctors/.dtors entry through `bisl $r0, $rN` with the
++pointer loaded from memory, so nothing branches to a constructor by address,
++and a list of one or two entries is below the function-pointer-table scan's run
++of three. A shipped PhysX image (.ctors = {-1, 0x20180, 0}, the constructor a
++bare `bi $r0`) branched into unlifted LS 0x20180 on its first job.
++collect_ctor_dtor_targets seeds them: from the sections when the image has a
++section table, from the crt framing (-1, code addresses, 0) in the data
++PT_LOADs when it is stripped.
++
++Synthetic, no guest assets:
++  * stripped image: a constructor and a destructor reached only through framed
++    lists in a data segment become function starts;
++  * framing that is not a list (no 0 terminator, a non-code word, an empty
++    list, a word in the code segment) seeds nothing;
++  * sectioned image: every in-range word of .ctors is a seed, and a sectioned
++    image without constructor sections does not fall back to the framing scan.
++
++Usage:
++    python3 tools/test_spu_find_functions_ctors.py
++"""
++from pathlib import Path
++import struct
++import sys
++import unittest
++
++TOOLS = Path(__file__).resolve().parent
++sys.path.insert(0, str(TOOLS))
++
++import find_spu_functions as fsf  # noqa: E402
++from spu_disasm import spu_decode  # noqa: E402
++
++CODE_VA, DATA_VA = 0x100, 0x200
++ENTRY, CTOR, DTOR, CODE_END = 0x100, 0x110, 0x118, 0x120
++
++
++def il(rt, imm):
++    return (0x081 << 23) | ((imm & 0xFFFF) << 7) | rt
++
++
++def bi(ra):
++    return 0x35000000 | (ra << 7)
++
++
++NOP = 0x4020007F
++
++
++def code_segment():
++    words = {
++        ENTRY: il(3, 1), 0x104: bi(0), 0x108: NOP, 0x10C: NOP,
++        CTOR: bi(0), 0x114: NOP,          # the PhysX constructor: just a return
++        DTOR: il(3, 0), 0x11C: bi(0),
++    }
++    return b"".join(struct.pack(">I", words[a]) for a in range(CODE_VA, CODE_END, 4))
++
++
++def words(*ws):
++    return b"".join(struct.pack(">I", w & 0xFFFFFFFF) for w in ws)
++
++
++def elf(code, data, sections=()):
++    """ET_EXEC EM_SPU: an R+X PT_LOAD at CODE_VA, an RW PT_LOAD at DATA_VA, and
++    optionally a section table. `sections` is [(name, va, bytes)]; each is
++    placed at its va's offset in the matching segment (it must lie in one)."""
++    hdr, ph = 52, 2 * 32
++    code_off = 0x100
++    data_off = code_off + len(code)
++    out = bytearray(data_off + len(data))
++    out[code_off:code_off + len(code)] = code
++    out[data_off:data_off + len(data)] = data
++    shs = []
++    if sections:
++        names = b"\0" + b"".join(n.encode() + b"\0" for n, _, _ in sections) + b".shstrtab\0"
++        shstr_off = len(out)
++        out += names
++        shs.append((0, 0, 0, 0, 0, 0))                                   # SHN_UNDEF
++        pos = 1
++        for name, va, blob in sections:
++            off = (code_off + va - CODE_VA) if va < DATA_VA else (data_off + va - DATA_VA)
++            assert out[off:off + len(blob)] == blob, name
++            shs.append((pos, 1, 3, va, off, len(blob)))                   # PROGBITS, WA
++            pos += len(name) + 1
++        shs.append((pos, 3, 0, 0, shstr_off, len(names)))                # .shstrtab
++        while len(out) % 4:
++            out += b"\0"
++    shoff = len(out) if shs else 0
++    for (name, typ, flags, addr, off, size) in shs:
++        out += struct.pack(">IIIIIIIIII", name, typ, flags, addr, off, size, 0, 0, 4, 0)
++    ident = b"\x7fELF\x01\x02\x01" + b"\0" * 9
++    out[:hdr] = struct.pack(">16sHHIIIIIHHHHHH", ident, 2, 23, 1, ENTRY, hdr, shoff, 0,
++                            hdr, 32, 2, 40, len(shs), len(shs) - 1 if shs else 0)
++    struct.pack_into(">IIIIIIII", out, hdr, 1, code_off, CODE_VA, CODE_VA,
++                     len(code), len(code), 5, 16)                        # R+X
++    struct.pack_into(">IIIIIIII", out, hdr + 32, 1, data_off, DATA_VA, DATA_VA,
++                     len(data), len(data), 6, 16)                        # RW
++    return bytes(out)
++
++
++def targets(buf):
++    e = fsf.parse_elf(buf)
++    code = buf[0x100:0x100 + (CODE_END - CODE_VA)]
++    insns = fsf.disassemble_spu(code, base_addr=CODE_VA)
++    return fsf.collect_ctor_dtor_targets(buf, e, CODE_VA, CODE_END, {i.addr: i for i in insns})
++
++
++def starts(buf):
++    funcs, _ = fsf.detect_functions(buf, verbose=False)
++    return {s for s, _ in funcs}
++
++
++class CtorDtorSeeds(unittest.TestCase):
++    def test_encodings(self):
++        self.assertEqual(spu_decode(bi(0), CTOR).mnemonic, "bi")
++        self.assertEqual(spu_decode(il(3, 1), ENTRY).mnemonic, "il")
++
++    def test_stripped_lists(self):
++        # crt0 layout: .ctors = {-1, CTOR, 0}, .dtors = {-1, DTOR, 0}
++        buf = elf(code_segment(), words(0x12345678, -1, CTOR, 0, -1, DTOR, 0, 0))
++        self.assertEqual(targets(buf), {CTOR, DTOR})
++        got = starts(buf)
++        for want in (ENTRY, CTOR, DTOR):
++            self.assertIn(want, got)
++
++    def test_without_lists_not_found(self):
++        # The same code with no lists: the constructors are not entries, which is
++        # the bug the seeder fixes (they lie inside ENTRY's fall-through range).
++        buf = elf(code_segment(), words(0, 0, 0, 0))
++        self.assertEqual(targets(buf), set())
++        self.assertNotIn(CTOR, starts(buf))
++
++    def test_stripped_not_a_list(self):
++        cases = {
++            "no terminator": words(-1, CTOR, DTOR),
++            "non-code word": words(-1, CTOR, 0x00001234, 0),
++            "misaligned": words(-1, CTOR + 2, 0),
++            "empty list": words(-1, 0, 0),
++            "past the code": words(-1, CODE_END, 0),
++        }
++        for why, data in cases.items():
++            with self.subTest(why):
++                self.assertEqual(targets(elf(code_segment(), data)), set())
++
++    def test_list_in_code_segment_ignored(self):
++        # Only non-executable PT_LOADs are scanned; a -1, code, 0 run inside code
++        # (e.g. an immediate pool) is not a constructor list.
++        code = bytearray(code_segment())
++        code[8:20] = words(-1, CTOR, 0)              # 0x108..0x113 overwritten
++        buf = elf(bytes(code), words(0, 0))
++        self.assertEqual(targets(buf), set())
++
++    def test_sectioned_ctors(self):
++        ctors = words(-1, CTOR, 0)
++        dtors = words(-1, DTOR, 0)
++        data = words(0) + ctors + dtors
++        buf = elf(code_segment(), data,
++                  sections=[(".text", CODE_VA, code_segment()),
++                            (".ctors", DATA_VA + 4, ctors),
++                            (".dtors", DATA_VA + 16, dtors)])
++        self.assertEqual([s["name"] for s in fsf.parse_elf(buf)["shs"]][1:4],
++                         [".text", ".ctors", ".dtors"])
++        self.assertEqual(targets(buf), {CTOR, DTOR})
++        self.assertIn(CTOR, starts(buf))
++
++    def test_sectioned_without_ctor_sections(self):
++        # A section table but no constructor sections: the framing in .data is
++        # not trusted (the sections are the authority when they exist).
++        data = words(-1, CTOR, 0)
++        buf = elf(code_segment(), data,
++                  sections=[(".text", CODE_VA, code_segment()), (".data", DATA_VA, data)])
++        self.assertEqual(targets(buf), set())
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.47.3
+

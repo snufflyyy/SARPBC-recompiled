@@ -1,0 +1,396 @@
+From 5afbb5d1ed37fa090dffc4aabfd76fc81e6782b6 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Sun, 18 Oct 2026 23:47:51 -0500
+Subject: [PATCH] find_spu_functions: do not seed .rodata of section-stripped
+ images as code
+
+disassemble_spu() yields an entry for every word of the segment, data
+included (undecodable words come back as `.word`), so the seed filters'
+"address is in insns_by_addr" / "in valid_starts" checks accepted any
+address in the segment. For an image whose section table is stripped,
+the pipeline treats the whole R+X PT_LOAD as code, and the SPU linker puts
+.rodata (assert/printf strings, float and zlib tables) right after .text
+in that segment. collect_ila_continuation_targets then turned every
+string pointer passed to printf and every table base loaded by `ila`
+into a function start, the "functions" were lifted as code, and their
+`.word`s made build_spu_workloads refuse the image ("unsupported
+instructions emitted by lifter").
+
+Seen in Supersonic Acrobatic Rocket-Powered Battle-Cars 01.09
+(NPUB30035): its Edge zlib SPU image (38,100 B, 213 `.word`s, 36 bogus
+seeds in "EDGE ZLIB ERROR: ..." and zlib tables) and its MultiStream
+mixer image (95,636 B, 473 `.word`s, 50 bogus seeds in "Skipping DSP
+..." strings and float tables). Both are section-stripped; the title's
+other images carry a section table, so the same bogus seeds were clipped
+to .text there.
+
+A derived seed (branch target, link-register / computed / jump-table /
+ila-continuation / Duff / pointer-table target) is now kept only if it
+plausibly starts code: it decodes, it is not a NUL-padded printable C
+string, and a straight-line walk from it reaches an unconditional
+transfer (br/bra/bi/bie/bid/iret/stop, except lv2 stops that resume)
+before an undecodable word or the end of the segment. The jump-table and
+continuation scans also use decodable addresses as their "valid
+instruction start" set, as their docstrings already intended. ELF entry
+and symbol-table seeds are not filtered.
+
+The C-string check requires the NUL's word to be NUL-padded because real
+code can read as a short string: `fcgt` (0x58416E24, "XAn$") then `nop`
+(0x4020007F, "@ \0\x7F") in a PhysX image.
+
+Measured on the title's 20 distinct SPU images (01.02 and 01.09): both
+failing images now lift with 0 unsupported and register (625 and 1,151
+functions); no seed inside a real executable section is dropped; the 12
+other 01.09 images lift byte-identical to before.
+
+New test tools/test_spu_find_functions_rodata.py (synthetic, no guest
+assets) fails on the old detector and passes now; test_spu_program_pipeline.py
+and test_spu_disasm_ri10.py still pass.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ tools/find_spu_functions.py             | 131 +++++++++++++++++++-
+ tools/test_spu_find_functions_rodata.py | 151 ++++++++++++++++++++++++
+ 2 files changed, 278 insertions(+), 4 deletions(-)
+ create mode 100644 tools/test_spu_find_functions_rodata.py
+
+diff --git a/tools/find_spu_functions.py b/tools/find_spu_functions.py
+index 1af4fad..af9b3d5 100644
+--- a/tools/find_spu_functions.py
++++ b/tools/find_spu_functions.py
+@@ -13,6 +13,13 @@ Seeds the function set from four sources:
+   4. Addresses loaded into $r0 by `il`/`ila` -- the link-register resume
+      idiom (see collect_link_register_targets).
+ 
++Every derived seed (3, 4 and the other immediate/table scans) must also look
++like the start of code: it decodes, it is not a padded C string, and a
++straight-line walk from it reaches a branch/return/stop before any undecodable
++word (plausible_code_start). Without this, a section-stripped image's .rodata,
++which shares the R+X segment with .text, was seeded from every string or table
++address loaded by `ila` and lifted as code.
++
+ For each function start without a symbol-provided size, the end is
+ determined by scanning forward until we hit one of:
+    - `stop` / `stopd`,
+@@ -145,6 +152,107 @@ def pick_text(phs):
+     raise SystemExit("No executable PT_LOAD segment found")
+ 
+ 
++# ---------------------------------------------------------------------------
++# Code-vs-data plausibility for derived seeds
++# ---------------------------------------------------------------------------
++#
++# disassemble_spu() returns one entry for EVERY word of the segment, data
++# included (an undecodable word comes back as `.word`), so "is an address in
++# insns_by_addr" says nothing about whether it is code. That matters for images
++# whose section table is stripped: the pipeline then treats the whole R+X
++# PT_LOAD as code, and Sony's SPU linker puts .rodata (assert/printf strings,
++# float tables, shuffle masks) in that same segment, right after .text. The
++# immediate-driven seeders below take every `ila`/`ilhu+iohl` constant that
++# lands in the segment as a potential entry, which includes every string
++# pointer passed to printf and every table base. Each such seed became a
++# "function" made of data, and the `.word`s in it made the lifter report the
++# image as unsupported. (Observed: an Edge zlib image with its "EDGE ZLIB
++# ERROR: ..." strings, 213 `.word`s, and a MultiStream image with its "Skipping
++# DSP ..." strings and float tables, 473 `.word`s; both section-stripped.)
++#
++# A derived seed is therefore kept only if it plausibly starts code:
++#   * the word there decodes as an SPU instruction,
++#   * the bytes there are not a NUL-terminated printable C string, and
++#   * a straight-line walk from it reaches an unconditional transfer without
++#     crossing an undecodable word or running off the end of the segment.
++# A real entry point is followed by real instructions up to its first
++# unconditional branch/return, so the walk cannot reject it unless the
++# disassembler lacks an opcode on that path, and then the image would fail as
++# unsupported anyway. ELF entry and symbol-table seeds are never filtered.
++
++_PRINTABLE = frozenset(range(0x20, 0x7F)) | {0x09, 0x0A, 0x0D}
++
++
++def decodable_starts(insns):
++    """Addresses whose word decodes as an SPU instruction (not `.word`)."""
++    return {ins.addr for ins in insns if ins.mnemonic != ".word"}
++
++
++def looks_like_c_string(code, off, min_len=4, max_len=1024):
++    """True if `code[off:]` is >= min_len printable ASCII bytes, then a NUL, and
++    the rest of the 4-byte word holding that NUL is NUL too.
++
++    The padding condition matters: real code can read as a short string. In a
++    PhysX image `fcgt` (0x58416E24, "XAn$") followed by `nop` (0x4020007F,
++    "@ \\0\\x7F") is six printable bytes and a NUL; the 0x7F after the NUL is
++    what tells it apart from a padded string. A string packed directly against
++    the next one is still caught when its NUL is the last byte of a word, and
++    any other packing is left to runs_into_data().
++    """
++    n = 0
++    while off + n < len(code) and n <= max_len:
++        b = code[off + n]
++        if b == 0:
++            if n < min_len:
++                return False
++            pad_end = min(len(code), (off + n + 4) & ~3)
++            return all(x == 0 for x in code[off + n:pad_end])
++        if b not in _PRINTABLE:
++            return False
++        n += 1
++    return False
++
++
++_LINEAR_END = {"stop", "stopd", "br", "bra", "iret",
++               "bi", "bie", "bid"}
++
++
++def runs_into_data(start, insns_by_addr, code_end, limit=1024):
++    """Straight-line walk from `start`: True if it meets an undecodable word,
++    or runs off the end of the segment, before an unconditional transfer of
++    control. Real code always leaves through a branch, return or stop; a float
++    table at the end of the segment can decode cleanly all the way to its end.
++
++    Conditional branches and calls fall through, so they do not stop the walk;
++    an lv2 stop-and-signal that resumes (is_resuming_stop) does not either.
++    `limit` instructions without a verdict count as code.
++    """
++    pc = start
++    for _ in range(limit):
++        if pc >= code_end:
++            return True
++        ins = insns_by_addr.get(pc)
++        if ins is None:
++            return False
++        if ins.mnemonic == ".word":
++            return True
++        if ins.mnemonic in _LINEAR_END and not is_resuming_stop(ins):
++            return False
++        pc += 4
++    return False
++
++
++def plausible_code_start(addr, code, code_start, code_end, insns_by_addr):
++    if not (code_start <= addr < code_end) or (addr & 3):
++        return False
++    ins = insns_by_addr.get(addr)
++    if ins is None or ins.mnemonic == ".word":
++        return False
++    if looks_like_c_string(code, addr - code_start):
++        return False
++    return not runs_into_data(addr, insns_by_addr, code_end)
++
++
+ _BRANCH_MNEMONICS = {
+     "brsl", "brasl",                          # direct calls (definitely functions)
+     "br", "bra",                              # unconditional branches
+@@ -320,7 +428,7 @@ def collect_jump_table_targets(insns, code, code_start, code_end,
+     terminates the table); bases yielding fewer than 2 entries are ignored.
+     """
+     del window                       # kept in the signature for compatibility
+-    valid_starts = {ins.addr for ins in insns}
++    valid_starts = decodable_starts(insns)
+     targets = set()
+     seen_bases = set()
+     for ins in insns:
+@@ -392,7 +500,7 @@ def collect_ila_continuation_targets(insns, code_start, code_end):
+     scan above: a false positive only adds an entry point at a valid
+     instruction boundary; a false negative loses an entire code region.
+     """
+-    valid_starts = {ins.addr for ins in insns}
++    valid_starts = decodable_starts(insns)
+     targets = set()
+     ilhu_val = {}                     # reg -> pending high halfword
+     for ins in insns:
+@@ -628,9 +736,16 @@ def detect_functions(buf, base_override=None, verbose=True, raw=False):
+             seed_starts.add(s["addr"])
+             if s["size"] > 0:
+                 sized_funcs.append((s["addr"], s["addr"] + s["size"]))
++    # Branch targets are filtered too: data decoded as code yields bogus
++    # branches whose targets land in data (see plausible_code_start).
++    rejected = set()
+     for t in collect_branch_targets(insns):
+-        if code_start <= t < code_end:
++        if not (code_start <= t < code_end):
++            continue
++        if plausible_code_start(t, code, code_start, code_end, insns_by_addr):
+             seed_starts.add(t)
++        else:
++            rejected.add(t)
+     # Link-register resume addresses (`il`/`ila $r0, <code>` + a plain branch to
+     # a stub that returns via `bi $r0`). Require the target to be 4-byte aligned
+     # AND to decode as an instruction, so a scratch use of $r0 that happens to
+@@ -643,8 +758,16 @@ def detect_functions(buf, base_override=None, verbose=True, raw=False):
+               | collect_ila_continuation_targets(insns, code_start, code_end)
+               | collect_duff_targets(insns, code_start, code_end)
+               | fptr_targets):
+-        if code_start <= t < code_end and (t & 3) == 0 and t in insns_by_addr:
++        if not (code_start <= t < code_end):
++            continue
++        if plausible_code_start(t, code, code_start, code_end, insns_by_addr):
+             seed_starts.add(t)
++        else:
++            rejected.add(t)
++    rejected -= seed_starts
++    if rejected and verbose:
++        print(f"  {len(rejected)} derived seed(s) rejected as data "
++              f"(string, table or undecodable word)")
+     if fptr_targets and verbose:
+         print(f"  {len(fptr_targets)} data function-pointer-table target(s): "
+               f"{', '.join(f'0x{a:X}' for a in sorted(fptr_targets))}")
+diff --git a/tools/test_spu_find_functions_rodata.py b/tools/test_spu_find_functions_rodata.py
+new file mode 100644
+index 0000000..ef0267b
+--- /dev/null
++++ b/tools/test_spu_find_functions_rodata.py
+@@ -0,0 +1,151 @@
++#!/usr/bin/env python3
++"""find_spu_functions: .rodata in a section-stripped text segment is not code.
++
++With no section table, build_spu_workloads lifts the whole R+X PT_LOAD, and
++Sony's SPU linker puts .rodata (assert/printf strings, float tables) in that
++segment after .text. The immediate-driven seeders took every `ila` constant
++inside the segment as a possible entry, so each string pointer passed to printf
++became a "function" of data, and its undecodable words made the lifter report
++the whole image unsupported (`.word`). Two images of a shipped title
++(an Edge zlib build, 213 `.word`s; an audio mixer, 473) failed that way.
++
++Synthetic, no guest assets:
++  * string and float-table addresses loaded by `ila` are not function starts;
++  * a real continuation loaded by `ila` (the manual-link idiom) still is;
++  * real code that reads as a short ASCII run (`fcgt` + `nop` =
++    "XAn$@ \\0\\x7F", seen in a PhysX image) still is;
++  * the image registers through build_spu_workloads with no unsupported words.
++
++Usage:
++    python3 tools/test_spu_find_functions_rodata.py
++"""
++import json
++from pathlib import Path
++import struct
++import subprocess
++import sys
++import tempfile
++import unittest
++
++TOOLS = Path(__file__).resolve().parent
++sys.path.insert(0, str(TOOLS))
++
++import find_spu_functions as fsf  # noqa: E402
++from spu_disasm import spu_decode  # noqa: E402
++
++BASE = 0x100
++
++
++def ila(rt, imm):
++    return (0x21 << 25) | ((imm & 0x3FFFF) << 7) | rt
++
++
++def il(rt, imm):
++    return (0x081 << 23) | ((imm & 0xFFFF) << 7) | rt
++
++
++def brsl(rt, pc, target):
++    return (0x066 << 23) | ((((target - pc) >> 2) & 0xFFFF) << 7) | rt
++
++
++def bi(ra):
++    return 0x35000000 | (ra << 7)
++
++
++FCGT = 0x58416E24      # fcgt $r36, $r92, $r5 -- bytes "XAn$"
++NOP = 0x4020007F       # nop                  -- bytes "@ \0\x7F"
++
++# Layout (LS addresses). Code first, then .rodata, all in ONE R+X segment.
++ENTRY, F_CALLEE, CONT, F_FCGT = 0x100, 0x118, 0x11C, 0x124
++STR, TABLE = 0x140, 0x170
++STRING = b"invalid distance too far back\n\0"     # 0x696E7661 is a .word
++FLOATS = (0x3F800000, 0x3F7FEC43, 0x3F7FB10F, 0x3F7F4E6D)
++
++
++def code_words():
++    words = {
++        0x100: ila(3, STR),           # printf-style string argument
++        0x104: ila(4, TABLE),         # table base
++        0x108: ila(9, CONT),          # manual link: callee returns via bi $r9
++        0x10C: ila(10, F_FCGT),       # address of a real function, by value
++        0x110: brsl(0, 0x110, F_CALLEE),
++        0x114: bi(0),
++        F_CALLEE: bi(9),
++        CONT: il(3, 1),
++        0x120: bi(0),
++        F_FCGT: FCGT,
++        0x128: NOP,
++        0x12C: bi(0),
++        0x130: 0, 0x134: 0, 0x138: 0, 0x13C: 0,   # alignment padding (stop)
++    }
++    return [words[a] for a in range(BASE, STR, 4)]
++
++
++def segment():
++    blob = b"".join(struct.pack(">I", w) for w in code_words())
++    blob += STRING.ljust(TABLE - STR, b"\0")
++    blob += b"".join(struct.pack(">I", w) for w in FLOATS)
++    return blob
++
++
++def section_less_elf(seg):
++    """ET_EXEC EM_SPU, one R+X PT_LOAD at BASE, no section headers."""
++    off = 0x80
++    out = bytearray(off)
++    ident = b"\x7fELF\x01\x02\x01" + b"\0" * 9
++    out[:52] = struct.pack(">16sHHIIIIIHHHHHH", ident, 2, 23, 1, ENTRY,
++                           52, 0, 0, 52, 32, 1, 0, 0, 0)
++    struct.pack_into(">IIIIIIII", out, 52, 1, off, BASE, BASE,
++                     len(seg), len(seg), 5, 16)
++    return bytes(out) + seg
++
++
++class RodataSeeds(unittest.TestCase):
++    def test_encodings(self):
++        # Guard the hand encoders against the decoder the detector uses.
++        self.assertEqual(str(spu_decode(ila(3, STR), 0)).split(None, 2)[2],
++                         f"ila          $r3, 0x{STR:X}")
++        self.assertEqual(spu_decode(brsl(0, 0x110, F_CALLEE), 0x110).operands,
++                         f"$r0, 0x{F_CALLEE:X}")
++        self.assertEqual(spu_decode(FCGT, 0).mnemonic, "fcgt")
++        self.assertEqual(spu_decode(NOP, 0).mnemonic, "nop")
++        # The point of the fixture: the string really contains undecodable words.
++        words = [int.from_bytes(STRING[i:i + 4], "big") for i in range(0, 28, 4)]
++        self.assertIn(".word", {spu_decode(w, 0).mnemonic for w in words})
++
++    def test_c_string_check(self):
++        seg = segment()
++        self.assertTrue(fsf.looks_like_c_string(seg, STR - BASE))
++        # fcgt+nop: six printable bytes then NUL, but 0x7F follows the NUL.
++        self.assertFalse(fsf.looks_like_c_string(seg, F_FCGT - BASE))
++        self.assertFalse(fsf.looks_like_c_string(b"abc\0", 0))           # too short
++        self.assertTrue(fsf.looks_like_c_string(b"abcdefg\0", 0))        # packed
++        self.assertFalse(fsf.looks_like_c_string(b"abcdef\0\x7f", 0))    # not padded
++
++    def test_rodata_is_not_seeded(self):
++        funcs, _ = fsf.detect_functions(section_less_elf(segment()), verbose=False)
++        starts = {s for s, _ in funcs}
++        for want in (ENTRY, F_CALLEE, CONT, F_FCGT):
++            self.assertIn(want, starts, f"lost real entry 0x{want:X}: {funcs}")
++        self.assertFalse([s for s in starts if s >= STR],
++                         f"data seeded as code: {funcs}")
++
++    def test_registers_through_pipeline(self):
++        with tempfile.TemporaryDirectory() as temp:
++            root = Path(temp)
++            (root / "image.elf").write_bytes(section_less_elf(segment()))
++            out = root / "generated"
++            result = subprocess.run(
++                [sys.executable, str(TOOLS / "build_spu_workloads.py"),
++                 "--input", str(root / "image.elf"), "--lifted", str(out),
++                 "--out", str(out / "spu_workloads.c")],
++                capture_output=True, text=True)
++            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
++            manifest = json.loads((out / "inventory.json").read_text())
++            (program,) = manifest["programs"]
++            self.assertEqual(program["status"], "registered", program.get("reason"))
++            self.assertEqual(program["diagnostics"]["unsupported"], {})
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.47.3
+

@@ -1,0 +1,159 @@
+From 8ab59f452ed638be28e463bc8e7088de0903bd49 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Mon, 19 Oct 2026 10:25:52 -0500
+Subject: [PATCH] cellGcmSys: cellGcmSetPrepareFlip returns the buffer id and
+ does not flip
+
+libgcm queues the preparation in the command buffer and returns the
+buffer id; the flip is cellGcmSetFlipImmediate(id), called once the RSX
+has reached the preparation. Unreal Engine 3's PS3 RHI writes that
+return value into its command stream as the data of a
+GCM_SET_USER_COMMAND, and its user handler calls SetFlipImmediate with
+it. Returning CELL_OK (0) made every SetFlipImmediate flip buffer 0
+(Supersonic Acrobatic Rocket-Powered Battle-Cars 01.09: Prepare 0/1
+alternating, FlipImmediate(0) 108 times out of 108), and flipping here as
+well presented the buffer the drain was still drawing into.
+
+Ported in part from soyjxck/ps3recomp 6eb35c0 ("gcm: prepared flips
+execute in FIFO order"), MIT: the return value and no flip on the spot.
+The fork's FIFO marker and no-op SetFlipImmediate are not taken: a
+title whose flip handler releases a FIFO park needs SetFlipImmediate to
+flip and call it back.
+
+GCM_PREPARE_FLIPS_NOW=1 restores the old behaviour.
+Test: tools/test_gcm_prepare_flip.py (fails on the old behaviour).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/cellGcmSys.c        | 22 +++++++++++++++
+ tests/test_gcm_prepare_flip.c  | 49 ++++++++++++++++++++++++++++++++++
+ tools/test_gcm_prepare_flip.py | 21 +++++++++++++++
+ 3 files changed, 92 insertions(+)
+ create mode 100644 tests/test_gcm_prepare_flip.c
+ create mode 100644 tools/test_gcm_prepare_flip.py
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index aaf3783..09bb43a 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -2829,6 +2829,13 @@ s32 cellGcmSetFlipCommandWithWaitLabel(u32 bufferId, u32 labelIndex, u32 labelVa
+     return cellGcmSetFlipCommand(bufferId);
+ }
+ 
++static int gcm_prepare_flips_now(void)
++{
++    static int v = -1;
++    if (v < 0) { const char* e = getenv("GCM_PREPARE_FLIPS_NOW"); v = (e && *e == '1') ? 1 : 0; }
++    return v;
++}
++
+ /* NID: 0xA2478CA3 */
+ s32 cellGcmSetPrepareFlip(void* ctx, u32 bufferId)
+ {
+@@ -2842,6 +2849,21 @@ s32 cellGcmSetPrepareFlip(void* ctx, u32 bufferId)
+ 
+     printf("[cellGcmSys] SetPrepareFlip(bufferId=%u)\n", bufferId);
+ 
++    /* libgcm only queues the preparation in the command buffer and RETURNS
++     * THE BUFFER ID; the flip itself is cellGcmSetFlipImmediate(id), which
++     * the title calls once the RSX has reached the preparation. Unreal
++     * Engine 3's PS3 RHI writes the return value into its command stream as
++     * the data of a GCM_SET_USER_COMMAND; its user handler then calls
++     * SetFlipImmediate with it. Returning CELL_OK (0) here made every
++     * SetFlipImmediate flip buffer 0, and flipping here as well presented
++     * the buffer the drain was still drawing into (Supersonic Acrobatic
++     * Rocket-Powered Battle-Cars: Prepare 0/1 alternating, FlipImmediate 0
++     * every time; Drakengard 3 saw the same, ported from soyjxck/ps3recomp
++     * 6eb35c0 "prepared flips execute in FIFO order", MIT).
++     * GCM_PREPARE_FLIPS_NOW=1 restores the old behaviour (flip here, CELL_OK). */
++    if (!gcm_prepare_flips_now())
++        return (s32)bufferId;
++
+     gcm_set_current_display_buffer(bufferId);
+     s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
+     s_flip_request_count++;
+diff --git a/tests/test_gcm_prepare_flip.c b/tests/test_gcm_prepare_flip.c
+new file mode 100644
+index 0000000..79022d5
+--- /dev/null
++++ b/tests/test_gcm_prepare_flip.c
+@@ -0,0 +1,49 @@
++/* cellGcmSetPrepareFlip returns the buffer id and does not flip; the flip is
++ * cellGcmSetFlipImmediate(id). Includes the real implementation, as
++ * test_gcm_map_flags.c does. */
++#include "../libs/video/cellGcmSys.c"
++#include <assert.h>
++
++uint8_t* vm_base;
++uint32_t g_ww_lo, g_ww_hi;
++void ps3_ww_report_inline(uint32_t a, uint64_t v, int w) { (void)a; (void)v; (void)w; abort(); }
++int g_resv_store_active;
++void ppu_resv_break_store(uint64_t addr) { (void)addr; abort(); }
++int spu_coh_is_reserved(uint32_t addr) { (void)addr; return 0; }
++void spu_coh_notify_write(uint32_t addr) { (void)addr; abort(); }
++void spu_lockline_lock(void) { abort(); }
++void spu_lockline_unlock(void) { abort(); }
++/* The flip path's runtime hooks: no guest, no draw engine, no diagnostics. */
++ps3_guest_caller_fn g_ps3_guest_caller;
++PPU_THREAD_LOCAL ppu_context* g_active_ctx;
++void ppu_dump_guest_stack(ppu_context* c, const char* t) { (void)c; (void)t; abort(); }
++void ppu_dump_bctrl_ring(uint32_t id, const char* t) { (void)id; (void)t; abort(); }
++int rsx_draw_engine_enabled(void) { return 0; }
++void rsx_draw_engine_note_flip(u32 id) { (void)id; abort(); }
++
++int main(void)
++{
++    vm_base = calloc(1, 0x10000); assert(vm_base);
++    s_display_buffer_set[0] = s_display_buffer_set[1] = 1;
++    s_current_display_buffer_id = 0;
++    const u32 flips = s_flip_request_count;
++
++    /* Unreal Engine 3 carries this return value to cellGcmSetFlipImmediate. */
++    assert(cellGcmSetPrepareFlip(NULL, 1) == 1);
++    assert(cellGcmSetPrepareFlip(NULL, 0) == 0);
++    assert(cellGcmSetPrepareFlip(NULL, 1) == 1);
++    /* Preparing is not flipping: nothing is presented and no flip counted. */
++    assert(s_current_display_buffer_id == 0);
++    assert(s_flip_request_count == flips);
++
++    assert(cellGcmSetPrepareFlip(NULL, CELL_GCM_MAX_DISPLAY_BUFFER_NUM) ==
++           (s32)CELL_GCM_ERROR_INVALID_VALUE);
++    assert(cellGcmSetPrepareFlip(NULL, 2) == (s32)CELL_GCM_ERROR_INVALID_VALUE);  /* not set */
++
++    /* The flip itself. */
++    assert(cellGcmSetFlipImmediate(1) == CELL_OK);
++    assert(s_current_display_buffer_id == 1);
++    assert(s_flip_request_count == flips + 1);
++    puts("test_gcm_prepare_flip: OK");
++    return 0;
++}
+diff --git a/tools/test_gcm_prepare_flip.py b/tools/test_gcm_prepare_flip.py
+new file mode 100644
+index 0000000..d167039
+--- /dev/null
++++ b/tools/test_gcm_prepare_flip.py
+@@ -0,0 +1,21 @@
++#!/usr/bin/env python3
++"""cellGcmSetPrepareFlip returns the buffer id; SetFlipImmediate flips."""
++import os
++from pathlib import Path
++import subprocess
++import sys
++import tempfile
++from gen_hle_nids import scan
++root=Path(__file__).resolve().parents[1]
++assert any(n == 'cellGcmSetPrepareFlip' for _, n in scan(root/'libs/video/cellGcmSys.c')), 'Missing cellGcmSetPrepareFlip registration'
++if os.name=='nt':
++    print('SKIP: fixture currently uses POSIX linking; registration checked')
++    raise SystemExit(0)
++with tempfile.TemporaryDirectory(prefix='gcm-prepare-flip-') as tmp:
++    binary=Path(tmp)/'test'
++    linker=['-Wl,-dead_strip'] if sys.platform=='darwin' else ['-Wl,--gc-sections','-pthread','-lm']
++    subprocess.run([os.environ.get('CC','cc'),'-std=gnu17','-D_GNU_SOURCE','-O1','-UNDEBUG',
++        '-ffunction-sections','-fdata-sections','-I'+str(root/'include'),
++        str(root/'tests/test_gcm_prepare_flip.c'),*linker,'-o',str(binary)],check=True)
++    subprocess.run([str(binary)],check=True,timeout=10,
++        env={k:v for k,v in os.environ.items() if not k.startswith('A2O_')})
+-- 
+2.47.3
+

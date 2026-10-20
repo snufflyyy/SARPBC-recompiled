@@ -1,0 +1,849 @@
+From 59dc05bb2c9d0c5f234ae9cef20814146cbcd1a7 Mon Sep 17 00:00:00 2001
+From: soyjxck <soyjxck@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 21:05:26 +0100
+Subject: [PATCH 1/2] sys_ppu_thread: a thread that has ended gives its slot
+ and its stack back
+
+A port stopped dead a quarter of an hour into play, on Windows, at the
+end of a level: black screen, the game thread waiting for a physics
+step that no thread would ever finish. The thread table has 64 slots
+and the run had used the sixty-fourth. sys_ppu_thread_create returned
+EAGAIN without a word, the title did not look, and waited for a thread
+that was never started. Three things kept slots from coming back:
+
+- Windows, every joined thread. A thread that ends in
+  sys_ppu_thread_exit signals its joiner from inside that call and then
+  unwinds to the thread procedure, whose epilogue stamped the slot
+  FINISHED again. The joiner did not wait for it: it freed the slot, and
+  the epilogue then wrote FINISHED over FREE for good. (POSIX joins the
+  host thread first and never saw it.) The epilogue now only stamps a
+  thread that returned from its entry, and the joiner waits for the
+  host thread to be out before the slot is anyone else's.
+
+- Every thread made without SYS_PPU_THREAD_CREATE_JOINABLE. The flags
+  were ignored and every thread made joinable, so one that nobody joins
+  kept its slot when it ended. Such a thread now cannot be joined and
+  frees itself, as on the console. Drakengard 3 makes its SaveData,
+  LoadData, DLCCheck and PreLoadMovie threads that way.
+
+- A detached thread that called sys_ppu_thread_exit was freed there and
+  stamped FINISHED by the epilogue afterwards. It is now freed by the
+  epilogue, once it is out of its guest code.
+
+Guest stacks went the same way, more slowly: vm_stack_allocate only
+moves forward through its 256 MB, and that title makes seven megabytes
+of thread stacks in a quarter of an hour. A thread that has ended hands
+its stack to the next one of the same size, zeroed.
+
+sys_ppu_thread_create now says so when no slot is free, and logs the
+flags. PPU_THREAD_SLOTS=<n> uses the first n slots only, to try a
+title's thread turnover against a small table.
+
+Measured in Drakengard 3, hands-off from boot into chapter 1 and four
+minutes of play: 31 threads made in each case; before, the highest
+thread id was 31 or 32 (no slot ever used twice); now 23, the PhysX
+pair using the same two slots at every level change and the four
+unjoined kinds sharing one, and the run completes with
+PPU_THREAD_SLOTS=24.
+
+The smoke title makes 300 more threads than it did, half joined and
+half without the joinable flag, and checks that each can be made and
+that the second kind cannot be joined; with the old thread code it
+fails. Its own thread, and the host's --threads test, asked for a
+thread they join without the joinable flag: they pass it now.
+---
+ runtime/host/host_posix.c              |   2 +-
+ runtime/ppu/tests/smoke/smoke_recomp.c |  58 ++++++++++-
+ runtime/syscalls/sys_ppu_thread.c      | 132 +++++++++++++++++++++----
+ 3 files changed, 171 insertions(+), 21 deletions(-)
+
+diff --git a/runtime/host/host_posix.c b/runtime/host/host_posix.c
+index 1afc516..66643b9 100644
+--- a/runtime/host/host_posix.c
++++ b/runtime/host/host_posix.c
+@@ -1098,7 +1098,7 @@ static int run_thread_check(void)
+     ctx.gpr[5] = 0;            /* arg */
+     ctx.gpr[6] = 1000;         /* priority */
+     ctx.gpr[7] = 0x10000;      /* guest stack size */
+-    ctx.gpr[8] = 0;            /* flags */
++    ctx.gpr[8] = 1;            /* flags: joinable (it is joined below) */
+     ctx.gpr[9] = 0;            /* name */
+     int64_t crc = sys_ppu_thread_create(&ctx);
+     if (crc != 0) {
+diff --git a/runtime/ppu/tests/smoke/smoke_recomp.c b/runtime/ppu/tests/smoke/smoke_recomp.c
+index f4996d8..bb76447 100644
+--- a/runtime/ppu/tests/smoke/smoke_recomp.c
++++ b/runtime/ppu/tests/smoke/smoke_recomp.c
+@@ -190,6 +190,8 @@ static atomic_uint   g_mark_n;
+  * busy host and the strict marker order below is not the scaffold's to
+  * guarantee. The body waits on it before it marks anything. */
+ static atomic_uint   g_create_marked;
++/* The threads of the churn (see _start) that have run. */
++static atomic_uint   g_churn_ran;
+ 
+ /* Failures the guest found while running. Reported by smoke_verify, which is
+  * the only thing that reads them. */
+@@ -418,6 +420,15 @@ static void smoke_verify(void)
+  * -----------------------------------------------------------------------*/
+ void func_00010100(ppu_context* ctx)
+ {
++    /* One of the churn's threads (see _start): out again at once, with its
++     * argument as its status. */
++    if ((uint32_t)ctx->gpr[3] != SMOKE_THREAD_ARG) {
++        const uint64_t status = ctx->gpr[3];
++        atomic_fetch_add(&g_churn_ran, 1u);
++        ctx->gpr[11] = SC_PPU_THREAD_EXIT;
++        ctx->gpr[3]  = status;
++        lv2_syscall(ctx);   /* does not return */
++    }
+     g_body_host_tid = (unsigned long)GetCurrentThreadId();
+     g_body_arg      = (uint32_t)ctx->gpr[3];
+     /* Let the creator mark first (see g_create_marked); a sleep through the
+@@ -498,7 +509,7 @@ void func_00010000(ppu_context* ctx)
+     ctx->gpr[5]  = SMOKE_THREAD_ARG;      /* the new thread's r3 */
+     ctx->gpr[6]  = 1000;                  /* priority            */
+     ctx->gpr[7]  = 0x10000;               /* stack size          */
+-    ctx->gpr[8]  = 0;                     /* flags               */
++    ctx->gpr[8]  = 1;                     /* flags: joinable     */
+     ctx->gpr[9]  = SMOKE_THREAD_NAME;
+     lv2_syscall(ctx);
+     smoke_check((int32_t)ctx->gpr[3] == 0, "sys_ppu_thread_create failed");
+@@ -516,6 +527,51 @@ void func_00010000(ppu_context* ctx)
+                 "sys_ppu_thread_join handed back the wrong exit status");
+     smoke_mark(ctx, SMOKE_STEP_THREAD_JOIN);
+ 
++    /* Thread slots come back. A title makes threads all through its run -- a
++     * pair for every level, a few for every movie and every save -- and the
++     * table has PPU_THREAD_MAX (64) slots: 300 here, one at a time, half of
++     * them joined and half made without the joinable flag, which nobody can
++     * join and which must give their slot back by themselves. (Both kinds
++     * once kept theirs: a port stopped dead a quarter of an hour in, at the
++     * sixty-fourth thread.) */
++    for (uint32_t i = 0; i < 300; i++) {
++        const int joinable = (i & 1u) == 0;
++        const uint32_t ran = atomic_load(&g_churn_ran);
++        ctx->gpr[11] = SC_PPU_THREAD_CREATE;
++        ctx->gpr[3]  = SMOKE_SC_TID;
++        ctx->gpr[4]  = SMOKE_OPD_THREAD;
++        ctx->gpr[5]  = 0x7000u + i;           /* not SMOKE_THREAD_ARG: a churn thread */
++        ctx->gpr[6]  = 1000;
++        ctx->gpr[7]  = 0x10000;
++        ctx->gpr[8]  = joinable ? 1 : 0;
++        ctx->gpr[9]  = SMOKE_THREAD_NAME;
++        lv2_syscall(ctx);
++        if ((int32_t)ctx->gpr[3] != 0) {
++            smoke_check(0, "a thread could not be made in the churn: a slot was not given back");
++            break;
++        }
++        if (joinable) {
++            ctx->gpr[11] = SC_PPU_THREAD_JOIN;
++            ctx->gpr[3]  = vm_read64(SMOKE_SC_TID);
++            ctx->gpr[4]  = SMOKE_SC_EXITSTAT;
++            lv2_syscall(ctx);
++            smoke_check((int32_t)ctx->gpr[3] == 0, "a churn thread could not be joined");
++            smoke_check((uint64_t)vm_read64(SMOKE_SC_EXITSTAT) == 0x7000u + i,
++                        "a churn thread's join handed back the wrong exit status");
++        } else {
++            /* Nobody can join it: wait for it to have run, and a moment more
++             * for it to be out, so that the slots in use stay few. */
++            for (int w = 0; w < 20000 && atomic_load(&g_churn_ran) == ran; w++) smoke_usleep(ctx, 100);
++            smoke_usleep(ctx, 500);
++            ctx->gpr[11] = SC_PPU_THREAD_JOIN;
++            ctx->gpr[3]  = vm_read64(SMOKE_SC_TID);
++            ctx->gpr[4]  = SMOKE_SC_EXITSTAT;
++            lv2_syscall(ctx);
++            smoke_check((int32_t)ctx->gpr[3] != 0, "a thread made without the joinable flag was joined");
++        }
++    }
++    smoke_check(atomic_load(&g_churn_ran) == 300u || atomic_load(&g_fail_n) != 0, "not every churn thread ran");
++
+     /* Give the flip a display buffer to land on, then take the control
+      * register's guest address: put and get live there, and writing put is how
+      * a title tells the RSX there is work.
+diff --git a/runtime/syscalls/sys_ppu_thread.c b/runtime/syscalls/sys_ppu_thread.c
+index 583d30f..7b951b0 100644
+--- a/runtime/syscalls/sys_ppu_thread.c
++++ b/runtime/syscalls/sys_ppu_thread.c
+@@ -78,16 +78,55 @@ static void table_unlock(void)
+ #endif
+ }
+ 
+-/* Find a free slot. Returns index or -1. Must be called under lock. */
++/* Find a free slot. Returns index or -1. Must be called under lock.
++ * PPU_THREAD_SLOTS=<n> uses the first n only: a title's thread turnover
++ * against a table it would fill in minutes if slots were not given back. */
+ static int find_free_slot(void)
+ {
+-    for (int i = 0; i < PPU_THREAD_MAX; i++) {
++    static int slots = 0;
++    if (!slots) {
++        const char* e = getenv("PPU_THREAD_SLOTS");
++        slots = e ? atoi(e) : 0;
++        if (slots < 1 || slots > PPU_THREAD_MAX) slots = PPU_THREAD_MAX;
++    }
++    for (int i = 0; i < slots; i++) {
+         if (g_ppu_threads[i].state == PPU_THREAD_STATE_FREE)
+             return i;
+     }
+     return -1;
+ }
+ 
++/* The guest stacks of threads that have ended, for the next thread that asks
++ * for one of the same size. vm_stack_allocate only moves forward through its
++ * 256 MB, and a title that starts threads for every level and movie (seven
++ * megabytes of them in a quarter of an hour of Drakengard 3) would come to
++ * the end of it in a long session. Under the table lock. */
++#define PPU_STACK_POOL 128
++static struct { uint32_t addr, size; } s_stack_pool[PPU_STACK_POOL];
++static int s_stack_pool_n;
++
++static uint32_t stack_take(uint32_t size)
++{
++    for (int i = 0; i < s_stack_pool_n; i++) {
++        if (s_stack_pool[i].size != size) continue;
++        const uint32_t addr = s_stack_pool[i].addr;
++        s_stack_pool[i] = s_stack_pool[--s_stack_pool_n];
++        memset(vm_to_host(addr), 0, size);   /* as a new one is */
++        return addr;
++    }
++    return vm_stack_allocate(&g_vm_stack_alloc, size);
++}
++
++/* Once the thread is out of its guest code for good. */
++static void stack_give(ppu_thread_info* t)
++{
++    if (!t->stack_addr || s_stack_pool_n >= PPU_STACK_POOL) return;
++    s_stack_pool[s_stack_pool_n].addr = t->stack_addr;
++    s_stack_pool[s_stack_pool_n].size = t->stack_size;
++    s_stack_pool_n++;
++    t->stack_addr = 0;
++}
++
+ /* Find thread by ID. The ID is the index + 1 (0 is invalid). */
+ static ppu_thread_info* find_thread(uint64_t thread_id)
+ {
+@@ -164,21 +203,34 @@ static void* ppu_host_thread_proc(void* param)
+                 (unsigned long long)info->ctx.thread_id);
+     }
+ 
+-    /* Mark as finished */
++    /* Mark as finished -- where that is still this code's to do. A thread
++     * that ended in sys_ppu_thread_exit was stamped FINISHED there, with the
++     * status it gave, and has signalled its joiner; stamping it again here
++     * is what used to lose the slot. On Windows the joiner did not wait for
++     * this epilogue: it freed the slot, and the line that stood here then
++     * wrote FINISHED over FREE, for good. Every joined thread cost one of
++     * the PPU_THREAD_MAX slots, and a title that makes a pair of threads
++     * for each level and each movie (Drakengard 3's PhysX and Bink threads)
++     * had none left after a quarter of an hour: sys_ppu_thread_create
++     * failed, and the game waited on a thread that was never started. */
+     table_lock();
+-    info->exit_status = (int64_t)info->ctx.gpr[3];
+-
++#ifdef _WIN32
++    HANDLE done = info->finish_event;     /* read before the slot can be anyone else's */
++#endif
+     if (info->state == PPU_THREAD_STATE_DETACHED) {
+         /* Detached threads self-clean */
++        stack_give(info);
+         info->state = PPU_THREAD_STATE_FREE;
+-    } else {
++    } else if (info->state == PPU_THREAD_STATE_RUNNING) {
++        /* It returned from its entry. */
++        info->exit_status = (int64_t)info->ctx.gpr[3];
+         info->state = PPU_THREAD_STATE_FINISHED;
+     }
+     table_unlock();
+ 
+     /* Signal anyone waiting for join */
+ #ifdef _WIN32
+-    SetEvent(info->finish_event);
++    if (done) SetEvent(done);
+     return 0;
+ #else
+     pthread_mutex_lock(&info->finish_mutex);
+@@ -332,7 +384,7 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
+     uint64_t arg          = LV2_ARG_U64(ctx, 2);
+     int32_t  priority     = LV2_ARG_S32(ctx, 3);
+     uint32_t stack_size   = LV2_ARG_U32(ctx, 4);
+-    /* uint64_t flags     = LV2_ARG_U64(ctx, 5); */
++    uint64_t flags        = LV2_ARG_U64(ctx, 5);
+     uint32_t name_addr    = LV2_ARG_PTR(ctx, 6);
+ 
+     if (stack_size == 0) stack_size = VM_PPU_STACK_SIZE;
+@@ -343,6 +395,14 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
+     int slot = find_free_slot();
+     if (slot < 0) {
+         table_unlock();
++        { int used = 0, zombies = 0;
++          for (int i = 0; i < PPU_THREAD_MAX; i++) {
++              used += g_ppu_threads[i].state != PPU_THREAD_STATE_FREE;
++              zombies += g_ppu_threads[i].state == PPU_THREAD_STATE_FINISHED;
++          }
++          fprintf(stderr, "[SYS] sys_ppu_thread_create: no thread slot is free -- EAGAIN (entry=0x%08llX; %d of %d in use, "
++                          "%d of them ended and waiting for a join)\n",
++                  (unsigned long long)entry, used, PPU_THREAD_MAX, zombies); }
+         return (int64_t)(int32_t)CELL_EAGAIN;
+     }
+ 
+@@ -350,7 +410,7 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
+     memset(t, 0, sizeof(*t));
+ 
+     /* Allocate guest stack */
+-    uint32_t stack_addr = vm_stack_allocate(&g_vm_stack_alloc, stack_size);
++    uint32_t stack_addr = stack_take(stack_size);
+     if (stack_addr == 0) {
+         table_unlock();
+         return (int64_t)(int32_t)CELL_ENOMEM;
+@@ -367,9 +427,15 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
+     uint64_t thread_id = (uint64_t)(slot + 1);
+     t->ctx.thread_id = thread_id;
+ 
+-    t->state      = PPU_THREAD_STATE_RUNNING;
++    /* A thread made without SYS_PPU_THREAD_CREATE_JOINABLE (bit 0 of flags)
++     * cannot be joined and gives back what it holds when it ends: that is
++     * the rule on the console. Every thread used to be made joinable here,
++     * and one that nobody joins then kept its slot for the rest of the run:
++     * Drakengard 3 makes its SaveData, LoadData, DLCCheck and PreLoadMovie
++     * threads that way, one more slot gone with every save and every movie. */
++    t->joinable   = (flags & 1u) != 0;
++    t->state      = t->joinable ? PPU_THREAD_STATE_RUNNING : PPU_THREAD_STATE_DETACHED;
+     t->priority   = priority;
+-    t->joinable   = 1;
+     t->stack_addr = stack_addr;
+     t->stack_size = stack_size;
+     t->entry_addr = entry;
+@@ -409,9 +475,9 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
+         *out = be_id;
+     }
+ 
+-    fprintf(stderr, "[SYS] sys_ppu_thread_create tid=%llu name=\"%s\" entry=0x%08llX arg=0x%llX stack=0x%X prio=%d\n",
++    fprintf(stderr, "[SYS] sys_ppu_thread_create tid=%llu name=\"%s\" entry=0x%08llX arg=0x%llX stack=0x%X prio=%d flags=0x%llX\n",
+             (unsigned long long)thread_id, t->name, (unsigned long long)entry, (unsigned long long)arg,
+-            stack_size, priority);
++            stack_size, priority, (unsigned long long)flags);
+     /* YDKJ: dump the worker arg-object: func_000750A8 (thread body) does
+      * this=[arg+0x8], vtable=[arg+0xC], method=[vtable+0]. If this(+0x8) is null
+      * the worker dispatches its job on a null object -> construction never runs. */
+@@ -450,6 +516,7 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
+                                   (unsigned (__stdcall*)(void*))ppu_host_thread_proc, t,
+                                   _initflag, (unsigned*)&t->host_tid);
+     if (t->host_thread == NULL) {
++        stack_give(t);
+         t->state = PPU_THREAD_STATE_FREE;
+         CloseHandle(t->finish_event);
+         table_unlock();
+@@ -495,6 +562,7 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
+         }
+     }
+     if (rc != 0) {
++        stack_give(t);
+         t->state = PPU_THREAD_STATE_FREE;
+         pthread_mutex_destroy(&t->finish_mutex);
+         pthread_cond_destroy(&t->finish_cond);
+@@ -519,12 +587,20 @@ int64_t sys_ppu_thread_exit(ppu_context* ctx)
+     fprintf(stderr, "[SYS] sys_ppu_thread_exit(tid=%llu status=%llu)\n",
+             (unsigned long long)tid, (unsigned long long)status);
+ 
++    /* Whether this call unwinds to the thread procedure (below). */
++    static int allow = -1;
++    if (allow < 0) allow = getenv("PS3_NO_THREAD_EXIT_UNWIND") ? 0 : 1;
++    const int unwind = allow && s_exit_armed;
++
+     table_lock();
+     ppu_thread_info* t = find_thread(tid);
+     if (t) {
+         t->exit_status = (int64_t)status;
+         if (t->state == PPU_THREAD_STATE_DETACHED) {
+-            t->state = PPU_THREAD_STATE_FREE;
++            /* The thread procedure's epilogue frees the slot once the thread
++             * is out of it; freed here, another thread could be given the
++             * slot while this one is still on its way there. */
++            if (!unwind) t->state = PPU_THREAD_STATE_FREE;
+         } else {
+             t->state = PPU_THREAD_STATE_FINISHED;
+         }
+@@ -542,11 +618,7 @@ int64_t sys_ppu_thread_exit(ppu_context* ctx)
+ 
+     /* Hardware never returns from this. Unwind to the thread proc so the guest
+      * cannot keep running past its own exit. */
+-    {
+-        static int allow = -1;
+-        if (allow < 0) allow = getenv("PS3_NO_THREAD_EXIT_UNWIND") ? 0 : 1;
+-        if (allow && s_exit_armed) { s_exit_armed = 0; longjmp(s_exit_jmp, 1); }
+-    }
++    if (unwind) { s_exit_armed = 0; longjmp(s_exit_jmp, 1); }
+     return CELL_OK;
+ }
+ 
+@@ -607,6 +679,16 @@ int64_t sys_ppu_thread_join(ppu_context* ctx)
+ 
+     /* Clean up */
+ #ifdef _WIN32
++    /* The thread signalled from inside sys_ppu_thread_exit and is still on
++     * its way out through the thread procedure, which takes the table lock
++     * and reads this slot. Wait for the host thread itself, with the lock
++     * released, as the pthread_join below does. (Not for ever: a thread
++     * whose exit did not unwind would never end, and the epilogue no longer
++     * needs the slot left alone to get its state right.) */
++    const int out = WaitForSingleObject(t->host_thread, 10000) == WAIT_OBJECT_0;
++    if (!out)
++        fprintf(stderr, "[SYS] sys_ppu_thread_join(tid=%llu): the host thread has not ended 10 s after it signalled\n",
++                (unsigned long long)tid);
+     table_lock();
+     CloseHandle(t->host_thread);
+     CloseHandle(t->finish_event);
+@@ -633,7 +715,9 @@ int64_t sys_ppu_thread_join(ppu_context* ctx)
+     table_lock();
+     pthread_mutex_destroy(&t->finish_mutex);
+     pthread_cond_destroy(&t->finish_cond);
++    const int out = 1;
+ #endif
++    if (out) stack_give(t);   /* a thread still in its guest code keeps its stack */
+     t->state = PPU_THREAD_STATE_FREE;
+     table_unlock();
+ 
+@@ -659,8 +743,18 @@ int64_t sys_ppu_thread_detach(ppu_context* ctx)
+     if (t->state == PPU_THREAD_STATE_FINISHED) {
+         /* Already finished, free it */
+ #ifdef _WIN32
++        if (WaitForSingleObject(t->host_thread, 0) != WAIT_OBJECT_0) {
++            /* Not out of the thread procedure yet: its epilogue frees the slot. */
++            t->state = PPU_THREAD_STATE_DETACHED;
++            t->joinable = 0;
++            table_unlock();
++            return CELL_OK;
++        }
+         CloseHandle(t->host_thread);
+         CloseHandle(t->finish_event);
++        t->host_thread = NULL;
++        t->finish_event = NULL;
++        stack_give(t);
+ #else
+         pthread_detach(t->host_thread);
+         pthread_mutex_destroy(&t->finish_mutex);
+-- 
+2.47.3
+
+
+From b734724acfa7ca4e385a1a62ea75f1510c55e39f Mon Sep 17 00:00:00 2001
+From: soyjxck <soyjxck@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 21:38:36 +0100
+Subject: [PATCH 2/2] sys_ppu_thread, POSIX: three things 2c80040 left on this
+ side, and a test that sees them
+
+2c80040 gave ended threads their slots back. On POSIX three things were
+still as they had been:
+
+1. A thread made without the joinable flag starts DETACHED and frees its
+   own slot, but its host pthread was still made joinable, and nobody
+   joins or detaches it: a dead pthread keeps its stack mapped until
+   someone does (the whole 256 MB reservation with glibc, the top of it on
+   Darwin). One for every save, load and movie pre-load. It is detached
+   when it is made.
+
+2. The thread procedure's last lines locked info->finish_mutex and set
+   info->finished after the table lock was released -- on a slot that, for
+   a self-freeing thread, was FREE by then and could already be another
+   thread's. The joiner's signal is given under the table lock now (the
+   order sys_ppu_thread_exit takes the two), and nothing of the slot is
+   touched after it.
+
+3. sys_ppu_thread_detach of a thread that had FINISHED freed the slot at
+   once. A thread that ended in sys_ppu_thread_exit is FINISHED while it
+   is still unwinding to the thread procedure; a thread made in that
+   moment was given its slot, and the epilogue then took the new thread
+   for itself: marked it finished, with whatever its r3 held as the exit
+   status. The epilogue now sets proc_out as its last act under the lock,
+   and a detach that does not find it leaves the slot DETACHED for the
+   epilogue to free, as the Windows branch does on a zero wait. (proc_out
+   is set on Windows too, should that branch want it instead of the wait.)
+   That detach also gives the guest stack back, which it never did.
+
+ps3recomp_host --threads gains a turnover check: 200 threads not
+joinable, 300 joinable and detached while or after they ran, and 100
+witnesses, each made the moment a thread that ended by the syscall has
+been detached, joined, and required to come back with a status only its
+own end can produce. The race in 3 is a few microseconds wide and a test
+does not hit it by waiting (the first version of this one passed ten
+times in ten on the old code), so PPU_THREAD_END_STALL_US, new and for
+tests, holds an ending thread between its guest code and the epilogue.
+The check's VM is now a mapping that reaches the guest stack region: a
+reused stack is zeroed, so it has to exist.
+
+macOS: five runs of five pass with this; on 2c80040 with only the stall
+added, five of five fail at the first witness ("joined with status
+0x10005, not its own 0x5A5A00010005"), and without the witnesses on the
+stack count (16 MB cut new for 500 threads against 3.7 MB here). In
+Drakengard 3 with PPU_THREAD_SLOTS=24, boot to 40 s of the chapter 1
+battle: 30 threads, highest id 23, no slot refused, and the three
+non-joinable threads' stack remnants are gone from the process map.
+---
+ runtime/host/host_posix.c         | 187 +++++++++++++++++++++++++++++-
+ runtime/syscalls/sys_ppu_thread.c |  67 +++++++++--
+ runtime/syscalls/sys_ppu_thread.h |   3 +
+ 3 files changed, 247 insertions(+), 10 deletions(-)
+
+diff --git a/runtime/host/host_posix.c b/runtime/host/host_posix.c
+index 66643b9..be619ed 100644
+--- a/runtime/host/host_posix.c
++++ b/runtime/host/host_posix.c
+@@ -74,6 +74,7 @@
+ 
+ #include <ps3emu/guest_call.h>
+ #include <pthread.h>
++#include <sys/mman.h>
+ #include <stdint.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -1075,6 +1076,173 @@ static void thread_probe_entry(ppu_context* ctx)
+     g_thread_ran = 1;
+ }
+ 
++/* ---- thread turnover -------------------------------------------------------
++ * A title makes and ends threads all the time: a pair for every level and
++ * movie, one for every save. Each has to give its slot back (there are 64),
++ * whichever way it ended and whoever let go of it:
++ *
++ *   - made without the joinable flag: nobody joins it, it frees itself;
++ *   - made joinable and detached while it runs: the same from then on;
++ *   - made joinable, ended, and detached afterwards -- by returning from its
++ *     entry, or by sys_ppu_thread_exit, in which case it is still unwinding
++ *     to the thread procedure when the detach arrives and must not have its
++ *     slot handed to another thread under it.
++ *
++ * Several hundred of each, then: every one ran, the table is back where it
++ * was, their guest stacks were used again rather than new ones cut for each,
++ * and a thread can still be made and joined.
++ *
++ * The last case is a race a few microseconds wide, which a test does not hit
++ * by waiting for it (this one passed ten times in ten on code that had the
++ * fault). PPU_THREAD_END_STALL_US holds every ending thread for a moment
++ * between its guest code and the thread procedure's epilogue, so the detach
++ * and the next thread's creation always land in it. */
++static int g_churn_ran;   /* entries reached (atomic) */
++
++#define CHURN_WITNESS 0x10000u   /* in the argument: a witness (below) */
++/* The status a witness ends with: not its argument, which is what r3 holds
++ * while it runs and so what a thread marked finished in its place reports. */
++#define CHURN_WITNESS_STATUS(arg) ((uint64_t)(arg) ^ 0x5A5A00000000ull)
++
++static void thread_churn_entry(ppu_context* ctx)
++{
++    __atomic_add_fetch(&g_churn_ran, 1, __ATOMIC_RELAXED);
++    if (ctx->gpr[3] & CHURN_WITNESS) {
++        /* Still running when the thread detached just before it comes
++         * through its epilogue; then it ends with a status of its own. */
++        const struct timespec ts = { 0, 5000000 };
++        nanosleep(&ts, NULL);
++        ctx->gpr[3] = CHURN_WITNESS_STATUS(ctx->gpr[3]);
++        sys_ppu_thread_exit(ctx);
++    }
++    if (ctx->gpr[3] & 1) {          /* odd arguments end by the syscall, as a title's threads do */
++        ctx->gpr[3] = 0;
++        sys_ppu_thread_exit(ctx);   /* unwinds to the thread procedure: no return */
++    }
++}
++
++static int churn_slots_used(void)
++{
++    int n = 0;
++    for (int i = 0; i < PPU_THREAD_MAX; i++) n += g_ppu_threads[i].state != PPU_THREAD_STATE_FREE;
++    return n;
++}
++
++static void churn_nap(void)
++{
++    const struct timespec ts = { 0, 200000 };   /* 0.2 ms */
++    nanosleep(&ts, NULL);
++}
++
++/* 0 and the new thread's id; nonzero if it could not be made. */
++static int churn_create(ppu_context* ctx, u32 tid_out, uint64_t arg, int joinable, uint64_t* tid)
++{
++    for (int i = 0; i < 25000 && churn_slots_used() > PPU_THREAD_MAX - 16; i++) churn_nap();   /* room first */
++    ctx->gpr[3] = tid_out;
++    ctx->gpr[4] = 0x10000;
++    ctx->gpr[5] = arg;
++    ctx->gpr[6] = 1000;
++    ctx->gpr[7] = 0x10000;
++    ctx->gpr[8] = joinable ? 1 : 0;
++    ctx->gpr[9] = 0;
++    if (sys_ppu_thread_create(ctx) != 0) return 1;
++    const uint8_t* p = vm_base + tid_out;
++    *tid = 0;
++    for (int i = 0; i < 8; i++) *tid = (*tid << 8) | p[i];
++    return 0;
++}
++
++static int run_thread_churn(ppu_context* ctx, u32 tid_out)
++{
++    enum { NOT_JOINABLE = 200, DETACHED_LATER = 300 };
++    const int base = churn_slots_used();
++    const uint32_t stacks_before = g_vm_stack_alloc.next_addr;
++    int made = 0, witnesses = 0;
++    uint64_t tid = 0;
++    g_ppu_thread_entry_trampoline = thread_churn_entry;
++    g_churn_ran = 0;
++
++    for (int i = 0; i < NOT_JOINABLE; i++, made++)
++        if (churn_create(ctx, tid_out, (uint64_t)i, 0, &tid)) {
++            fprintf(stderr, "[host] turnover: thread %d (not joinable) could not be made\n", made);
++            return 1;
++        }
++    for (int i = 0; i < DETACHED_LATER; i++, made++) {
++        if (churn_create(ctx, tid_out, (uint64_t)i, 1, &tid)) {
++            fprintf(stderr, "[host] turnover: thread %d (joinable) could not be made\n", made);
++            return 1;
++        }
++        if (i % 3) {   /* two in three: once it has ended, and then at once */
++            const ppu_thread_info* t = &g_ppu_threads[tid - 1];
++            for (int k = 0; k < 20000000 && t->state != PPU_THREAD_STATE_FINISHED; k++) {
++                if ((k & 0xFFFF) == 0xFFFF) churn_nap();
++            }
++        }
++        ctx->gpr[3] = tid;
++        const int64_t rc = sys_ppu_thread_detach(ctx);
++        if (rc != 0) {
++            fprintf(stderr, "[host] turnover: sys_ppu_thread_detach(tid=%llu) failed: 0x%llX\n",
++                    (unsigned long long)tid, (unsigned long long)rc);
++            return 1;
++        }
++        if ((i % 3) && (i & 1)) {
++            /* That thread ended in sys_ppu_thread_exit and is still short of
++             * its epilogue. A witness made now must not be given its slot:
++             * the epilogue would take the witness for itself, mark it
++             * finished, and the join below would come back early with a
++             * status the witness never gave. */
++            const uint64_t warg = CHURN_WITNESS | (uint64_t)i, want = CHURN_WITNESS_STATUS(warg);
++            uint64_t wtid = 0;
++            if (churn_create(ctx, tid_out, warg, 1, &wtid)) {
++                fprintf(stderr, "[host] turnover: witness %d could not be made\n", i);
++                return 1;
++            }
++            made++; witnesses++;
++            const u32 status_out = tid_out;   /* the id has been read: the same 8 bytes will do */
++            ctx->gpr[3] = wtid;
++            ctx->gpr[4] = status_out;
++            if (sys_ppu_thread_join(ctx) != 0) {
++                fprintf(stderr, "[host] turnover: witness %d (tid=%llu) could not be joined\n", i, (unsigned long long)wtid);
++                return 1;
++            }
++            uint64_t got = 0;
++            for (int b = 0; b < 8; b++) got = (got << 8) | vm_base[status_out + b];
++            if (got != want) {
++                printf("[host] thread turnover: witness %d joined with status 0x%llX, not its own 0x%llX: "
++                       "its slot was another thread's to end FAILED\n",
++                       i, (unsigned long long)got, (unsigned long long)want);
++                return 1;
++            }
++        }
++    }
++
++    /* They end on their own time. */
++    for (int i = 0; i < 50000; i++) {
++        if (__atomic_load_n(&g_churn_ran, __ATOMIC_RELAXED) == made && churn_slots_used() == base) break;
++        churn_nap();
++    }
++    const int ran = __atomic_load_n(&g_churn_ran, __ATOMIC_RELAXED), used = churn_slots_used();
++    printf("[host] thread turnover: %d made (%d not joinable, %d detached after or while they ran, %d witnesses "
++           "joined with their own status), %d ran, %d slots in use against %d before %s\n",
++           made, NOT_JOINABLE, DETACHED_LATER, witnesses, ran, used, base, ran == made && used == base ? "OK" : "FAILED");
++    if (ran != made || used != base) return 1;
++
++    /* At most a table's worth of stacks at once, so no more than that cut
++     * new: the rest were ended threads' stacks, taken again. */
++    const uint32_t cut = g_vm_stack_alloc.next_addr - stacks_before;
++    const uint32_t most = (uint32_t)PPU_THREAD_MAX * (0x10000u + 0x10000u);   /* a stack and, at most, a 64 KB guard page */
++    printf("[host] thread turnover: %u KB of guest stack cut new for %d threads (a full table's worth is %u KB) %s\n",
++           cut >> 10, made, most >> 10, cut <= most ? "OK" : "FAILED");
++    if (cut > most) return 1;
++
++    /* And the table still works. */
++    if (churn_create(ctx, tid_out, 0, 1, &tid)) { fprintf(stderr, "[host] turnover: no thread after it\n"); return 1; }
++    ctx->gpr[3] = tid;
++    ctx->gpr[4] = 0;
++    if (sys_ppu_thread_join(ctx) != 0) { fprintf(stderr, "[host] turnover: the thread after it could not be joined\n"); return 1; }
++    return churn_slots_used() == base ? 0 : 1;
++}
++
+ /* A guest thread is worth starting only if its host stack can hold a deep
+  * recompiled call chain. 64 MB is well under the 256 MB reserved and well
+  * over any default, so it separates "the reservation was applied" from "the
+@@ -1084,6 +1252,7 @@ static void thread_probe_entry(ppu_context* ctx)
+ static int run_thread_check(void)
+ {
+     printf("[host] --threads: guest PPU thread host stack\n");
++    setenv("PPU_THREAD_END_STALL_US", "1500", 0);   /* see the turnover check; read at the first thread's end */
+     vm_stack_alloc_init(&g_vm_stack_alloc);
+     g_ppu_thread_entry_trampoline = thread_probe_entry;
+     ppu_thread_register_main();
+@@ -1124,6 +1293,7 @@ static int run_thread_check(void)
+         fprintf(stderr, "[host] the guest thread never ran\n");
+         return 1;
+     }
++    if (run_thread_churn(&ctx, tid_out) != 0) return 7;
+     if (g_reported_stack == 0) {
+         printf("[host] host stack size not queryable here -- thread ran, size unchecked\n");
+         return 0;
+@@ -1268,10 +1438,21 @@ int main(int argc, char** argv)
+         else if (strcmp(argv[i], "--draw") == 0)   do_draw = 1;
+         /* --threads: no graphics at all, just the lv2 thread path. */
+         else if (strcmp(argv[i], "--threads") == 0) {
+-            vm_base = host_vm_alloc();
+-            if (!vm_base) { fprintf(stderr, "[host] guest VM alloc failed\n"); return 1; }
++            /* Guest stacks are at VM_STACK_BASE, far above what the other
++             * checks' VM holds, and a thread's stack is real memory: a reused
++             * one is zeroed for its next thread. One lazily committed mapping
++             * that reaches past the stacks the turnover check can have. */
++            const size_t bytes = (size_t)VM_STACK_BASE + (64u << 20);
++            void* m = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON
++#ifdef MAP_NORESERVE
++                           | MAP_NORESERVE
++#endif
++                           , -1, 0);
++            if (m == MAP_FAILED) { fprintf(stderr, "[host] guest VM alloc failed\n"); return 1; }
++            vm_base = (uint8_t*)m;
++            ppu_vm_size = VM_SIZE;
+             int trc = run_thread_check();
+-            free(vm_base);
++            munmap(m, bytes);
+             return trc;
+         }
+         /* --audio-pad: no graphics either, just the SDL2 backends. */
+diff --git a/runtime/syscalls/sys_ppu_thread.c b/runtime/syscalls/sys_ppu_thread.c
+index 7b951b0..580caf0 100644
+--- a/runtime/syscalls/sys_ppu_thread.c
++++ b/runtime/syscalls/sys_ppu_thread.c
+@@ -213,6 +213,22 @@ static void* ppu_host_thread_proc(void* param)
+      * for each level and each movie (Drakengard 3's PhysX and Bink threads)
+      * had none left after a quarter of an hour: sys_ppu_thread_create
+      * failed, and the game waited on a thread that was never started. */
++    /* PPU_THREAD_END_STALL_US=<n>, for a test: that long between the end of
++     * the guest code and this epilogue. A thread that ended in
++     * sys_ppu_thread_exit has told its joiner it is finished by now and has
++     * yet to come through here; the stall makes that moment long enough to
++     * act in (the turnover check of runtime/host/host_posix.c detaches the
++     * thread in it and makes another). */
++    { static int stall = -1;
++      if (stall < 0) { const char* e = getenv("PPU_THREAD_END_STALL_US"); stall = e ? atoi(e) : 0; }
++      if (stall > 0) {
++#ifdef _WIN32
++          Sleep((DWORD)((stall + 999) / 1000));
++#else
++          struct timespec ts = { stall / 1000000, (long)(stall % 1000000) * 1000L };
++          nanosleep(&ts, NULL);
++#endif
++      } }
+     table_lock();
+ #ifdef _WIN32
+     HANDLE done = info->finish_event;     /* read before the slot can be anyone else's */
+@@ -226,17 +242,26 @@ static void* ppu_host_thread_proc(void* param)
+         info->exit_status = (int64_t)info->ctx.gpr[3];
+         info->state = PPU_THREAD_STATE_FINISHED;
+     }
++    /* From here this thread does not use the slot again. A slot it has just
++     * freed can be another thread's the moment the lock is released, so
++     * whatever a joiner needs is done now, under the lock (the same order as
++     * sys_ppu_thread_exit takes the two; the joiner holds only the second). */
++    if (info->state != PPU_THREAD_STATE_FREE) {
++#ifndef _WIN32
++        pthread_mutex_lock(&info->finish_mutex);
++        info->finished = 1;
++        pthread_cond_signal(&info->finish_cond);
++        pthread_mutex_unlock(&info->finish_mutex);
++#endif
++        info->proc_out = 1;
++    }
+     table_unlock();
+ 
+-    /* Signal anyone waiting for join */
+ #ifdef _WIN32
++    /* Signal anyone waiting for join */
+     if (done) SetEvent(done);
+     return 0;
+ #else
+-    pthread_mutex_lock(&info->finish_mutex);
+-    info->finished = 1;
+-    pthread_cond_signal(&info->finish_cond);
+-    pthread_mutex_unlock(&info->finish_mutex);
+     return NULL;
+ #endif
+ }
+@@ -569,6 +594,16 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
+         table_unlock();
+         return (int64_t)(int32_t)CELL_EAGAIN;
+     }
++    /* Nobody will join a thread made without the joinable flag, so nobody
++     * would ever reap its host thread: a dead pthread keeps its stack mapped
++     * (all 256 MB of the reservation with glibc, the top of it on Darwin)
++     * until it is joined or detached. Detached now, it goes when it ends.
++     * The table lock is held, so the thread cannot have given the slot back
++     * yet. */
++    if (!t->joinable) {
++        pthread_detach(t->host_thread);
++        t->host_detached = 1;
++    }
+ #endif
+ 
+     table_unlock();
+@@ -756,16 +791,34 @@ int64_t sys_ppu_thread_detach(ppu_context* ctx)
+         t->finish_event = NULL;
+         stack_give(t);
+ #else
+-        pthread_detach(t->host_thread);
++        if (!t->host_detached) {
++            pthread_detach(t->host_thread);
++            t->host_detached = 1;
++        }
++        if (!t->proc_out) {
++            /* It ended in sys_ppu_thread_exit and is still on its way out
++             * through the thread procedure, which will look at this slot:
++             * freed now, the slot could be another thread's by then, and the
++             * epilogue would end that one. Left DETACHED, the epilogue frees
++             * it (as the Windows branch does on a zero wait). */
++            t->state = PPU_THREAD_STATE_DETACHED;
++            t->joinable = 0;
++            table_unlock();
++            return CELL_OK;
++        }
+         pthread_mutex_destroy(&t->finish_mutex);
+         pthread_cond_destroy(&t->finish_cond);
++        stack_give(t);
+ #endif
+         t->state = PPU_THREAD_STATE_FREE;
+     } else {
+         t->state = PPU_THREAD_STATE_DETACHED;
+         t->joinable = 0;
+ #ifndef _WIN32
+-        pthread_detach(t->host_thread);
++        if (!t->host_detached) {
++            pthread_detach(t->host_thread);
++            t->host_detached = 1;
++        }
+ #endif
+     }
+ 
+diff --git a/runtime/syscalls/sys_ppu_thread.h b/runtime/syscalls/sys_ppu_thread.h
+index a297bf5..77f5467 100644
+--- a/runtime/syscalls/sys_ppu_thread.h
++++ b/runtime/syscalls/sys_ppu_thread.h
+@@ -52,12 +52,15 @@ typedef struct ppu_thread_info {
+     uint64_t     entry_addr;   /* guest entry point */
+     uint64_t     tls_addr;
+     uint32_t     prof_pc;      /* last syscall/HLE callsite (sampling profiler) */
++    int          proc_out;     /* the host thread is past its last use of this slot
++                                * (set by the thread procedure, under the table lock) */
+ 
+ #ifdef _WIN32
+     HANDLE       host_thread;
+     DWORD        host_tid;
+ #else
+     pthread_t    host_thread;
++    int          host_detached;   /* pthread_detach has been called on it: once only */
+ #endif
+ 
+     /* For join synchronization */
+-- 
+2.47.3
+

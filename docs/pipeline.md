@@ -161,7 +161,7 @@ Then `tools/make_spu_overlays.py --spu src/spu_gen --ps3recomp external/ps3recom
 rebuilds two MultiStream DSP banks at the same LS 0x37000: i3dl2 + parametric EQ
 (0x2E90 bytes) and the filter (0x500 bytes). It writes `spu_ovl_msdsp_37000/` and
 `spu_ovl_msfilter_37000/` under the output directory, with separate image ids and
-content signatures (patch 0023's `spu_overlay_register_sig_region`). The filter
+content signatures (patch 0021's `spu_overlay_register_sig_region`). The filter
 bank is loaded when MP3 streams start; omitting it kills the mixer at LS 0x37010.
 The step must follow `build_spu_workloads.py`, which deletes `src/spu_gen`.
 

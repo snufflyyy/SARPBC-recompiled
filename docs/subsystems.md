@@ -53,8 +53,8 @@ work. Update the **Status** line of a section when you change it.
   during an in-flight walk is dropped; libs/spurs). Without `SPU_INTERP_UNLIFTED`
   (after T007), PhysX stalls first (`cellSpursQueuePopBody`, T025): the FIFO goes idle at
   get==put≈`0x6FF0C` and never gets that far.
-  *Update 2026-10-19 (T024, second session):* the `0xD494C` park was cause 2; with 0024
-  (chain re-walk) and the relift (0028) no park goes unpatched. Park addresses move from
+  *Update 2026-10-19 (T024, second session):* the `0xD494C` park was cause 2; with 0022
+  (chain re-walk) and the relift (0026) no park goes unpatched. Park addresses move from
   run to run, so do not key anything on them.
 - **Park grace: how long parks really take (T024, 2026-10-19).** `GCM_PARK_LOG=1` times
   every release. Flip-handler (JUMP) parks: 4-40 ms, up to 192 ms when the host is loaded
@@ -80,7 +80,7 @@ work. Update the **Status** line of a section when you change it.
   `GCM_INTR_THREAD=1`. Caveat: guest callbacks still share one stack at `0xCFFE0000` on every
   thread (T026), so the interrupt thread's handlers can collide with another thread's
   callback; `GCM_INTR_THREAD=0` turns it off.
-- **PrepareFlip returns the buffer id (T024, patch 0034).** The user handler
+- **PrepareFlip returns the buffer id (T024, patch 0032).** The user handler
   `func_000DC390` takes the flip id from the low 16 bits of the 0xEB00 user command's data
   (stored at `0x0123CDB0`; `0xFF` = none) and calls `cellGcmSetFlipImmediate` with it. That
   data is the return value of `cellGcmSetPrepareFlip`, which the RHI writes into its command
@@ -95,14 +95,14 @@ work. Update the **Status** line of a section when you change it.
   `sys_timer_usleep` while it is empty), converts it with `func_00F8C340` and writes
   `JUMP (park+4)` there. So each delivered flip releases at most one park, and extra calls
   with nothing pending are harmless.
-- **Ring recycle (T024, patch 0035).** The RHI's command buffer is ctx `0x0F800000`,
+- **Ring recycle (T024, patch 0033).** The RHI's command buffer is ctx `0x0F800000`,
   `begin 0x40000000`, `end 0x402FF000` (3 MB), with the runtime's buffer-full callback (OPD
   `0x0F800010`). The game fills it to exactly `end` once per lap, then calls that callback
   (`cellGcm_fifo_recycle`). The drain thread took `current == end` for an overrun and recycled
   first ("recycled the title's own ring"), racing the callback; one boot (`20261019-110645`,
-  intr thread off) then never submitted again and stayed on "Loading...". Patch 0036: no
+  intr thread off) then never submitted again and stayed on "Loading...". Patch 0034: no
   drain-side recycle while the callback is the runtime's (boot `20261019-111716`: 0 such
-  recycles, PROGRESSING). Before that, patch 0035: the drain-side recycle teleported `get`
+  recycles, PROGRESSING). Before that, patch 0033: the drain-side recycle teleported `get`
   to `begin`, dropping whatever the walker had not read yet: when the walker was parked in
   the tail that was ~31 KB including the frame's fence (boot `20261019-101911`: stuck at 50 s).
   Now `get` is left alone while it is still in the tail; the log says "walker drains the tail
@@ -140,7 +140,7 @@ How it was measured (perf is denied in this container):
 - boot_check redirects stderr, which turns verbose logging on (`ps3_log.h`). Measure with
   `PS3_VERBOSE=0` (verbose costs ~5% here).
 
-Changes (patches 0039 by pi, 0040):
+Changes (patches 0037 by pi, 0038):
 - T024: present reads back a 1x1 centre texel instead of the whole frame, unless a dump is due.
 - T040: engine draws record into one command buffer (per-draw slices of per-batch arenas and
   per-draw descriptor sets). Anything else that touches the GPU flushes the batch first. Vertex
@@ -154,7 +154,7 @@ Numbers (01.09, `PS3_VERBOSE=0`, boot lock, this machine):
 
 | build | screen | fps |
 |---|---|---|
-| main after 0038 (pi's baseline, dumps on, verbose) | main menu | 19.8 |
+| main after 0036 (pi's baseline, dumps on, verbose) | main menu | 19.8 |
 | before T040 | Choose Profile | ~23 |
 | + batching | Choose Profile | 27.2 |
 | + no present readback, `PS3_VERBOSE=0` | Choose Profile | ~30 |
@@ -202,7 +202,7 @@ RSX_ENGINE_PASS_DUMP_DRAWS=1`, 105 s boot with
 - `sink_clear` in `libs/video/rsx_draw_engine.c` mapped `zs == 0` to depth 1.0
   (upstream `4df0909`, still in v0.16.0). With depth 1.0 and GEQUAL nothing
   passes: the depth buffer stayed uniformly 1.0 and the scene black.
-- Patch `0046-zstencil-clear-zero`: a zero clear value clears to 0. The nv40
+- Patch `0044-zstencil-clear-zero`: a zero clear value clears to 0. The nv40
   reset `0xFFFFFF00` that `rsx_dispatch_init` seeds still gives 1.0 to titles
   that never set the register. After it the pre-pass writes depth (0..0.017)
   and the arena draws (stadium, floor, walls). The D3D12 path,
@@ -214,7 +214,7 @@ next section.
 ### Arena textures: NV0039 copies on subchannel 1 (T045, 2026-10-20)
 
 After the depth fix the arena drew, but the floor grate, the city windows and
-the HUD sampled noise. `RSX_ENGINE_PASS_DUMP_TEX=1` (patch 0047) dumped every
+the HUD sampled noise. `RSX_ENGINE_PASS_DUMP_TEX=1` (patch 0045) dumped every
 decoded texture: the DXT ones were right, but the swizzled A8R8G8B8/B8 ones in
 local memory (HUD atlas `0x03B38B80` 1024x1024 f85, `0x008D8600` 512x512 f81,
 the 64x64 icons) were blocks of *other* textures in Morton-shaped staircases:
@@ -227,7 +227,7 @@ the words landed on NV4097 `0x030C..0x0328` (blend enable/factors/colour mask).
 The draw engine also got NV3062 (subchannel 3) and NV3089 (6) methods with the
 subchannel masked off, i.e. on the alpha-test and blend registers.
 
-Patch `0048-nv0039-copy-engine`: NV0039 copies (local/main, signed pitches,
+Patch `0046-nv0039-copy-engine`: NV0039 copies (local/main, signed pitches,
 element increments; the report area `0x66626660` as a source, which the game
 uses to copy 32-304 bytes of reports to main IO `0x300000`); subchannel 1 is
 NV0039 until it carries a method NV0039 lacks; only 3D-routed methods reach the
@@ -256,7 +256,7 @@ synthetic tests) computed `reference >= depth`: any floor fragment in front of
 the far plane failed, so the whole frustum was dark. RSX compares the other way
 round, `depth >= reference` (A/B in the same kickoff scene with a temporary
 switch: the square goes, nothing else changes). Patch
-`0049-shadow-compare-direction`. If another title's shadows invert after this,
+`0047-shadow-compare-direction`. If another title's shadows invert after this,
 suspect this patch first.
 
 ## Audio
@@ -319,7 +319,7 @@ suspect this patch first.
   Update 2026-10-20: real 44.1 kHz stereo streams decode, and the filter-bank repair below
   lets the mixer keep running. `SARPBC_MP3_TRACE=<n>` logs the first n calls;
   `SARPBC_MP3_NATIVE=0` turns it off.
-- **cellAudio on Linux (patch `0023-audio-pacing-devflash-sig-region`):** the POSIX mixing
+- **cellAudio on Linux (patch `0021-audio-pacing-devflash-sig-region`):** the POSIX mixing
   loop now paces to the SDL queue (it used fixed 2/5 ms sleeps), and
   `AUDIO_RATE=1` / `AUDIO_PEAK=1` / `AUDIO_WAV=<file>` work on Linux. With PipeWire
   (`SDL_AUDIODRIVER=pulseaudio`): `[audio-rate] 187.5 blocks/s (real time 187.5), silent
@@ -403,10 +403,10 @@ when it does not.
   to 0/1, switched on and off per frame for intensity, and the large motor to 0-255.
   `cellKbRead`/`cellMouseGetDataList` have **no callers**, and cellKbInit/cellMouseInit
   are not imported, so keyboard play must go through the virtual pad.
-- **ps3recomp patches:** `0016-dod3-cellpad-sdl2-port.patch` contains Drakengard 3's
+- **ps3recomp patches:** `0014-dod3-cellpad-sdl2-port.patch` contains Drakengard 3's
   13 libs/input commits (soyjxck, MIT, authors kept): an SDL pad thread, pads by instance
   id, rumble held, `cellPad_set_host_input`, host kind, PAD_NO_HOST.
-  `0017-cellpad-racing-fixes.patch` adds our fixes: a half-pulled trigger no longer
+  `0015-cellpad-racing-fixes.patch` adds our fixes: a half-pulled trigger no longer
   reads as 255 in press mode, the small motor is on/off (0xFFFF), an empty SDL port's
   sticks are 128 (was 0 = held up-left), `PAD_TRIGGERS="l2,r2[,from,until]"`, and
   `PAD_TRACE=1` (logs what reached the guest buffer). Test:
@@ -430,7 +430,7 @@ when it does not.
   by **scancode** (a physical key position, so WASD stays WASD on AZERTY),
   `SDL_GetMouseState` for the buttons, and the wheel counted in the event filter. It
   only acts while an SDL window has keyboard focus. It registers through
-  `cellPad_set_host_input` (patch 0016) and is merged with any real pad. The run
+  `cellPad_set_host_input` (patch 0014) and is merged with any real pad. The run
   log prints `[keyboard] keyboard and mouse on pad port 0`. `SARPBC_KEYBOARD=0` turns
   it off, and `SARPBC_KBM_LOG=1` logs every change. Not built on Windows or macOS (no
   SDL window there), where ps3recomp's own keyboard fallback stays. Mouse look (dod3
@@ -489,7 +489,7 @@ controls screen.
     headless (no xdotool/ydotool here), so held keys still need a manual check in a
     windowed run (`SARPBC_KBM_LOG=1`). boot_check runs with `PS3RECOMP_VK_WINDOW=0`,
     so SDL video is never started and the keyboard reports nothing there.
-  - Rumble: `SetActDirect` goes to `SDL_GameControllerRumble` (patches 0016/0017; the
+  - Rumble: `SetActDirect` goes to `SDL_GameControllerRumble` (patches 0014/0015; the
     small motor is on/off at 0xFFFF, the large one 0-255 scaled). It is covered by the
     patch's test only. The game has not rumbled in a run yet because it does not reach
     gameplay.
@@ -514,13 +514,13 @@ controls screen.
   `find_spu_functions.py` never seeded it. 9 of the 13 sectioned images had unseeded
   `.ctors`/`.dtors` entries (e.g. 0x31D8/0x31C8 in several PhysX images); the two
   section-stripped images (`d08b1ad8`, `e33837bb`) have empty lists (`-1, 0, -1, 0` at the
-  start of their data segment). Patch `0028-spu-seed-ctors-dtors` seeds every
+  start of their data segment). Patch `0026-spu-seed-ctors-dtors` seeds every
   `.ctors/.dtors/.init_array/.fini_array` word, and for stripped images finds lists by their
   `-1 ... 0` framing. A relift of 01.09 with it: 15/15 registered, complete, every ctor/dtor
-  entry lifted (checked against functions.json). Merged as patch 0028; **verified at run time**
+  entry lifted (checked against functions.json). Merged as patch 0026; **verified at run time**
   on main 171c84d (01.09 relifted, no `SPU_INTERP_UNLIFTED`): 0 "unlifted" lines in a 60 s
   boot_check. Unit test: `tools/test_spu_find_functions_ctors.py` (patch
-  `0031-spu-ctor-dtor-seed-test`). PhysX still logs `HALT-ASSERT heqi pc=0x24884
+  `0029-spu-ctor-dtor-seed-test`). PhysX still logs `HALT-ASSERT heqi pc=0x24884
   img=363824547` (~50 per 60 s boot), a separate problem.
 - **SPU speed on x86 (T025, 2026-10-19).** Measure with `SPURS_EF_STATS=1
   SPU_DMA_RANGE=58000000-58200000` (flag `0x01372000` waits/s = mixer cycles; PUT B/s into the
@@ -533,7 +533,7 @@ controls screen.
     (out-of-line) `spu_shufb` was the byte loop. CMakeLists now adds
     `-march=${SARPBC_SPU_X86_ARCH}` (default `x86-64-v2`, `-msse4.2` under clang-cl, probed,
     x86 only, empty disables) to `SPU_SOURCES` only; the PPU lift is untouched (no rebuild).
-  - `spu_fa/fs/fm/fma/fms/fnms` got an SSE2 fast path (patch `0032-spu-sse2-float-helpers`, a
+  - `spu_fa/fs/fm/fma/fms/fnms` got an SSE2 fast path (patch `0030-spu-sse2-float-helpers`, a
     port of upstream's NEON one; SSE2 is baseline x86-64, no flag needed).
     `runtime/spu/tests/test_spu_float_sse.c` checks it bit for bit against the exact path
     (clang and gcc, -O2 / x86-64-v2 / x86-64-v3); fma+fm pair 12 ns vs 33 ns scalar.
@@ -553,7 +553,7 @@ controls screen.
   handles only 32-byte (Edge zlib) queues and refuses others loudly.
   Request layout: in/out EA, in/out size, counter EA|inflate bit, flag EA, flag bits,
   skips. This title passes counter 0 and flag `0x01DC8E00` bits `0x0001`.
-- **SPUJOBS.SPRX loads (T002, 2026-10-18).** ps3recomp patch `0004-sys-prx-load-module`
+- **SPUJOBS.SPRX loads (T002, 2026-10-18).** ps3recomp patch `0003-sys-prx-load-module`
   adds general `sys_prx_load_module` / `_on_memcontainer` / `start` / `stop` /
   `unload` (`runtime/prx/prx_runtime.c` + handlers in `runtime/ppu/ppu_sysprx.cpp`):
   - The guest file is an NPDRM SELF the runtime cannot decrypt, so the loader looks
@@ -601,7 +601,7 @@ controls screen.
     returned NOT_INITIALIZED (`0x80410701`, nothing calls its fake `cellOvisInit`), the
     game asked the allocator for ~2 GB and printed "Error allocating memory for overlay
     table: 0 0"; `cellOvisInitializeOverlayTable` (`0xA876C911`) was not registered at all.
-    Patch `0007-cellovis-overlay-table.patch` implements both real functions: size = highest
+    Patch `0006-cellovis-overlay-table.patch` implements both real functions: size = highest
     overlay `p_paddr + p_memsz` rounded to 128 (`0x77480` for image 7), INVAL for an ELF with
     no overlay; init zeroes the table and copies each overlay to `t + p_paddr`. Overlay =
     PT_LOAD with `p_paddr` >= 256 KiB and != `p_vaddr`. Boot now logs
@@ -619,7 +619,7 @@ controls screen.
     `0x20338` brings SmallIsland back and resets the allocator to `0x164F0..0x1D4F0`
     (the free tail of the code overlay). `.text` then calls straight into it (`brsl 0x9170`
     at `0x236CC`, `0x23DC4`).
-  - **Lifting it** (patch `0008-spu-overlay-lift.patch`): only one overlay holds code, so the
+  - **Lifting it** (patch `0007-spu-overlay-lift.patch`): only one overlay holds code, so the
     pipeline lifts `.text` and SmallIsland together as one image (one LS image spanning both,
     each at its own address; 1,463 functions, 495 in the overlay) and registers it by full-ELF
     fingerprint `39119073A3F69512`. Same-address code overlays would need separate lifts and
@@ -634,7 +634,7 @@ controls screen.
 - SPURS features used: tasksets, tasks, job chains, event flags, job guards, **Queue
   and LFQueue**. Drakengard 3 lifted Sony's libsre for Queue/LFQueue; we cannot ship
   firmware, so T019 wrote the PPU side from the task-side code instead.
-- **SPURS Queue (T019, patch `0015-spurs-queue-ppu.patch`, `libs/spurs/cellSpursQueue.c`).**
+- **SPURS Queue (T019, patch `0013-spurs-queue-ppu.patch`, `libs/spurs/cellSpursQueue.c`).**
   PhysX tasks report to the PPU through SPU2PPU queues (task helper "sendResponseToPPUAndExit":
   non-blocking push retried on AGAIN/BUSY, then push end). Line layout, derived from the
   task-side push in the PhysX images (image `7bde2a3f`: begin LS `0x6990`, end `0x6E88`,
@@ -811,7 +811,7 @@ range cleanup, reverse-order removal, and reuse of the same addresses.
   context). Count these with
   `grep -o "async image=[0-9-]* RETURNED" run.log | sort | uniq -c` against
   `grep -o "dispatch HIT (async) fp=0x[0-9A-F]*" run.log | sort | uniq -c`.
-- **Fix** (patch `0038-spurs-task-runs-once`): CreateTask marks the task running
+- **Fix** (patch `0036-spurs-task-runs-once`): CreateTask marks the task running
   (`spu_taskset_mark`, now exported) before `add_task` publishes it, and unmarks it if no thread
   was started. Both dispatch sites pass the task explicitly (`spu_workload_dispatch_task_async`).
 - **Numbers.** 01.09, 90 s `boot_check`, same machine (16 threads, RTX 2070 SUPER), boot lock,
@@ -829,7 +829,7 @@ range cleanup, reverse-order removal, and reuse of the same addresses.
 - **Not needed now:** the ~6-thread SPURS worker pool. Host threads stay at ~20, because tasks
   return. Revisit it only if a title keeps more than a handful of tasks running at once.
 - Unrelated, found here: `tools/test_spurs_scheduler.py` no longer links. Its copy of
-  `spurs_line_committed` calls `spurs_queue_line_committed`, which patch 0015 added
+  `spurs_line_committed` calls `spurs_queue_line_committed`, which patch 0013 added
   to libs/spurs/cellSpursQueue.c, and the test does not compile that file. All 9 ctest tests
   (`-DPS3RECOMP_BUILD_TESTS=ON`) and `tools/test_spu_context_registries.py` pass.
 
