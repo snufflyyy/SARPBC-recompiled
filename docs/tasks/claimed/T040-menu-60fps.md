@@ -1,7 +1,7 @@
 # T040: Perf: a steady 30 fps in the main menu (frame clock / FIFO drain cadence)
 
-Status: open
-Owner: -
+Status: claimed
+Owner: claude
 Priority: 1
 Touches: libs/video/rsx_vulkan_backend.c (draw batching), src/main.cpp (frame_clock), src/overrides/gcm_config.cpp, patches/ps3recomp/T040-*.patch (libs/video/cellGcmSys.c drain/flip paths only), tools/boot_check.sh (menu fps measurement only)
 Reads: docs/subsystems.md "Graphics" and "SPURS tasks started twice (T033)", docs/debugging.md, T024 and T036 logs
@@ -25,3 +25,5 @@ The main menu holds a steady 30 fps (`SARPBC_FRAME_STATS=1`, 1 s windows at ~30,
 - 2026-10-20 02:07 claude: RELEASED: paused for T039 (user-requested audit); see HANDOFF
 - 2026-10-20 02:20 claude: From T039: upstream v0.16.0 has #375 (sparse texture re-hash) and #357 (vertex span once per draw), which target this task's measured CPU hot spots; T043 (P2) bumps the pin. Consider doing T043 before more engine CPU work here.
 - 2026-10-20 16:48 claude: User 2026-10-20: the game is capped at 30 fps, so the goal is now a steady 30 fps (was 60). At 29.5 fps with 1 s windows 26.3-32.3 (fc9cdf4), what's left is removing the dips into the 20s, not doubling throughput.
+- 2026-10-20 22:03 claude: claimed
+- 2026-10-20 22:18 claude: 0053 shared render pass: Single Player 19.5 -> ~32 fps (1s windows 29.7-34.8), arena ~30 fps, captures identical in content. Next: vertex decode (gdb samples: rsx_vertex_decode_element ~40% of FIFO thread), GPU/CPU overlap

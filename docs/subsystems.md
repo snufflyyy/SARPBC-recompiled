@@ -160,6 +160,9 @@ Numbers (01.09, `PS3_VERBOSE=0`, boot lock, this machine):
 | + no present readback, `PS3_VERBOSE=0` | Choose Profile | ~30 |
 | + geometry cache + constant reuse | Choose Profile | 32.5 |
 | merged with T024/T029/T041 | **main menu** | **29.2** (1 s windows 26-32) |
+| main at 1f58db1 (new measurement) | Single Player (heavier: blurred backdrop) | 19.5 |
+| + shared render pass (0053) | Single Player | **~32** (windows 29.7-34.8) |
+| + shared render pass (0053) | arena (rendering checked by capture) | 29-33 after load |
 
 Main menu recipe: `PAD_FILE` with CROSS for 3 polls at 45 s and at 50 s; measure from ~75 s.
 Where the frame goes now (Choose Profile, ~31 ms): ~18 ms CPU in the FIFO drain (vertex
@@ -167,6 +170,15 @@ fetch/decode `rsx_vertex_fetch_one`, `eng_texture_content_hash` on texture binds
 ~8 ms waiting on the GPU (batch flushes forced by depth/stencil clears and present), ~4.6 ms
 idle in `Sleep(4)`. Next: record clears into the batch, overlap GPU with CPU (double-buffered
 submissions instead of waiting), and cut the per-draw CPU work in the draw engine.
+
+Render pass per draw was the largest GPU cost (2026-10-20, patch 0053): `PS3RECOMP_VK_DRAW_TIMES`
+showed 32-35 us for even a 4-vertex quad, ~400 draws a menu frame (13 ms), because every draw
+began and ended its own pass, loading and storing each attachment. Draws into the same
+framebuffer now share a pass (`s_batch.pass_fb`, closed by `vk_batch_flush`); a draw that
+samples one of its own attachments still starts a new pass. Single Player went 19.5 to ~32 fps.
+Where the frame went before (5 s of `FRAME_CLOCK_STATS`): fifo 2.95 s, present 1.44 s, sleep
+0.6 s; GPU waits were ~22 ms per frame. Next: vertex decode (`rsx_vertex_decode_element`, ~40%
+of FIFO samples), then overlapping GPU and CPU.
 
 ### Arena flip-callback stall (T044, 2026-10-20)
 

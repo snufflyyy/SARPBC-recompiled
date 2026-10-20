@@ -1,0 +1,116 @@
+From 4d1591e0bcbf50bfc60cde0aa8ab50144ecc5ea8 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Tue, 20 Oct 2026 22:13:36 +0000
+Subject: [PATCH] video(vulkan): share one render pass between consecutive
+ draws into a framebuffer
+
+Beginning and ending a pass per draw loaded and stored every attachment each
+time (~33 us a draw on an RTX 2070 SUPER, ~400 draws a menu frame). A draw
+that samples one of its own attachments still starts a new pass.
+---
+ libs/video/rsx_vulkan_backend.c | 55 ++++++++++++++++++++++++++-------
+ 1 file changed, 44 insertions(+), 11 deletions(-)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 95d462e..0ce5227 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -471,6 +471,7 @@ static void vk_present_wait_gpu(void);
+ 
+ static struct {
+     int              open;      /* s_vk.cmd is recording draws not yet submitted */
++    VkFramebuffer    pass_fb;   /* the render pass the open batch has begun, or NULL */
+     int              mode;      /* -1 unread, 0 one submit per draw, 1 batch */
+     vk_buffer        vb, ib, ubo;           /* per-batch arenas, filled from 0 */
+     VkDeviceSize     vb_off, ib_off, ubo_off, ubo_align;
+@@ -547,6 +548,7 @@ static int vk_batch_flush(void)
+ {
+     if (!s_batch.open) return 0;
+     s_batch.open = 0;
++    if (s_batch.pass_fb) { pvkCmdEndRenderPass(s_vk.cmd); s_batch.pass_fb = VK_NULL_HANDLE; }
+     const int rc = vk_submit_and_wait();
+     vk_ts_collect();
+     s_batch.vb_off = s_batch.ib_off = s_batch.ubo_off = 0;
+@@ -3688,6 +3690,16 @@ static void vk_geo_get(const void* data, VkDeviceSize bytes, VkDeviceSize align,
+     *at = a;
+ }
+ 
++/* The VkImage a bound texture handle samples (a VIEW samples its surface's image). */
++static VkImage vk_eng_obj_image(u32 handle)
++{
++    if (!handle || handle >= VK_ENG_MAX_OBJ) return VK_NULL_HANDLE;
++    const vk_eng_obj* o = &s_eobj[handle];
++    if (o->kind == VK_ENG_VIEW)
++        return (o->surface && o->surface < VK_ENG_MAX_OBJ) ? s_eobj[o->surface].im.img : VK_NULL_HANDLE;
++    return o->im.img;
++}
++
+ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices, u32 vertex_count,
+                         u32 stride, const u32* indices, u32 index_count)
+ {
+@@ -3830,22 +3842,44 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+         s_ts.meta[ts_i].idx = index_count; s_ts.meta[ts_i].w = w; s_ts.meta[ts_i].h = h;
+         pvkCmdWriteTimestamp(s_vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_ts.pool, 2 * ts_i);
+     }
+-    /* Order this draw after every command recorded before it, as the
+-     * submit-and-wait between draws used to: a draw may sample what the one
+-     * before rendered, or blend over it. Layouts stay GENERAL throughout. */
+-    {
++    /* Consecutive draws into one framebuffer share a render pass: beginning and
++     * ending one per draw loaded and stored every attachment each time, ~33 us
++     * per draw on an RTX 2070 SUPER even for a 4-vertex quad, and a menu frame
++     * is 400 draws (PS3RECOMP_VK_DRAW_TIMES, T040). Attachment accesses are
++     * ordered by the API within a pass, so only a draw that samples one of its
++     * own attachments (a feedback read, which the old barrier-per-draw order
++     * made work) starts a new pass. */
++    int feedback = 0;
++    for (u32 u = 0; u < RSX_MAX_TEXTURES && !feedback; u++) {
++        if (!((s_e2.tex_mask >> u) & 1u)) continue;
++        const VkImage img = vk_eng_obj_image(s_e2.tex[u]);
++        if (!img) continue;
++        for (u32 i = 0; i < n; i++)
++            if (img == s_eobj[s_eng_bound.rt[i]].im.img) feedback = 1;
++        if (zo && img == zo->im.img) feedback = 1;
++    }
++    if (s_batch.pass_fb && (s_batch.pass_fb != fb || feedback)) {
++        pvkCmdEndRenderPass(s_vk.cmd);
++        s_batch.pass_fb = VK_NULL_HANDLE;
++    }
++    const int new_pass = !s_batch.pass_fb;
++    if (new_pass) {
++        /* Order this pass after every command recorded before it, as the
++         * submit-and-wait between draws used to: a draw may sample what the
++         * one before rendered, or blend over it. Layouts stay GENERAL. */
+         VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                                .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+                                .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
+         pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                               VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
++        for (u32 i = 0; i < n; i++)
++            vk_barrier_image(s_eobj[s_eng_bound.rt[i]].im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
++        VkRenderPassBeginInfo rbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
++                                      .renderPass = rp, .framebuffer = fb,
++                                      .renderArea = { { 0, 0 }, { w, h } } };
++        pvkCmdBeginRenderPass(s_vk.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
++        s_batch.pass_fb = fb;
+     }
+-    for (u32 i = 0; i < n; i++)
+-        vk_barrier_image(s_eobj[s_eng_bound.rt[i]].im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+-    VkRenderPassBeginInfo rbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+-                                  .renderPass = rp, .framebuffer = fb,
+-                                  .renderArea = { { 0, 0 }, { w, h } } };
+-    pvkCmdBeginRenderPass(s_vk.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+     pvkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+     VkViewport vp = { 0.0f, 0.0f, (float)w, (float)h, 0.0f, 1.0f };
+     if (s_e2.have_vp && s_e2.vp[2] > 0.0f && s_e2.vp[3] > 0.0f) {
+@@ -3875,7 +3909,6 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+     } else {
+         pvkCmdDraw(s_vk.cmd, vertex_count, 1, 0, 0);
+     }
+-    pvkCmdEndRenderPass(s_vk.cmd);
+     if (s_ts.on == 1 && ts_i < VK_BATCH_SETS) {
+         pvkCmdWriteTimestamp(s_vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_ts.pool, 2 * ts_i + 1);
+         s_ts.n = ts_i + 1;
+-- 
+2.47.3
+
