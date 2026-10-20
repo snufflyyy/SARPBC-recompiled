@@ -1,4 +1,4 @@
-From b9c5e057e9c778cc4427f6ab3e407c1859cc3886 Mon Sep 17 00:00:00 2001
+From 95c06741aa230767b18865c7f0ba49f40d29a8fb Mon Sep 17 00:00:00 2001
 From: Braden <snufflyy@proton.me>
 Date: Mon, 19 Oct 2026 00:05:16 -0500
 Subject: [PATCH] spurs: real PPU side of SPURS Queue (PopBody/PushBody,
@@ -50,12 +50,13 @@ PPU pop, PPU push waking a parked popper, direction checks, attach/detach, and
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- CMakeLists.txt              |   9 +
- libs/spurs/cellSpurs.c      | 314 ++++----------------
- libs/spurs/cellSpurs.h      |  11 +
- libs/spurs/cellSpursQueue.c | 577 ++++++++++++++++++++++++++++++++++++
- tests/test_spurs_queue.c    | 336 +++++++++++++++++++++
- 5 files changed, 983 insertions(+), 264 deletions(-)
+ CMakeLists.txt               |   9 +
+ libs/spurs/cellSpurs.c       | 314 +++----------------
+ libs/spurs/cellSpurs.h       |  11 +
+ libs/spurs/cellSpursQueue.c  | 577 +++++++++++++++++++++++++++++++++++
+ tests/test_spurs_queue.c     | 336 ++++++++++++++++++++
+ tests/test_spurs_scheduler.c |   3 +
+ 6 files changed, 986 insertions(+), 264 deletions(-)
  create mode 100644 libs/spurs/cellSpursQueue.c
  create mode 100644 tests/test_spurs_queue.c
 
@@ -1413,6 +1414,20 @@ index 0000000..e4bed62
 +    puts("test_spurs_queue: all passed");
 +    return 0;
 +}
+diff --git a/tests/test_spurs_scheduler.c b/tests/test_spurs_scheduler.c
+index e86d791..1311714 100644
+--- a/tests/test_spurs_scheduler.c
++++ b/tests/test_spurs_scheduler.c
+@@ -2,6 +2,9 @@
+  * SPU policy execution. No game code, addresses or completion substitutions. */
+ #define spu_workload_dispatch_async fixture_unbounded_dispatch
+ #include "../libs/spurs/cellSpurs.c"
++/* cellSpurs.c's line hook also feeds the SPURS queue waiters in
++ * cellSpursQueue.c, which this fixture does not link: none here. */
++void spurs_queue_line_committed(uint32_t line) { (void)line; }
+ #undef spu_workload_dispatch_async
+ #include <assert.h>
+ #include <stdatomic.h>
 -- 
-2.55.0
+2.47.3
 

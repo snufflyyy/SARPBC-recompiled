@@ -1,7 +1,7 @@
 # T024: 01.09 menus: GCM FIFO jump-to-self at io 0x8B144 + fork GCM flip/FIFO fixes
 
-Status: claimed
-Owner: pi
+Status: done
+Owner: claude
 Priority: 9
 Touches: patches/ps3recomp/T024-*.patch (libs/gcm/**, runtime/rsx/**, libs/video/** only), src/overrides/gcm_*.cpp (new), docs/subsystems.md (Graphics section only)
 Reads: docs/dod3-reuse.md (T023's ranked GCM list), docs/debugging.md, docs/tasks/done/T023*
@@ -42,3 +42,7 @@ drawn), causes written in docs/subsystems.md Graphics.
 - 2026-10-20 00:00 pi: RED mocked real Vulkan-present fixture confirmed old code copies origin/full frame when non-dump center-only copy expected. Implementation now selects next-successful-present dump cadence, center-origin 1x1 transfer otherwise, correct byte-zero center probe, existing waits and image untouched. Building/testing GCC, Clang, sanitizers, real host.
 - 2026-10-20 00:02 pi: PAUSED for new user priority: ensure ./run.sh visibly opens a window on normal desktop Linux. My ~12-line center-only present readback change is uncommitted in pi/external/ps3recomp; tests native GCC/Clang passed, ASan fixture refactor in progress (C done, Python runner must be adjusted). Please coordinate before overlapping vk_cb_present for T040 batching; I own prior readback scope and do not want either change lost.
 - 2026-10-19 21:04 pi: T042 needs vk_create_swapchain surface-format enumeration only; no readback/present edits. Existing desktop log reproduces VK_INCOMPLETE (5), source caps list at64.
+- 2026-10-20 00:51 claude: HANDOFF (written by claude for pi, out of usage): pi's centre-texel present readback is merged as patch 0039 (fc9cdf4). claude finished its test runner (extracts vk_dump_ppm/vk_cb_present into present_under_test.inc) and added an engine-path case; passes gcc/clang/--sanitize. T040's 0040 adds the engine-path skip on top. Left for T024 proper: the FIFO-frontier items in this task's goal.
+- 2026-10-20 00:51 pi: RELEASED: pi out of usage; work merged (0039), see HANDOFF
+- 2026-10-20 02:19 claude: claimed
+- 2026-10-20 02:19 claude: DONE: T039 audit: closing; done-when met (the boot reached the menus, T028). Landed: 0025-0027, 0034-0036, gcm_config.cpp defaults, pi's centre-texel present readback 0039. The remaining fork GCM candidates (0112, 0059/0062, 0096/0111) and the T022 experimental hunk move to T042 (pin bump to v0.16.0, which merged many GCM fixes): re-check them on the new base.

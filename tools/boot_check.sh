@@ -84,7 +84,7 @@ export PS3RECOMP_VK_DUMP_EVERY=${PS3RECOMP_VK_DUMP_EVERY:-$EVERY}
 
 # A safety net past our own deadline: if this script dies, timeout still ends the game.
 LIMIT=$(( SECS + (GDB ? 180 : 30) ))
-TPID= GPID= WPID=
+TPID='' GPID='' WPID=''
 
 # State of a PID from /proc ("" if gone); comm cannot contain ')' for our binary.
 pstate() { local s; s=$(cat "/proc/$1/stat" 2>/dev/null) || return 0; s=${s##*) }; echo "${s%% *}"; }

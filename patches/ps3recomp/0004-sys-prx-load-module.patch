@@ -1,4 +1,4 @@
-From 22fbbd393bc06d9b8949f7e4b42a00ed92d5a133 Mon Sep 17 00:00:00 2001
+From b66f2d8e05b811dd83293e51a513a2b8c47088ee Mon Sep 17 00:00:00 2001
 From: Braden <snufflyy@proton.me>
 Date: Sun, 18 Oct 2026 23:34:55 -0500
 Subject: [PATCH] prx: load a title's own PRX modules with sys_prx_load_module
@@ -31,13 +31,14 @@ fallback without ppu_guest_call's "not registered" error.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- runtime/ppu/ppu_loader.cpp |  12 ++
- runtime/ppu/ppu_sysprx.cpp | 146 +++++++++++++
- runtime/prx/prx_loader.c   |   7 +
- runtime/prx/prx_loader.h   |   5 +
- runtime/prx/prx_runtime.c  | 425 +++++++++++++++++++++++++++++++++++++
- runtime/prx/prx_runtime.h  | 129 +++++++++++
- 6 files changed, 724 insertions(+)
+ runtime/ppu/ppu_loader.cpp                    |  12 +
+ runtime/ppu/ppu_sysprx.cpp                    | 146 ++++++
+ .../ppu/tests/test_ppu_entry_arguments.cpp    |   2 +
+ runtime/prx/prx_loader.c                      |   7 +
+ runtime/prx/prx_loader.h                      |   5 +
+ runtime/prx/prx_runtime.c                     | 425 ++++++++++++++++++
+ runtime/prx/prx_runtime.h                     | 129 ++++++
+ 7 files changed, 726 insertions(+)
  create mode 100644 runtime/prx/prx_runtime.c
  create mode 100644 runtime/prx/prx_runtime.h
 
@@ -74,10 +75,10 @@ index 1baea72..b1b08fb 100644
      if (!f) { fprintf(stderr, "[ppu] cannot open %s\n", path); return 0; }
      fseek(f, 0, SEEK_END);
 diff --git a/runtime/ppu/ppu_sysprx.cpp b/runtime/ppu/ppu_sysprx.cpp
-index db9ea00..ae96a2d 100644
+index 738399e..2bcba4b 100644
 --- a/runtime/ppu/ppu_sysprx.cpp
 +++ b/runtime/ppu/ppu_sysprx.cpp
-@@ -843,6 +843,144 @@ static void sys_spinlock_unlock(ppu_context* ctx)
+@@ -904,6 +904,144 @@ static void sys_spinlock_unlock(ppu_context* ctx)
      _InterlockedExchange(spin_word(ea), 0);
  }
  
@@ -222,7 +223,7 @@ index db9ea00..ae96a2d 100644
  extern "C" void ppu_sysprx_register(void)
  {
      ps3_hle_register_ctx(0x15BAE46Bu, "_cellGcmInitBody", hle_cellGcmInitBody);
-@@ -916,4 +1054,12 @@ extern "C" void ppu_sysprx_register(void)
+@@ -987,4 +1125,12 @@ extern "C" void ppu_sysprx_register(void)
      ps3_hle_register_ctx(ps3_compute_nid("sys_mmapper_map_memory"),     "sys_mmapper_map_memory",     crt_ok);
      ps3_hle_register_ctx(ps3_compute_nid("sys_mmapper_unmap_memory"),   "sys_mmapper_unmap_memory",   crt_ok);
      ps3_hle_register_ctx(ps3_compute_nid("sys_mmapper_free_memory"),    "sys_mmapper_free_memory",    crt_ok);
@@ -235,6 +236,19 @@ index db9ea00..ae96a2d 100644
 +    ps3_hle_register_ctx(ps3_compute_nid("sys_prx_stop_module"),   "sys_prx_stop_module",   hle_sys_prx_stop_module);
 +    ps3_hle_register_ctx(ps3_compute_nid("sys_prx_unload_module"), "sys_prx_unload_module", hle_sys_prx_unload_module);
  }
+diff --git a/runtime/ppu/tests/test_ppu_entry_arguments.cpp b/runtime/ppu/tests/test_ppu_entry_arguments.cpp
+index 2cd75e0..011bc26 100644
+--- a/runtime/ppu/tests/test_ppu_entry_arguments.cpp
++++ b/runtime/ppu/tests/test_ppu_entry_arguments.cpp
+@@ -10,6 +10,8 @@ uint8_t* vm_base;
+ // This loader fixture has no guest threads, SPUs, RSX, or diagnostic watchers.
+ // Any attempt to use those subsystems is a test failure, not a success stub.
+ uint32_t ppu_hle_inject_base=0x20000000;
++// ppu_load_elf records the booted ELF's path for the PRX loader (prx_runtime.c).
++const char* ppu_loaded_elf_path;
+ int spu_coh_is_reserved(uint32_t) { return 0; }
+ void spu_coh_notify_write(uint32_t) { std::abort(); }
+ void spu_lockline_lock(void) { std::abort(); }
 diff --git a/runtime/prx/prx_loader.c b/runtime/prx/prx_loader.c
 index 9cc3670..d5947ce 100644
 --- a/runtime/prx/prx_loader.c
@@ -836,5 +850,5 @@ index 0000000..4489866
 +
 +#endif /* PS3RECOMP_PRX_RUNTIME_H */
 -- 
-2.55.0
+2.47.3
 

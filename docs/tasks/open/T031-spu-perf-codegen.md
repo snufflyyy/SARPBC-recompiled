@@ -15,3 +15,4 @@ Look at the C the SPU lifter emits for the hottest functions (from T029/perf) an
 Before/after numbers in docs/subsystems.md (SPU/SPURS section, your own subsection), tests green, patches apply in the stack.
 
 ## Log
+- 2026-10-20 02:19 claude: From T025 (closed by T039): candidate easy win: always_inline the SSE4.1 spu_shufb (6 out-of-line copies remain in lifted TUs).

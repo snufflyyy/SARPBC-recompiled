@@ -11,13 +11,14 @@ you are touching instead of re-scanning the tree or the game files.
 
 ## Current state (keep this line true)
 
-**Phase 7 done: 01.09 reaches the main menu (2026-10-19); now SPU performance, then a project audit.**
-The PPU lift, all 15 SPU images, the 2 SPUJOBS jobs and the MultiStream overlay build on 01.02 and
-01.09, with 41 ps3recomp patches. The PhysX task pile-up (~1500% CPU) was a SPURS CreateTask race
-and is fixed (T033). **Goal: 60 fps in the main menu** (user, 2026-10-19): it is at 29.2 fps after
-Vulkan draw batching and a VRAM geometry cache (T040, in progress; the GPU is on PCIe 2.0 x4). Agents the user starts (Claude Code,
-pi, Antigravity) take tasks from the board by priority ([docs/workflow.md](docs/workflow.md));
-**resume from [docs/status.md](docs/status.md) "Resume here"**.
+**Phase 7 done: 01.09 reaches the main menu; now performance, goal 60 fps in the main menu** (user,
+2026-10-19). The PPU lift, all 15 SPU images, the 2 SPUJOBS jobs and the MultiStream overlay build
+on 01.02 and 01.09, with 41 ps3recomp patch files. The menu runs at 29.5 fps (2026-10-20, from 19.8)
+after the SPURS CreateTask race fix (T033) and Vulkan draw batching with a VRAM geometry cache
+(T040, in progress; the GPU is on PCIe 2.0 x4). Upstream ps3recomp is at v0.16.0: the pin bump is
+T043. The project audit (T039) ran on 2026-10-20 and left `tools/lint.py` behind. Agents the user
+starts (Claude Code, pi, Antigravity) take tasks from the board by priority
+([docs/workflow.md](docs/workflow.md)); **resume from [docs/status.md](docs/status.md) "Resume here"**.
 
 ## Key facts
 
@@ -25,12 +26,12 @@ pi, Antigravity) take tasks from the board by priority ([docs/workflow.md](docs/
 |---|---|
 | Title / ID | Supersonic Acrobatic Rocket-Powered Battle-Cars — `NPUB30035` (PSN, USA) |
 | Content ID | `UP2002-NPUB30035_00-SARBATTLECARS001` |
-| Version | APP_VER `01.02`, built for firmware 2.40 |
+| Version | Target **01.09** (the official update, `versions/0109/`); base game APP_VER `01.02`, built for firmware 2.40 |
 | Engine | Unreal Engine 3, package version 539 (`0x21B`), game module `TAGame` |
-| Executable | NPDRM SELF → `game/EBOOT.elf`: stripped PPC64, 47,602 functions, 274 imports from 20 libraries |
+| Executable | NPDRM SELF → `game/EBOOT.elf`: stripped PPC64; 01.02 has 47,602 functions and 274 imports from 20 libraries |
 | SPU code | 15 SPU ELFs in the EBOOT (Edge zlib, PhysX, MultiStream DSP) + Edge Geometry jobs in `game/SPUJOBS.prx` |
 | Platforms | **Linux is primary** (Fedora, clang + CMake + Ninja), rendering through **Vulkan**. Windows comes later on ps3recomp's D3D12 backend — keep code portable (`#ifdef _WIN32` for POSIX-only calls) |
-| Toolkit | `external/ps3recomp` = upstream `sp00nznet/ps3recomp` v0.15.0 (`39a3629`), pinned. Features from the Drakengard 3 fork are brought over as patches ("middle path", see `patches/ps3recomp/README.md`) |
+| Toolkit | `external/ps3recomp` = upstream `sp00nznet/ps3recomp` v0.15.0 (`39a3629`), pinned (upstream is at v0.16.0: T043). Features from the Drakengard 3 fork are brought over as patches ("middle path", see `patches/ps3recomp/README.md`) |
 | Closest reference | Drakengard 3 ([soyjxck/dod3-recomp](https://github.com/soyjxck/dod3-recomp)), a playable UE3 port on ps3recomp |
 
 ## Hard rules
@@ -65,28 +66,33 @@ pi, Antigravity) take tasks from the board by priority ([docs/workflow.md](docs/
    [docs/build-linux.md](docs/build-linux.md)); expect to fix POSIX/Vulkan gaps and keep
    those fixes upstreamable.
 
-## Repo layout (planned — create as you go, update here if it changes)
+## Repo layout
 
 ```
 AGENTS.md  CLAUDE.md GEMINI.md   agent entry points (CLAUDE.md and GEMINI.md just import this file)
 build.sh  run.sh             build / play in one command (01.09 default, --version 0102)
+CMakeLists.txt  config.toml  build (from ps3recomp's project template); run-time settings
 docs/                        technical docs, one topic per file (index below)
-Supersonic Acrobatic ... (USA)/   original .pkg + .rap — read-only, git-ignored
-external/ps3recomp/          git submodule, pinned; override with $PS3RECOMP
-patches/ps3recomp/           our patches against the pinned upstream (+ README: how/why)
 docs/tasks/{open,claimed,done}/  the task board (tools/task.sh); live copy is in the main checkout
-.worktrees/<agent>/          one git worktree per agent (tools/agent_setup.sh) — git-ignored
-vfs/dev_hdd0/game/NPUB30035/ extracted install (PARAM.SFO, USRDIR/...) — git-ignored
-game/                        decrypted EBOOT.elf, SPUJOBS.prx — git-ignored
-analysis/                    ppu_loader / imports / SPU image output — git-ignored
-tools/rpcs3/                 RPCS3 AppImage + isolated config, used only by decrypt.sh — git-ignored
-.venv/                       Python venv for ps3recomp tools — git-ignored
-src/main.cpp src/stubs.cpp   from the ps3recomp project template
-src/overrides/               native replacements / per-NID fixes (edgezlib.cpp, ...)
-src/recomp/ src/spu_gen/     GENERATED (lift, NID table, SPU) — git-ignored
-tools/                       extract.sh decrypt.sh relift.sh run.sh apply_patches.sh
-                             split_toc_stubs.py task.sh agent_setup.sh merge_to_main.sh boot_check.sh
-CMakeLists.txt  config.toml
+src/main.cpp src/stubs.cpp   boot scaffold from the template (frame clock, VFS, backend choice)
+src/overrides/               port-side native replacements and settings, keyed by guest address/NID
+patches/ps3recomp/           our patches against the pinned upstream (+ README: what, why, upstream status)
+patches/experimental/        diffs kept for reference, never applied
+external/ps3recomp/          git submodule, pinned; tools/apply_patches.sh puts the patches on it
+tools/                       pipeline: extract.sh decrypt.sh relift.sh split_toc_stubs.py lift_prx_jobs.py
+                             make_spu_overlays.py apply_patches.sh
+                             run and measure: run.sh boot_check.sh boot_report.py spu_profile.{sh,py}
+                             ppm2png.py hle_coverage.py
+                             agents: task.sh agent_setup.sh merge_to_main.sh lint.py; tests: test_*.py
+--- git-ignored, local only ---
+Supersonic Acrobatic ... (USA)/   original .pkg + .rap, read-only
+vfs/ game/ analysis/         01.02: extracted install, decrypted EBOOT.elf + SPUJOBS.prx, loader output
+src/recomp/ src/spu_gen/     01.02: GENERATED lift (tools/relift.sh)
+versions/0109/               01.09: game/ vfs/ analysis/ src/ build/ (the target version)
+updates/                     the downloaded 01.09 update PKG
+build*/                      build trees; .cache/ ccache; .locks/ task locks; .worktrees/ agent worktrees
+captures/ gamedata/          boot_check frame captures; save data written at run time
+tools/rpcs3/  .venv/         RPCS3 AppImage (decrypt.sh only); Python venv for ps3recomp's tools
 ```
 
 ## Pipeline in one screen
@@ -104,6 +110,7 @@ cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang
 cmake --build build   # Release + Vulkan are the defaults on Linux -> build/sarpbc
 tools/run.sh          # build/sarpbc game/EBOOT.elf vfs (main.cpp maps /dev_hdd0 itself)
 tools/boot_check.sh 60 [--gdb] [--version 0109]   # headless boot report; stops only its own game
+tools/lint.py [--tests]   # repo hygiene (docs, patches, board, scripts, no game data); before every commit
 ```
 Details and every flag: [docs/pipeline.md](docs/pipeline.md).
 
@@ -133,6 +140,10 @@ Details and every flag: [docs/pipeline.md](docs/pipeline.md).
 - RPCS3 is a behavioural reference only — never copy its (GPL) code into this tree.
 - Long-running steps (full PKG extract, a full lift, a full build) take minutes; run them
   in the background and do not repeat them without cause.
+- **Run `tools/lint.py` before every commit** (and `tools/lint.py --tests` when you touched a
+  patch or a tool); `tools/merge_to_main.sh` refuses to merge when it fails. It checks what
+  drifts between sessions: paths and patch names in docs, the patch README table, the task
+  board's fields, script headers and modes, shellcheck/pyflakes, and that no game data is tracked.
 - **No subagents.** Don't spawn subagents (Claude Code's Agent tool, workflows, or another
   harness's equivalent) unless the user asks: they used too much usage (user, 2026-10-19). The
   user runs more agents in parallel by starting them, and they coordinate through the board.

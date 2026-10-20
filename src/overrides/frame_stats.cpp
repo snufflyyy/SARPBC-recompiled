@@ -1,5 +1,15 @@
-/* Optional guest-frame telemetry. Backend boot/fallback presents do not count.
- * Called only by the frame-clock thread; no extra worker or guest scheduling.
+/*
+ * Guest frame rate, for measuring (T029): SARPBC_FRAME_STATS=1.
+ *
+ * Once a second, logs "[frame-stats] clock_ms=<ms> guest_frames=<n>" to stderr,
+ * where n is ppu_boot_frames_presented(): the frames the game itself flipped
+ * (the backend's boot/fallback presents do not count). Two lines give the fps
+ * over any window; tools/spu_profile.sh and the menu recipe in
+ * docs/subsystems.md "Menu frame rate" read them. Use this, not the 0.5 s
+ * timestamps in frames.jsonl.
+ *
+ * Called only by the frame-clock thread (src/main.cpp frame_clock), so there is
+ * no extra worker and no guest scheduling.
  */
 #include <cstdint>
 #include <cstdio>

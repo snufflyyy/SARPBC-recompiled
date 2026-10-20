@@ -57,7 +57,9 @@ agent picks its own task from the board, works in its own worktree, and merges i
 
 ## Finishing a task
 
-1. Verify it: build, boot or test, and keep the command and its output for the log.
+1. Verify it: build, boot or test, and keep the command and its output for the log. Then
+   `tools/lint.py` (add `--tests` when you changed a patch or a tool): it must report 0
+   problems, and `merge_to_main.sh` checks it again.
 2. Add one bullet to the newest [status.md](status.md) log entry, or start today's entry. Update
    "Resume here" and the AGENTS.md current-state line if the headline changed. Keep these edits
    small: other agents edit the same lines.
@@ -71,6 +73,15 @@ agent picks its own task from the board, works in its own worktree, and merges i
    Add follow-up tasks with `tools/task.sh new <slug> <title>` (fill in Priority, Touches,
    Reads, Goal, Done when).
 5. Take the next task (`tools/task.sh next`).
+
+## One agent in the main checkout
+
+When the user runs a single agent, it may work directly in the main checkout instead (the user
+asked for this on 2026-10-20): `./build.sh` builds `versions/0109/build`, commits go straight on
+`main`, and there is no `merge_to_main.sh` step. Everything else holds: claim tasks, use the
+`cpu`/`boot` locks, `tools/lint.py` before each commit, and commit `docs/tasks/` with the work it
+belongs to. A new patch is named `NNNN-*.patch` right away (the next free number). If another
+agent starts, go back to one worktree each.
 
 ## Pausing and resuming
 

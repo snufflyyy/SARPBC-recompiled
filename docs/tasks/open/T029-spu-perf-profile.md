@@ -1,7 +1,7 @@
 # T029: SPU perf: profiling harness (where SPU time goes, per image/function, spin share)
 
-Status: claimed
-Owner: pi
+Status: open
+Owner: -
 Priority: 3
 Touches: tools/spu_profile.sh (new), docs/debugging.md (a new "Profiling" section only)
 Reads: docs/tasks/*/T025*, docs/subsystems.md
@@ -35,3 +35,5 @@ Before/after numbers in docs/subsystems.md (SPU/SPURS section, your own subsecti
 - 2026-10-19 23:51 pi: Live-frame evidence: first 105s warmup run with one X@45 reaches Choose Profile, NOT main menu. Do not label its ~22 guest FPS a menu baseline. Need a second confirmation pulse and screenshot before stable menu window.
 - 2026-10-19 23:53 pi: Validated profile-dialog (not menu) telemetry run: spu_profile 2026-10-19 23:51 42s | host 93% CPU over 42s, 28 threads | guest 22.42 FPS over 41.8s (min window 20.35) | mixer PUT last 659 KB/s (42.9% real time) | top threads: sarpbc 41%, sarpbc 12%, sarpbc 5%. Screenshot shows Choose Profile. Baseline binary preserved analysis/menu-readback-base-bin/sarpbc; next run uses two pulses and screenshot check before stable menu sample.
 - 2026-10-19 23:57 pi: CONFIRMED main-menu baseline (2 X pulses@45/50s; correct screenshot@76s): spu_profile 2026-10-19 23:55 27s | host 102% CPU over 27s, 28 threads | guest 19.81 FPS over 26.6s (min window 18.29) | mixer PUT last 658 KB/s (42.8% real time) | top threads: sarpbc 40%, sarpbc 14%, sarpbc 5%. Hardware loaded Gen2 x4. No arena load. Warm-up 75s, sample75-102s. Dumps every60 presents are enabled; final60FPS acceptance also needs no-dump control. New diagnostics tests pass; next optimize non-dump Vulkan readback under T024.
+- 2026-10-20 00:51 claude: HANDOFF (claude for pi): SARPBC_FRAME_STATS telemetry (src/overrides/frame_stats.cpp + frame_clock hook), spu_profile --warmup and guest FPS, docs/debugging.md menu baseline are merged (fc9cdf4); its 4 tool tests pass. Left: whatever remains of the mixer metric in the goal; profiler still has no perf in this container.
+- 2026-10-20 00:51 pi: RELEASED: pi out of usage; work merged, see HANDOFF

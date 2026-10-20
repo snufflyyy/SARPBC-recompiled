@@ -1,79 +1,57 @@
 # Status
 
-Living document. Update the phase table, "Next steps" and the log at the end of each
+Living document. Update "Resume here", the phase table and the log at the end of each
 work session. Newest log entry first. Use absolute dates.
 
-## Resume here (agents started by the user, from 2026-10-19)
+## Resume here (updated 2026-10-20)
 
 **To restart, start an agent (Claude Code, pi, Antigravity, ...) in the main checkout and say:**
 > Read AGENTS.md, docs/status.md "Resume here" and docs/workflow.md, then take the next task
 > from `tools/task.sh next`.
 
-For more parallelism, start more agents the same way, each with its own name. **No agent spawns
-subagents** (user, 2026-10-19: they used too much usage). Every branch from the subagent era is
-merged into `main`; nothing is left to merge. Paused tasks have a `HANDOFF:` note
-(`tools/task.sh show <ID>`), whose `branch=` field is obsolete for those (docs/workflow.md
-"History").
+**No agent spawns subagents** (user, 2026-10-19). Since 2026-10-20 the user has one agent working
+directly in the main checkout (`./build.sh`, `./run.sh`, commits on `main`); with several agents,
+go back to one worktree each (docs/workflow.md). Paused tasks carry a `HANDOFF:` note
+(`tools/task.sh show <ID>`). Before committing, run `tools/lint.py` (`--tests` when a patch or a
+tool changed).
 
-**Headline: 01.09 reached the main menu** (T028, 11:11): New Game / Play Online / Split Screen /
-Options / Extras, Profile Guest1. The intro is Loading, ESRB with the car, Powered by Unreal, the
-Psyonix logo, the safe-area screen (needs X), then the menu. New Game opens MP_SOCCARARENA.XXX at
-~164 s, then the log goes silent (T037). There's no Bink anywhere in 01.09. Pressing X needs a
-`PAD_FILE` loop for now (T036 will make it `boot_check --pad`).
+**Headline: 01.09 reaches the main menu at ~30 fps; the goal is 60 fps** (user, 2026-10-19). The
+intro is Loading, ESRB with the car, Powered by Unreal, the Psyonix logo, the safe-area screen
+(needs X), then the menu: CROSS at 45 s and again at 50 s by `PAD_FILE` (T036 will make that
+`boot_check --pad`). New Game opens MP_SOCCARARENA.XXX, then the log goes silent (T037). There's no
+Bink in 01.09.
 
-**Verified on `main` as merged (f2b5baf, no env overrides, under the boot lock):**
-`boot_check 2026-10-19 11:23 v01.09 f2b5baf 90s: STALLED since 73.3s (frames still presented) | last open TEXTURES.TFC@6.1s | pkgs 13 | zlib 3291 | dumps 25 lit 25 distinct 21 | flips 1119 | threads 13/9 alive | unresolved 0 | alerts assert,blocked`.
-The last frame is the safe-area screen, waiting for X. That's 1119 flips, against 100-514 in
-the agents' runs. "STALLED" only means no new kinds of log line.
+**Last verified on `main` (fc9cdf4, 2026-10-20, `PS3_VERBOSE=0`, under the boot lock):** a 120 s
+boot_check is PROGRESSING with 3513 flips; the main menu runs at **29.5 fps** (1 s windows
+26.3-32.3), ~130% CPU, 28 threads. Where a menu frame's ~31 ms go, and what to try next:
+subsystems.md "Menu frame rate".
 
-**State of `main`:** 37 patch files (55 commits on 39a3629). Merged this session: 0028 + 0031
-(SPU ctor seeding + test), 0029 (SRW writer preference), 0030 (per-thread callback stacks), 0032
-(SSE2 SPU float helpers) + CMake `-march=x86-64-v2` for lifted SPU code (mixer 15% -> 53% of real
-time), 0033 (mfc_for engine cache + POSIX lockline TTAS: flips 100 -> 514 in 90 s), 0034-0036 (GCM
-PrepareFlip id, ring recycle fixes), `src/overrides/gcm_config.cpp` (defaults
-`GCM_PARK_GRACE_MS=5000`, `GCM_INTR_THREAD=1`; the env overrides them), and `tools/spu_profile.sh`
-(T029). Both versions are relifted. `SPU_INTERP_UNLIFTED` is no longer needed.
+**State of `main`:** 40 patch files (58 commits) on upstream `39a3629` (v0.15.0); every one of the
+73 test scripts (ours and ps3recomp's) passes on that stack. Upstream is now at v0.16.0 with
+fixes and menu-relevant perf work we don't have yet: T043 bumps the pin. Both versions are
+relifted. The big fixes of the last two days: the SPURS CreateTask race that started tasks twice
+(0038, T033: ~1500% CPU to ~100%) and Vulkan draw batching with a VRAM geometry cache (0040, T040:
+menu 19.8 to 29.5 fps).
 
-**The SPU pile-up is fixed (T033, 2026-10-19 evening).** It was a race, not thread-per-task
-scheduling: `cellSpursCreateTask` published a task's ready bit before marking it running, so a
-sibling's exit started a second copy (542 per 90 s). The copies never returned, spun on line
-0x0133B880 and caused every `HALT-ASSERT 0x24884`. With patch `T033-spurs-task-runs-once`, a 90 s
-01.09 boot goes from 404 to 1920 flips, from 1532% to 96% CPU, and from 253 to 28 threads. The intro
-now runs at a steady 17-24 fps in 120/N steps on one core. The likely limit is the frame clock's
-4 ms FIFO drain (src/main.cpp `frame_clock`). Boot one game at a time.
+**This machine (since 2026-10-19 evening):** Debian 13 container, 16 threads, 15 GB RAM, ~14 GB
+free disk, RTX 2070 SUPER in a bottom slot that runs at **PCIe 2.0 x4** (~2 GB/s: per-frame
+uploads and GPU round trips cost far more than usual). perf is blocked (use gdb stack sampling).
+Only 01.09 is built (`versions/0109/build`, ccache off for disk space). Setup notes: T033's log.
 
-**Menu fps (T040, in progress):** the main menu runs at **29.2 fps** (from 19.8). The Vulkan backend
-now batches draws and caches geometry in VRAM; the GPU sits on a PCIe 2.0 x4 link. Details,
-method and the next steps are in subsystems.md "Menu frame rate". pi's T024/T029/T041 work (center-texel
-readback, `SARPBC_FRAME_STATS`, desktop `./run.sh` window) is merged; pi ran out of usage
-(HANDOFF notes on those tasks).
+**User plan:** 1. ~~menus~~ reached. 2. **Now: performance, 60 fps in the main menu** (T040, then
+T043's upstream perf work). 3. The project audit (T039) was run on 2026-10-20 at the user's request.
 
-**Desktop launch (T042):** native Wayland now works on the Fedora / RX 7800 XT
+**Desktop launch (patch 0041, task T042-wayland):** native Wayland now works on the Fedora / RX 7800 XT
 host. Patch 0041 removes a 64-format limit (RADV reports 99). `./run.sh` needs no
 X11 override; `SDL_VIDEODRIVER=wayland ./run.sh` explicitly selects Wayland. A
 45-second window test presented 3,581 guest frames without a headless fallback;
 this is not a main-menu FPS measurement. See build-linux.md "Desktop launch".
 
-**This machine (since 2026-10-19 evening):** Debian 13 container, 16 threads, 15 GB RAM, ~16 GB free
-disk, RTX 2070 SUPER in a bottom PCIe slot (slower than usual for uploads and readbacks). perf is
-blocked. Builds use `-j10` with ccache off. Setup notes are in the T033 log.
-
-**User plan (2026-10-19), in order:**
-1. ~~Menus~~ reached.
-2. Now: **performance; the goal is 60 fps in the main menu** (user, 2026-10-19). SPU easy wins: Measured (`tools/spu_profile.sh`), bit-exact,
-   nothing deep; bigger ideas become proposed tasks.
-3. When the easy wins are done: audit the project for cleanliness, tidiness and extensibility
-   (T039).
-
-**Queue:** the board's `Priority:` lines (`tools/task.sh list` / `next`). The order now: T033 (SPURS
-worker pool, biggest win), T029 (remaining mixer metric in profiler; measure every SPU change with
-it), T032 (DMA/MFC), T031 (lifter codegen), T025 (SSE4.1 shufb, mixer to real time), T036
-(`boot_check --pad`), T035 (entry-args test), T024 (ShaderPatching chain throughput), T034
-(callback stacks), **T039 the audit** (alone), T037 (hang after New Game), T038 (upside-down
-Loading), then T007, T020, T017, T021, T012, T009, T018, T005, T010, T011, T013, T014. T015
-multiplayer is **blocked** (user permission needed). T028 (ESRB to menus) is done.
-
-Before building `main`: `tools/apply_patches.sh`, then reconfigure CMake.
+**Queue:** the board's `Priority:` lines (`tools/task.sh next`): T040 (60 fps), T043 (pin bump),
+T029 (profiler mixer metric), T032/T031 (SPU DMA, codegen), T036 (`boot_check --pad`), T034
+(callback stacks), T037 (hang after New Game), T038 (upside-down Loading), then T007, T020, T017,
+T021, T012, T009, T018, T005, T010, T011, T013, T014. T015 (multiplayer) is **blocked** until the
+user has permission.
 
 ## Phases
 
@@ -86,7 +64,7 @@ Before building `main`: `tools/apply_patches.sh`, then reconfigure CMake.
 | 4 | Project skeleton from the template, first lift + build on Linux | done 2026-10-18 |
 | 5 | Boot to first file opens / first HLE gaps | done 2026-10-18 |
 | 6 | Loading screen draws (`LOADSCREEN` FPO/VPO) | done 2026-10-18 — "Loading..." through Vulkan |
-| 7 | Intro movies / main menu | **reached 2026-10-19** on 01.09 (T028; X presses via PAD_FILE). ~0.4 fps |
+| 7 | Intro movies / main menu | **reached 2026-10-19** on 01.09 (T028; X presses via PAD_FILE); ~30 fps on 2026-10-20 (T033, T040), goal 60 |
 | 8 | Offline match in an arena, with input and audio | — |
 | 9 | Polish: saves, trophies, perf, split-screen; online later | — |
 
@@ -106,30 +84,28 @@ Before building `main`: `tools/apply_patches.sh`, then reconfigure CMake.
   turns `PS3RECOMP_RSX_VULKAN` on for Linux; `src/main.cpp` selects Vulkan → D3D12 →
   Metal → null. Linux-only conveniences need a Windows branch.
 
-## Next steps
-
-*(Historical, from session 2; the live queue is "Resume here".)* The work is split into tasks on
-the board: `tools/task.sh list` (protocol: [workflow.md](workflow.md)). Highest value first:
-
-1. **T001** — find and fix the stall after package loading (the boot frontier).
-2. **T002** — `sys_prx_load_module`/`start_module` are unresolved: SPUJOBS.SPRX (Edge
-   Geometry jobs) never loads.
-3. **T003** — PhysX: `cellOvis` overlay table ("PhysX: Error allocating memory for overlay
-   table: 0 0") and SPU image #7 (overlapping PT_LOADs, not lifted).
-4. **T004** — HLE coverage audit: which of the 274 imports have no handler, plus the 17 NIDs
-   the database cannot name.
-5. **T005** — upstream the TOC-stub split into ps3recomp's loader (a patch).
-
 ## Open questions
 
-- What are SPU images 0, 3–5, 8–10 (unidentified by strings)?
-- Does MultiStream need the firmware MP3 decoder like Drakengard 3 did?
-- Does the game block on `sceNpDrmIsAvailable` or NP sign-in when offline? (So far
-  `sceNpDrmIsAvailable` on SPUJOBS.SPRX passes; `sceNpManager` status unknown.)
-- How are saves written (no cellSaveData import — raw sys_fs?)
-- Does the upstream POSIX boot scaffold get a UE3-sized title to `main` on Linux?
+- What are SPU images 0, 3-5, 8-10 (unidentified by strings)? (T010)
+- Does the game block on `sceNpDrmIsAvailable` or NP sign-in when offline? So far
+  `sceNpDrmIsAvailable` on SPUJOBS.SPRX passes and the menus come up offline (T014).
+- How does 01.09 save (cellSaveData `FixedSave2`/`ListLoad2`)? Untested end to end (T017).
+- Answered: MultiStream needs a `flashMP3.pic` (served natively, subsystems.md Audio); the
+  POSIX boot scaffold gets this UE3 title to the menus on Linux.
 
 ## Log
+
+### 2026-10-20 (session 9, cont.): project audit (T039)
+- User asked for an audit of the whole project, to keep it clean and uniform as it grows.
+  Found and fixed: `tools/hle_coverage.py` crashed with its defaults (the NID table moved to the
+  build dir); 4 upstream tests no longer built on our stack (0004, 0015, 0019 and our own 0038
+  changed what they extract or link: each fixed inside its patch, 73/73 test scripts pass); ~25
+  stale `T###` patch names in docs; the patch README (stale candidate list, a row out of order);
+  shellcheck warnings; 5 scripts not executable; a stamp-read error in `build.sh`; "Resume here"
+  out of date. No game data in git or its history. Closed T024, T025, T035, T041 (done-when met);
+  new T043: upstream is at v0.16.0 (117 commits; 32 of our 40 files replay cleanly).
+- New `tools/lint.py` (`--tests`) runs these checks in seconds; `merge_to_main.sh` runs it and
+  now renames merged patches in the docs as well as the README.
 
 ### 2026-10-20 (session 9, cont.): menu fps 19.8 -> 29.2
 - T042 (pi, user-requested Wayland fix): patch 0041 dynamically enumerates surface

@@ -52,7 +52,7 @@ PIN=$(git -C "$ROOT" ls-tree HEAD external/ps3recomp | awk '{print $3}')
 want=$( { echo "$PIN"; cat "$ROOT"/patches/ps3recomp/*.patch 2>/dev/null; } | sha256sum | cut -d' ' -f1)
 STAMP=$(git -C "$SUB" rev-parse --absolute-git-dir)/sarpbc-patches.stamp
 head=$(git -C "$SUB" rev-parse HEAD)
-read -r have stamped_head < "$STAMP" 2>/dev/null || have= stamped_head=
+read -r have stamped_head 2>/dev/null < "$STAMP" || have='' stamped_head=''
 if [ -z "$have" ] || [ -z "$stamped_head" ]; then
     # No (valid) stamp yet: trust a checkout that is already the pin plus one commit
     # per patch commit, rather than rebuild everything once for nothing.
