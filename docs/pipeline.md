@@ -108,7 +108,7 @@ python $PS3RECOMP/tools/gen_hle_nids.py --all --out src/recomp/ppu_hle_nids.cpp 
 
 For this title: 15 SPU ELFs embedded in the EBOOT (Edge zlib, PhysX, MultiStream DSP,
 ...) and Edge Geometry job images inside `SPUJOBS.prx` (a PPU PRX, no SPU ELFs) — see
-[game-profile.md](game-profile.md#spu-code). The general sources:
+[game-profile.md](game-profile.md#spu-code). After a relift, `tools/spu_coverage.py` audits the bytes no lifted function covers (T010). The general sources:
 
 | Source | How to get it | How to lift |
 |---|---|---|
