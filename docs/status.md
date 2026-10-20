@@ -15,7 +15,8 @@ go back to one worktree each (docs/workflow.md). Paused tasks carry a `HANDOFF:`
 (`tools/task.sh show <ID>`). Before committing, run `tools/lint.py` (`--tests` when a patch or a
 tool changed).
 
-**Headline: 01.09 reaches the main menu at ~30 fps; the goal is 60 fps** (user, 2026-10-19). The
+**Headline: 01.09 reaches the main menu at ~30 fps; the goal is a steady 30 fps** (user, 2026-10-20:
+the game is capped at 30 fps on PS3, so the earlier 60 fps goal is dropped). The
 intro is Loading, ESRB with the car, Powered by Unreal, the Psyonix logo, the safe-area screen
 (needs X), then the menu: CROSS at 45 s and again at 50 s by `PAD_FILE` (T036 will make that
 `boot_check --pad`). New Game now loads MP_SOCCARARENA + PYRAMID_COLLECTBOOST and keeps presenting (T037, T044),
@@ -40,7 +41,7 @@ free disk, RTX 2070 SUPER in a bottom slot that runs at **PCIe 2.0 x4** (~2 GB/s
 uploads and GPU round trips cost far more than usual). perf is blocked (use gdb stack sampling).
 Only 01.09 is built (`versions/0109/build`, ccache off for disk space). Setup notes: T033's log.
 
-**User plan:** 1. ~~menus~~ reached. 2. **Now: performance, 60 fps in the main menu** (T040, then
+**User plan:** 1. ~~menus~~ reached. 2. **Now: performance, a steady 30 fps in the main menu** (the game's own cap; T040, then
 T043's upstream perf work). 3. The project audit (T039) was run on 2026-10-20 at the user's request.
 
 **Desktop launch (patch 0041, task T042-wayland):** native Wayland now works on the Fedora / RX 7800 XT
@@ -50,7 +51,7 @@ X11 override; `SDL_VIDEODRIVER=wayland ./run.sh` explicitly selects Wayland. A
 this is not a main-menu FPS measurement. See build-linux.md "Desktop launch".
 
 **Queue:** the board's `Priority:` lines (`tools/task.sh next`): **T045 (arena textures/HUD, P1,
-read its HANDOFF)**, T040 (60 fps), T043 (pin bump), T029 (profiler mixer metric), T032/T031 (SPU
+read its HANDOFF)**, T040 (steady 30 fps), T043 (pin bump), T029 (profiler mixer metric), T032/T031 (SPU
 DMA, codegen), T034 (callback stacks), T038 (upside-down Loading), then T020, T017, T021, T012, T009,
 T018, T005, T010, T011, T013, T014. T015 (multiplayer) is **blocked** until the user has permission.
 T007, T036, T037 and T044 were closed on 2026-10-20.
@@ -96,6 +97,11 @@ T007, T036, T037 and T044 were closed on 2026-10-20.
   POSIX boot scaffold gets this UE3 title to the menus on Linux.
 
 ## Log
+
+### 2026-10-20 (session 10): target is 30 fps, not 60
+- User: the game is limited to 30 fps normally; the menu goal becomes a steady 30 fps (AGENTS.md,
+  T040, subsystems.md updated). The menu is already at ~29.5 fps, so T040 is now about the dips
+  (1 s windows down to 26) rather than throughput.
 
 ### 2026-10-20 (session 9, cont.): New Game loads and renders the arena; audio plays
 - pi (merged by claude after pi ran out of usage): T037: the arena hang had two SPURS causes.

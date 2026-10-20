@@ -268,7 +268,7 @@ One pulse alone left the Choose Profile dialog. The screenshot at 76 seconds
 showed New Game / Play Online / Split Screen / Options / Extras, Profile: Guest1.
 The 75–102 second CPU window measured 102% host CPU and 28 threads. Guest-boundary
 telemetry measured **19.81 FPS over 26.6 seconds**, lowest telemetry window
-18.29 FPS. This does not meet the 60 FPS target. Evidence:
+18.29 FPS. This does not meet the 30 FPS target (60 until 2026-10-20). Evidence:
 `analysis/spu_profile_20261019-235339.txt` and `analysis/menu-readback-base-live.png`.
 Frame dumps were enabled every 60 backend presents; final acceptance also needs
 measurement without dump I/O.

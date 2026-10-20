@@ -1,4 +1,4 @@
-# T040: Perf: 60 fps in the main menu (frame clock / FIFO drain cadence)
+# T040: Perf: a steady 30 fps in the main menu (frame clock / FIFO drain cadence)
 
 Status: open
 Owner: -
@@ -7,10 +7,10 @@ Touches: libs/video/rsx_vulkan_backend.c (draw batching), src/main.cpp (frame_cl
 Reads: docs/subsystems.md "Graphics" and "SPURS tasks started twice (T033)", docs/debugging.md, T024 and T036 logs
 
 ## Goal
-**User goal (2026-10-19): 60 fps in the main menu.** After T033 (patch 0038) the game uses about one core and runs the intro at a steady 17-24 fps. (The "240/N steps" first seen were the 0.5 s grain of `frames.jsonl` timestamps, not a pacing quantum: measure with `SARPBC_FRAME_STATS=1`.) Main suspect: `frame_clock` in src/main.cpp drains the GCM FIFO only every `Sleep(4)` (~4.2 ms), and UE3 fences render passes on labels that the drain writes. Find what each frame waits on, make the drain run when the guest kicks `put` (or otherwise without a fixed 4 ms step), and measure at the real main menu (PAD_FILE X presses; T036's `boot_check --pad` if it exists). Note that this machine's RTX 2070 SUPER is in a bottom PCIe slot, so readbacks (boot_check frame dumps) cost more than usual: compare with dumps off. Results must stay correct (no skipped frames or labels).
+**User goal: a steady 30 fps in the main menu** (2026-10-20: the game is capped at 30 fps, so the original 60 fps goal of 2026-10-19 is dropped; the file name keeps the old slug). After T033 (patch 0038) the game uses about one core and runs the intro at a steady 17-24 fps. (The "240/N steps" first seen were the 0.5 s grain of `frames.jsonl` timestamps, not a pacing quantum: measure with `SARPBC_FRAME_STATS=1`.) Main suspect: `frame_clock` in src/main.cpp drains the GCM FIFO only every `Sleep(4)` (~4.2 ms), and UE3 fences render passes on labels that the drain writes. Find what each frame waits on, make the drain run when the guest kicks `put` (or otherwise without a fixed 4 ms step), and measure at the real main menu (PAD_FILE X presses; T036's `boot_check --pad` if it exists). Note that this machine's RTX 2070 SUPER is in a bottom PCIe slot, so readbacks (boot_check frame dumps) cost more than usual: compare with dumps off. Results must stay correct (no skipped frames or labels).
 
 ## Done when
-The main menu holds ~60 fps (frames.jsonl or a flip counter) in a measured run on this machine, numbers are in docs/subsystems.md, and the patches apply in the stack.
+The main menu holds a steady 30 fps (`SARPBC_FRAME_STATS=1`, 1 s windows at ~30, no dips into the 20s) in a measured run on this machine, numbers are in docs/subsystems.md, and the patches apply in the stack.
 
 ## Log
 - 2026-10-19 23:44 claude: claimed
@@ -24,3 +24,4 @@ The main menu holds ~60 fps (frames.jsonl or a flip counter) in a measured run o
 - 2026-10-20 02:07 claude: HANDOFF: done=batching+geo cache, 29.5 fps (main fc9cdf4); state=paused for T039 audit (user asked); next=record clears into the open batch, overlap GPU/CPU, cut per-draw engine CPU (subsystems.md 'Menu frame rate'); branch=main
 - 2026-10-20 02:07 claude: RELEASED: paused for T039 (user-requested audit); see HANDOFF
 - 2026-10-20 02:20 claude: From T039: upstream v0.16.0 has #375 (sparse texture re-hash) and #357 (vertex span once per draw), which target this task's measured CPU hot spots; T043 (P2) bumps the pin. Consider doing T043 before more engine CPU work here.
+- 2026-10-20 16:48 claude: User 2026-10-20: the game is capped at 30 fps, so the goal is now a steady 30 fps (was 60). At 29.5 fps with 1 s windows 26.3-32.3 (fc9cdf4), what's left is removing the dips into the 20s, not doubling throughput.

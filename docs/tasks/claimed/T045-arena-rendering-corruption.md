@@ -1,7 +1,7 @@
 # T045: In-level rendering mostly black with small corrupt rectangles after loading succeeds
 
-Status: open
-Owner: -
+Status: claimed
+Owner: claude
 Priority: 1
 Touches: patches/ps3recomp/T045-*.patch (libs/video/rsx_vulkan_backend.c, runtime/rsx/**), docs/subsystems.md (Graphics), docs/debugging.md (arena frontier)
 Reads: docs/tasks/claimed/T044-arena-flip-callback-stall.md, docs/subsystems.md (Graphics), docs/dod3-reuse.md
@@ -22,3 +22,5 @@ An in-level capture shows the arena and car with usable HUD and input. Any remai
 - 2026-10-20 11:38 claude: CONFIRMED: all 21 clears set ZSTENCIL_CLEAR_VALUE=0 (reversed-Z). Patch T045-zstencil-clear-zero (rsx_draw_engine.c sink_clear: zero clears to depth 0; pass capture logs color/zs per clear). Final binary, 105 s boot --pad 'cross@40*4/5,cross@70,r2:120@90,cross@100' (run 20261020-113603-891029): PROGRESSING, 5057 flips, unresolved 0, the arena draws (stadium, floor, goal, centre circle; camera moves between dumps). Before/after PNGs: captures/T045/ in the pi worktree (local only).
 - 2026-10-20 11:38 claude: HANDOFF: done=arena is no longer black (reversed-Z depth clear fixed, merged to main). state=remaining defects: (1) noisy/dithered textures on some surfaces: the floor grid band, wall panels (look like a texture format, swizzle or mip/LOD issue: start from passes.txt/draws.txt texture formats f81/f86/f88/fA5 for those draws); (2) HUD quads (top centre, top right, boost meter bottom right) are garbage: likely the same texture decode, or a render-to-texture surface sampled as guest memory; (3) black border around the frame (safe-area setting?); (4) no car visible: check whether the camera is an intro flythrough or the car is not drawn; (5) the D3D12 path rsx_live_draw.c:7591 has the same !zs ? 1.0f (Windows, T011). Also no dedicated regression test for the clear yet. next=pass dump with RSX_ENGINE_PASS_DUMP_DRAWS=1 after ~90 s, find the draw that samples the noisy texture, compare its format/layout with the decoder. Recipe in subsystems.md 'Arena renders black'.
 - 2026-10-20 11:38 claude: RELEASED: paused (user asked to wrap up); see HANDOFF
+- 2026-10-20 16:43 claude: claimed
+- 2026-10-20 16:43 claude: resumed from HANDOFF on main d1bfead; next: draw-level pass dump to find the noisy-texture draws

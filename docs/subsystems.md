@@ -28,7 +28,7 @@ work. Update the **Status** line of a section when you change it.
 
 - Game uses libgcm directly (UE3 PS3RHI). ps3recomp: cellGcmSys + FIFO walker + NV4097
   draw engine + Vulkan backend running guest programs.
-- Expected issues: flip/vblank pacing (game smooths to 60 fps, vsync on), labels/reports
+- Expected issues: flip/vblank pacing (the game is capped at 30 fps, user 2026-10-20; vsync on), labels/reports
   used as render-thread fences, tiled surfaces, zcull, post-FX render-to-texture, DXT
   textures from TFC, Bink YCrCb shaders.
 - First milestone: `LOADSCREEN` program draws the splash/loading screen.
@@ -117,7 +117,7 @@ work. Update the **Status** line of a section when you change it.
 
 ### Menu frame rate: Vulkan batching and the PCIe bus (T040, 2026-10-20, in progress)
 
-Goal (user): 60 fps in the main menu. After T033 the game uses about one core, so the limit is
+Goal (user): a steady 30 fps in the main menu, the game's own cap (60 until 2026-10-20). After T033 the game uses about one core, so the limit is
 the frame-clock thread (`frame_clock` in src/main.cpp), which drains the GCM FIFO into the
 Vulkan backend. **This machine's GPU link is PCIe 2.0 x4** (`nvidia-smi` under load; Gen1 x4
 idle), about 2 GB/s, so every byte or GPU round trip per frame is expensive.

@@ -11,8 +11,8 @@ you are touching instead of re-scanning the tree or the game files.
 
 ## Current state (keep this line true)
 
-**Phase 7 done: 01.09 reaches the main menu; now performance, goal 60 fps in the main menu** (user,
-2026-10-19). The PPU lift, all 15 SPU images, the 2 SPUJOBS jobs and the MultiStream overlay build
+**Phase 7 done: 01.09 reaches the main menu; now performance, goal a steady 30 fps in the main menu** (user,
+2026-10-20: the game itself is capped at 30 fps; the earlier 60 fps goal is dropped). The PPU lift, all 15 SPU images, the 2 SPUJOBS jobs and the MultiStream overlay build
 on 01.02 and 01.09, with 46 ps3recomp patch files. New Game loads and renders the arena (textures/HUD still wrong: T045). The menu runs at 29.5 fps (2026-10-20, from 19.8)
 after the SPURS CreateTask race fix (T033) and Vulkan draw batching with a VRAM geometry cache
 (T040, in progress; the GPU is on PCIe 2.0 x4). Upstream ps3recomp is at v0.16.0: the pin bump is

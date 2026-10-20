@@ -39,7 +39,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MAIN=$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)")
-SECS=60 GDB=0 EVERY=60 KEEP=5 QUIET=0 VERSION= PAD=
+SECS=60 GDB=0 EVERY=60 KEEP=5 QUIET=0 VERSION='' PAD=''
 while [ $# -gt 0 ]; do
     case "$1" in
         --gdb) GDB=1 ;;
