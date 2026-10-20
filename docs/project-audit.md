@@ -175,6 +175,8 @@ as results and check Git exit status. Keep tests out of another agent's checkout
 
 ### A06 — Medium: startup order and runtime configuration are implicit
 
+**Partly resolved (2026-10-20, claude):** the `[input]` reader accepts only `KEY_*`, `PAD_*`, `SARPBC_KBM_LOG` and `SARPBC_KEYBOARD` and reports the rest (`tools/test_input_config.py`); the MP3 stand-in falls back to `$XDG_CACHE_HOME/sarpbc` (or `~/.cache/sarpbc`) when the executable's directory is read-only. Still open: one explicit init function replacing the per-file static constructors, and marking the inert `config.toml` sections.
+
 **Evidence:** audio, input, GCM, injection and SPURS overrides use independent static
 constructors. Their relative initialization order across translation units is not
 a public contract. Startup writes a decoder stand-in beside the executable before
@@ -191,6 +193,8 @@ settings and mark inert template sections clearly or remove them. Put generated
 stand-ins in a selected writable data location, or install them explicitly.
 
 ### A07 — Medium: frame-clock lifetime and timing need an explicit contract
+
+**Partly resolved (2026-10-20, claude):** the vblank deadline is a fractional 60 Hz on the monotonic clock, the presented-frame counter is a `std::atomic`, `FRAME_CLOCK_SLEEP_MS` is validated (0-100), a failed `CreateThread` ends startup. Still open: an owned stop/join lifecycle (T018).
 
 **Evidence:** `src/main.cpp:252` advances by 16 ms, which is 62.5 Hz, not 60 Hz.
 The frame thread loops forever; after window close it disables rendering but keeps
@@ -246,6 +250,8 @@ lock; validate owner on done/release. Document the shared-board commit behavior.
 Keep the file-based board; no scheduler or database is warranted.
 
 ### A11 — Low: documentation and contribution metadata need one cleanup pass
+
+**Further resolved (2026-10-20, claude):** `README.md` added, the inert template examples are gone from `src/stubs.cpp`, status.md's stale items are fixed. Open: the owner has to choose a license for the original code (README says so).
 
 **Partly resolved by T048 (2026-10-20):** the doc check accepts git-ignored paths (generated lifts, game data) without them existing, and a missing submodule is a note (`--strict`: a problem), so a clean clone lints. The status/README/license items remain.
 

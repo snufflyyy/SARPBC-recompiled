@@ -5,16 +5,14 @@ work session. Newest log entry first. Use absolute dates.
 
 ## Resume here (updated 2026-10-20)
 
-**User priorities (2026-10-20, in order):** 1. ~~move ps3recomp to v0.16.0~~ (T043 done);
-2. **now: visual glitches and bugs**; 3. then a steady 30 fps in game (the game's own cap).
-Next steps for 2: the T021 "Port next" list at the top of docs/dod3-reuse.md (items 1-2 are
-ported as 0048/0049; next: 5 prepared flips at their FIFO position, 7 scissored depth clears
-and cropped depth copies for shadows, 8 fragment decompiler DDX/DDY/NRM/precision, 10
-anisotropic filtering); ~~T038 (upside-down Loading screen)~~ (T051 done: correct PNG row
-order replaces the unsafe shader-length workaround; [resolution](t038-review.md)); the `null-read,null-write` alerts a
-165 s arena survey raised (boot_report, not yet looked at); the glass canisters' shards draw
-opaque white (maybe correct, unverified). For 3: T040, and the dod3 pacing recipe in
-dod3-reuse.md (FIFO wake on guest usleep, `GetMaxTickRate`).
+**User priorities (2026-10-20):** performance and stability, in that order of work: done so
+far, the pin bump (T043), the visual fixes (T051 and earlier), a steady 30+ fps (T040: Single
+Player 19.5 to ~54 fps, arena ~30 to ~38, see subsystems.md "Menu frame rate") and the audit
+cleanups (T047-T049, A06/A07/A11 pieces). Next: the T021 "Port next" list in docs/dod3-reuse.md
+(5 prepared flips at their FIFO position, 7 scissored depth clears and cropped depth copies for
+shadows, 8 fragment decompiler DDX/DDY/NRM/precision, 10 anisotropic filtering), a real match
+(phase 8), frame pacing to a cap (T012), clean exit (T018, the `null-read` alerts in boot_report
+come from guest teardown after SIGTERM), glass-canister shards drawing opaque white (unverified).
 
 **To restart, start an agent (Claude Code, pi, Antigravity, ...) in the main checkout and say:**
 > Read AGENTS.md, docs/status.md "Resume here" and docs/workflow.md, then take the next task
@@ -57,14 +55,14 @@ Only 01.09 is built (`versions/0109/build`, ccache off for disk space). Setup no
 **User plan:** 1. ~~menus~~ reached. 2. **Now: performance, a steady 30 fps in the main menu** (the game's own cap; T040, then
 T043's upstream perf work). 3. The project audit (T039) was run on 2026-10-20 at the user's request.
 
-**Desktop launch (patch 0041, task T042-wayland):** native Wayland now works on the Fedora / RX 7800 XT
-host. Patch 0041 removes a 64-format limit (RADV reports 99). `./run.sh` needs no
+**Desktop launch (surface-format patch, task T042-wayland):** native Wayland now works on the Fedora / RX 7800 XT
+host. The patch removes a 64-format limit (RADV reports 99). `./run.sh` needs no
 X11 override; `SDL_VIDEODRIVER=wayland ./run.sh` explicitly selects Wayland. A
 45-second window test presented 3,581 guest frames without a headless fallback;
 this is not a main-menu FPS measurement. See build-linux.md "Desktop launch".
 
-**Queue:** the board's `Priority:` lines (`tools/task.sh next`): **T040 (steady 30 fps), T043 (pin bump), T029 (profiler mixer metric), T032/T031 (SPU
-DMA, codegen), T034 (callback stacks), T038 (upside-down Loading), then T020, T017, T021, T012, T009,
+**Queue:** the board's `Priority:` lines (`tools/task.sh next`): **T029 (profiler mixer metric), T032/T031 (SPU
+DMA, codegen), T034 (callback stacks), then T020, T017, T021, T012, T009,
 T018, T005, T010, T011, T013, T014. T015 (multiplayer) is **blocked** until the user has permission.
 T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena: a real match
 (phase 8: an exhibition with input over time, audio in the arena, frame rate there).
@@ -80,7 +78,7 @@ T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena
 | 4 | Project skeleton from the template, first lift + build on Linux | done 2026-10-18 |
 | 5 | Boot to first file opens / first HLE gaps | done 2026-10-18 |
 | 6 | Loading screen draws (`LOADSCREEN` FPO/VPO) | done 2026-10-18 — "Loading..." through Vulkan |
-| 7 | Intro movies / main menu | **reached 2026-10-19** on 01.09 (T028; X presses via PAD_FILE); ~30 fps on 2026-10-20 (T033, T040), goal 60 |
+| 7 | Intro movies / main menu | **reached 2026-10-19** on 01.09 (T028; X presses via PAD_FILE); 30+ fps on 2026-10-20 (T033, T040) |
 | 8 | Offline match in an arena, with input and audio | — |
 | 9 | Polish: saves, trophies, perf, split-screen; online later | — |
 

@@ -10,6 +10,9 @@
  * the file). Lower-case keys in [input] (elf_path, sfo_path) belong to the
  * lifter and are left alone.
  *
+ * Only KEY_*, PAD_*, SARPBC_KBM_LOG and SARPBC_KEYBOARD are accepted; other
+ * upper-case keys are reported and ignored (they could be PATH or LD_PRELOAD).
+ *
  * Values: a "quoted string", or a bare word/number/true/false (true -> 1,
  * false -> 0). One key = value per line, # comments. That is all of TOML this
  * section uses.
@@ -88,6 +91,16 @@ bool upper_key(const std::string& k)
     return true;
 }
 
+/* The only variables this section may set: keyboard bindings (KEY_*), the pad
+ * library's switches (PAD_*) and the two keyboard-driver switches. Anything else
+ * in upper case, such as PATH or LD_PRELOAD, would otherwise be exported from a
+ * config file to the whole process. */
+bool supported_key(const std::string& k)
+{
+    return k.rfind("KEY_", 0) == 0 || k.rfind("PAD_", 0) == 0 ||
+           k == "SARPBC_KBM_LOG" || k == "SARPBC_KEYBOARD";
+}
+
 }  // namespace
 
 /* Once, before the first reader. Any thread; the readers call it first. */
@@ -118,6 +131,11 @@ extern "C" void sarpbc_input_config(void)
         if (eq == std::string::npos) continue;
         std::string key = trim(s.substr(0, eq)), val = trim(s.substr(eq + 1));
         if (!upper_key(key)) continue;
+        if (!supported_key(key)) {
+            fprintf(stderr, "[input] %s: ignoring unsupported key %s (want KEY_*, PAD_*, SARPBC_KBM_LOG, SARPBC_KEYBOARD)\n",
+                    path.c_str(), key.c_str());
+            continue;
+        }
         if (!val.empty() && val[0] == '"') {
             size_t close = val.find('"', 1);
             val = close == std::string::npos ? val.substr(1) : val.substr(1, close - 1);

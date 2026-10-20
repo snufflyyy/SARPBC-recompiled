@@ -202,18 +202,31 @@ void serve_standin()
         fprintf(stderr, "[mp3] PS3_DEV_FLASH=%s set by the user: flashMP3.pic comes from there, not our stand-in\n", fw);
         return;
     }
-    const std::string root = exe_dir() + "/dev_flash";
-    const std::string dir = root + "/sys/external";
-    make_dirs(dir);
+    /* Beside the executable first; a read-only install directory falls back to
+     * the user's cache directory. */
+    std::vector<std::string> roots{exe_dir() + "/dev_flash"};
+#ifndef _WIN32
+    if (const char* xdg = getenv("XDG_CACHE_HOME"); xdg && *xdg) roots.push_back(std::string(xdg) + "/sarpbc/dev_flash");
+    else if (const char* home = getenv("HOME"); home && *home) roots.push_back(std::string(home) + "/.cache/sarpbc/dev_flash");
+#else
+    if (const char* tmp = getenv("TEMP"); tmp && *tmp) roots.push_back(std::string(tmp) + "\\sarpbc\\dev_flash");
+#endif
     const std::vector<uint8_t> pic = build_standin();
-    const std::string path = dir + "/flashMP3.pic";
-    FILE* out = fopen(path.c_str(), "wb");
-    if (!out || fwrite(pic.data(), 1, pic.size(), out) != pic.size()) {
-        fprintf(stderr, "[mp3] cannot write the stand-in %s: MultiStream gets no MP3 decoder\n", path.c_str());
+    std::string root, path;
+    for (const std::string& candidate : roots) {
+        const std::string dir = candidate + "/sys/external";
+        make_dirs(dir);
+        const std::string p = dir + "/flashMP3.pic";
+        FILE* out = fopen(p.c_str(), "wb");
+        const bool ok = out && fwrite(pic.data(), 1, pic.size(), out) == pic.size();
         if (out) fclose(out);
+        if (ok) { root = candidate; path = p; break; }
+        fprintf(stderr, "[mp3] cannot write the stand-in %s\n", p.c_str());
+    }
+    if (root.empty()) {
+        fprintf(stderr, "[mp3] no writable place for the stand-in: MultiStream gets no MP3 decoder\n");
         return;
     }
-    fclose(out);
 #ifdef _WIN32
     _putenv_s("PS3_DEV_FLASH", root.c_str());
 #else

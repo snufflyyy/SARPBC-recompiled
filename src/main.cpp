@@ -44,6 +44,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <atomic>
 #include <string>
 #ifndef _WIN32
 #include <sys/mman.h>
@@ -178,7 +179,7 @@ extern "C" int  rsx_null_backend_pump_messages(void);
  * The ticks are driven off real elapsed time rather than off how long present()
  * took. A hidden or occluded window makes present block hard, and pacing the
  * ticks behind it paces the whole game behind it. */
-static volatile LONG g_frames_presented = 0;
+static std::atomic<unsigned> g_frames_presented{0};
 
 /* Frames handed to the backend at a guest FLIP boundary -- one per frame the
  * guest actually finished. The presents made before the guest's first flip, so
@@ -186,15 +187,15 @@ static volatile LONG g_frames_presented = 0;
  * and are deliberately not counted. */
 extern "C" unsigned ppu_boot_frames_presented(void)
 {
-    return (unsigned)g_frames_presented;
+    return g_frames_presented.load(std::memory_order_acquire);
 }
 
 static void present_guest_frame(void)
 {
     rsx_backend_present();
-    /* This thread increments and guest threads read, so interlocked rather
-     * than a volatile ++, which on arm64 is neither atomic nor a fence. */
-    InterlockedIncrement(&g_frames_presented);
+    /* This thread increments and guest threads read: a real atomic, not a
+     * volatile, which gives no ordering on arm64 or in the C++ model. */
+    g_frames_presented.fetch_add(1, std::memory_order_release);
 }
 
 static DWORD WINAPI frame_clock(LPVOID)
@@ -207,7 +208,6 @@ static DWORD WINAPI frame_clock(LPVOID)
             rsx_ok ? "OK -- window open" : "FAILED");
 
     unsigned  last_flip = 0;
-    ULONGLONG next_tick = GetTickCount64();
 
     /* FRAME_CLOCK_SLEEP_MS: the outer drain cadence (default 1 ms: with the
      * render-pass sharing and inlined vertex decode, 4 ms left the thread idle a
@@ -215,12 +215,20 @@ static DWORD WINAPI frame_clock(LPVOID)
      * arena 31 against 34; the guest waits on labels this drain writes). FRAME_CLOCK_STATS=1: where this
      * thread's time goes, as ms per 5 s in sleep / FIFO drain / present. */
     DWORD outer_ms = 1;
-    if (const char* e = getenv("FRAME_CLOCK_SLEEP_MS")) outer_ms = (DWORD)atoi(e);
+    if (const char* e = getenv("FRAME_CLOCK_SLEEP_MS")) {
+        char* end = nullptr;
+        const long v = strtol(e, &end, 10);
+        if (end != e && *end == '\0' && v >= 0 && v <= 100) outer_ms = (DWORD)v;
+        else fprintf(stderr, "[frame_clock] ignoring FRAME_CLOCK_SLEEP_MS='%s' (want 0-100)\n", e);
+    }
     const int stats = getenv("FRAME_CLOCK_STATS") != nullptr;
     auto now_us = []() -> unsigned long long {
         struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
         return (unsigned long long)ts.tv_sec * 1000000ull + (unsigned long long)ts.tv_nsec / 1000ull;
     };
+    /* The vblank deadline is a fractional 60 Hz on the monotonic clock
+     * (16666.67 us, kept in 1/3 us): a fixed 16 ms step ran at 62.5 Hz. */
+    unsigned long long next_tick_x3 = now_us() * 3ull;
     unsigned long long st_sleep = 0, st_fifo = 0, st_present = 0, st_t0 = now_us(), st_n = 0;
     unsigned st_presents = 0;
     #define FC_TIMED(acc, stmt) do { if (stats) { unsigned long long _t = now_us(); stmt; acc += now_us() - _t; } else { stmt; } } while (0)
@@ -233,10 +241,10 @@ static DWORD WINAPI frame_clock(LPVOID)
             st_sleep = st_fifo = st_present = st_n = 0; st_presents = 0; st_t0 = now_us();
         }
         st_n++;
-        ULONGLONG now = GetTickCount64();
+        const unsigned long long now_x3 = now_us() * 3ull;
 
         int fired = 0;
-        while ((long long)(now - next_tick) >= 0 && fired < 240) {
+        while ((long long)(now_x3 - next_tick_x3) >= 0 && fired < 240) {
             cellGcmTickVBlank();
             cellGcmTickFlip();
             /* Present a pending flip BEFORE draining any further. The flip
@@ -252,10 +260,10 @@ static DWORD WINAPI frame_clock(LPVOID)
              * labels the game's per-frame logic blocks on, so it has to keep
              * advancing at 60 Hz even while present() throttles. */
             if (rsx_ok) FC_TIMED(st_fifo, cellGcm_rsx_process_fifo());
-            next_tick += 16;             /* ~60 Hz */
+            next_tick_x3 += 50000ull;    /* 1/60 s = 16666.67 us = 50000/3 us */
             fired++;
         }
-        if (fired >= 240) next_tick = now;   /* fell too far behind -- resync */
+        if (fired >= 240) next_tick_x3 = now_x3;   /* fell too far behind -- resync */
 
         /* Drain at the outer cadence too, not only on the 16 ms tick: titles
          * fence every render pass on a label the drain writes, and one wave of
@@ -459,7 +467,10 @@ int main(int argc, char** argv)
     /* Install the guest-callback hook, then start the frame clock. It no-ops
      * until the title registers its vblank and flip handlers during init. */
     g_ps3_guest_caller = harness_guest_caller;
-    CreateThread(NULL, 4u * 1024 * 1024, frame_clock, NULL, 0, NULL);
+    if (!CreateThread(NULL, 4u * 1024 * 1024, frame_clock, NULL, 0, NULL)) {
+        fprintf(stderr, "ERROR: could not start the frame clock thread\n");
+        return 1;
+    }
 
     printf("\n[boot] dispatching entry OPD 0x%08X (stack top 0x%08X)\n\n",
            entry, STACK_TOP);
