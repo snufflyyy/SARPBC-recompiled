@@ -208,11 +208,41 @@ RSX_ENGINE_PASS_DUMP_DRAWS=1`, 105 s boot with
   and the arena draws (stadium, floor, walls). The D3D12 path,
   `rsx_live_draw.c:7591`, has the same `!zs ? 1.0f` and is not patched yet.
 
-**Still wrong after the fix** (what T045 has left): some surfaces sample noisy
-textures (the yellow wall panels, the floor grid band: maybe a texture format,
-swizzle or mip issue, not investigated). The HUD rectangles (top centre, top
-right, boost meter bottom right) are still garbage. The frame has a black
-border (maybe the safe-area setting). No car is visible from the camera.
+What was still wrong after this fix (noisy surfaces, garbage HUD) was the
+next section.
+
+### Arena textures: NV0039 copies on subchannel 1 (T045, 2026-10-20)
+
+After the depth fix the arena drew, but the floor grate, the city windows and
+the HUD sampled noise. `RSX_ENGINE_PASS_DUMP_TEX=1` (patch 0047) dumped every
+decoded texture: the DXT ones were right, but the swizzled A8R8G8B8/B8 ones in
+local memory (HUD atlas `0x03B38B80` 1024x1024 f85, `0x008D8600` 512x512 f81,
+the 64x64 icons) were blocks of *other* textures in Morton-shaped staircases:
+stale VRAM, not a decode bug. A one-off histogram of non-zero subchannels
+showed why: the game sends **NV0039** (memory-to-memory copy, libgcm's default
+binding on subchannel 1) `0x0184` x2 (DMA in/out) and `0x030C` x8 (offset
+in/out, pitch in/out, line length, line count, format `0x101`, BUFFER_NOTIFY).
+The pin treated subchannel 1 as NV4097 (for Twisted Metal), so no copy ran and
+the words landed on NV4097 `0x030C..0x0328` (blend enable/factors/colour mask).
+The draw engine also got NV3062 (subchannel 3) and NV3089 (6) methods with the
+subchannel masked off, i.e. on the alpha-test and blend registers.
+
+Patch `0048-nv0039-copy-engine`: NV0039 copies (local/main, signed pitches,
+element increments; the report area `0x66626660` as a source, which the game
+uses to copy 32-304 bytes of reports to main IO `0x300000`); subchannel 1 is
+NV0039 until it carries a method NV0039 lacks; only 3D-routed methods reach the
+draw engine. Copies seen in the arena: VRAM to VRAM, e.g. 2048 B
+`0x740CF00 -> 0x7437D00`. Test: `tools/test_gcm_nv0039.py`.
+
+After it (run `20261020-170312`, 130 s, `--pad 'cross@40*4/5,cross@70,r2:200@90,r2:200@105,cross@100'`):
+the floor, walls and windows are clean, the HUD is right (timer, score, stars,
+boost meter), and the car is drawn and drives into the goal tunnel on throttle.
+**Still wrong:** the car's shadow is a dark square on the floor (a projected
+shadow texture or its depth compare: not looked at); the scene fills only the
+middle 1088x612 (85%) of the 1280x720 frame with a black border, which may be
+the safe-area setting from the boot prompt and not a bug (not checked against
+hardware); D3D12 (`rsx_live_draw.c`) still gets every subchannel's methods and
+has the `!zs ? 1.0f` clear (T011).
 
 ## Audio
 

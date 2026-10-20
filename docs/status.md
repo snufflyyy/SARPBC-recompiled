@@ -20,8 +20,9 @@ the game is capped at 30 fps on PS3, so the earlier 60 fps goal is dropped). The
 intro is Loading, ESRB with the car, Powered by Unreal, the Psyonix logo, the safe-area screen
 (needs X), then the menu: CROSS at 45 s and again at 50 s by `PAD_FILE` (T036 will make that
 `boot_check --pad`). New Game now loads MP_SOCCARARENA + PYRAMID_COLLECTBOOST and keeps presenting (T037, T044),
-and **the arena now renders** (T045 depth-clear fix: the game uses reversed-Z). Left in T045:
-noisy textures on some surfaces, garbage HUD, no car in view. Real MP3 audio
+and **the arena renders and plays** (T045: reversed-Z depth clear, then NV0039 texture copies):
+clean textures, a working HUD, the car drives on throttle. Left in T045: the car's shadow is a
+dark square, and a black border (85% frame, maybe the safe-area setting). Real MP3 audio
 plays (T007). `boot_check --pad` scripts the presses (T036). There's no Bink in 01.09.
 
 **Last verified on `main` (fc9cdf4, 2026-10-20, `PS3_VERBOSE=0`, under the boot lock):** a 120 s
@@ -29,8 +30,8 @@ boot_check is PROGRESSING with 3513 flips; the main menu runs at **29.5 fps** (1
 26.3-32.3), ~130% CPU, 28 threads. Where a menu frame's ~31 ms go, and what to try next:
 subsystems.md "Menu frame rate".
 
-**State of `main`:** 46 patch files (64 commits) on upstream `39a3629` (v0.15.0); every one of the
-79 test scripts (ours and ps3recomp's) passes on that stack (2026-10-20, `tools/lint.py --tests`). Upstream is now at v0.16.0 with
+**State of `main`:** 48 patch files (66 commits) on upstream `39a3629` (v0.15.0); every one of the
+80 test scripts (ours and ps3recomp's) passes on that stack (2026-10-20, `tools/lint.py --tests`). Upstream is now at v0.16.0 with
 fixes and menu-relevant perf work we don't have yet: T043 bumps the pin. Both versions are
 relifted. The big fixes of the last two days: the SPURS CreateTask race that started tasks twice
 (0038, T033: ~1500% CPU to ~100%) and Vulkan draw batching with a VRAM geometry cache (0040, T040:
@@ -50,8 +51,8 @@ X11 override; `SDL_VIDEODRIVER=wayland ./run.sh` explicitly selects Wayland. A
 45-second window test presented 3,581 guest frames without a headless fallback;
 this is not a main-menu FPS measurement. See build-linux.md "Desktop launch".
 
-**Queue:** the board's `Priority:` lines (`tools/task.sh next`): **T045 (arena textures/HUD, P1,
-read its HANDOFF)**, T040 (steady 30 fps), T043 (pin bump), T029 (profiler mixer metric), T032/T031 (SPU
+**Queue:** the board's `Priority:` lines (`tools/task.sh next`): **T045 (arena shadow/border, P1,
+read its log)**, T040 (steady 30 fps), T043 (pin bump), T029 (profiler mixer metric), T032/T031 (SPU
 DMA, codegen), T034 (callback stacks), T038 (upside-down Loading), then T020, T017, T021, T012, T009,
 T018, T005, T010, T011, T013, T014. T015 (multiplayer) is **blocked** until the user has permission.
 T007, T036, T037 and T044 were closed on 2026-10-20.
@@ -98,7 +99,14 @@ T007, T036, T037 and T044 were closed on 2026-10-20.
 
 ## Log
 
-### 2026-10-20 (session 10): target is 30 fps, not 60
+### 2026-10-20 (session 10): arena textures and HUD fixed (NV0039); target is 30 fps, not 60
+- claude: T045: the arena's noisy textures and garbage HUD were stale VRAM. The game streams
+  textures into local memory with NV0039 copies on subchannel 1 (libgcm's default binding), which
+  the pin routed to NV4097: no copy ran and the words hit the blend registers. Patch
+  `0048-nv0039-copy-engine` (+ test) performs the copies and keeps 2D-engine methods out of the
+  draw engine's 3D state; `0047-pass-dump-textures` dumps decoded textures (how it was found).
+  The arena now has clean textures, the right HUD, and the car drives. subsystems.md "Arena
+  textures: NV0039 copies on subchannel 1".
 - User: the game is limited to 30 fps normally; the menu goal becomes a steady 30 fps (AGENTS.md,
   T040, subsystems.md updated). The menu is already at ~29.5 fps, so T040 is now about the dips
   (1 s windows down to 26) rather than throughput.

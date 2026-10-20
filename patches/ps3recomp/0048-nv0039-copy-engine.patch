@@ -1,0 +1,438 @@
+From a8a5f1650dd160fb01a629db9edbe8da85bd7ca9 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Tue, 20 Oct 2026 17:07:25 +0000
+Subject: [PATCH 48/48] gcm: perform NV0039 copies; only 3D-routed methods
+ reach the 3D state
+
+libgcm binds NV0039 (memory to memory format) to subchannel 1, and
+cellGcmSetTransferData drives it there: 0x0184 DMA in/out, then 0x030C..
+0x0328 (offsets, pitches, line length/count, format, BUFFER_NOTIFY). The
+walker treated subchannel 1 as NV4097 (for Twisted Metal), so no copy ran
+and the words landed on NV4097's blend and colour-mask registers. SARPBC
+streams its arena textures into VRAM this way: they sampled stale VRAM,
+older textures Morton-scrambled at the new size (noisy surfaces, garbage
+HUD).
+
+- NV0039 is implemented: line copies with signed pitches and element
+  increments, between local and main memory, and from the local report
+  area (DMA 0x66626660, cellGcmSetTransferReportData) as big-endian
+  16-byte reports. The draw engine reads rendered surfaces back before a
+  copy and is told about the bytes written after it.
+- Subchannel 1 is NV0039 until it carries a method NV0039 does not have,
+  and NV4097 from then on (SET_OBJECT is never seen: the HLE cellGcmInit
+  emits no bindings). GCM_SUBCH1_2D=1 / GCM_SUBCH1_3D=1 force either.
+- The draw engine was fed every subchannel's methods with the subchannel
+  masked off, so NV3062 and NV3089 state also overwrote NV4097 0x0300..
+  0x031C (alpha test, blend). Now it gets subchannel 0, 1 when it is 3D,
+  and 7 (driver methods), as the legacy path already did.
+- rsx_draw_engine_guest_wrote marks cached textures in the written range
+  for a re-hash on their next use, so a texture copied in is drawn the same
+  frame.
+
+Test: tools/test_gcm_nv0039.py (tests/test_gcm_nv0039.c).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/cellGcmSys.c      | 151 +++++++++++++++++++++++++++++++++--
+ libs/video/rsx_draw_engine.c |   8 +-
+ tests/test_gcm_nv0039.c      | 147 ++++++++++++++++++++++++++++++++++
+ tools/test_gcm_nv0039.py     |  21 +++++
+ 4 files changed, 319 insertions(+), 8 deletions(-)
+ create mode 100644 tests/test_gcm_nv0039.c
+ create mode 100755 tools/test_gcm_nv0039.py
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 3a37d33..63b0f2f 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1230,6 +1230,137 @@ static void nv3089_blit(void)
+                out_w, out_h, f, src, in_pitch, dst, dst_pitch, out_x, out_y); } }
+ }
+ 
++/* NV0039 "memory to memory format": the RSX's DMA copy engine, which libgcm's
++ * cellGcmSetTransferData drives on subchannel 1 (its default binding; NV3062
++ * is on 3, NV309E 4, NV308A 5, NV3089 6). A title that streams textures into
++ * local memory with it gets whatever was there before -- older textures,
++ * Morton-scrambled at the new size -- unless the copy is performed.
++ *
++ * Registers: 0x0184/0x0188 source/destination DMA (0xFEED0000 local,
++ * 0xFEED0001 main), then 0x030C offset in, 0x0310 offset out, 0x0314 pitch
++ * in (signed), 0x0318 pitch out (signed), 0x031C line length in bytes,
++ * 0x0320 line count, 0x0324 format ((out_inc << 8) | in_inc, bytes between
++ * elements; 1 = contiguous), and 0x0328 BUFFER_NOTIFY, which starts it. */
++static struct {
++    u32 dma_in, dma_out, off_in, off_out, line_len, line_count, fmt;
++    s32 pitch_in, pitch_out;
++} s_nv0039;
++
++/* The NV0039 registers, and the only methods it accepts. */
++static int nv0039_method(u32 m)
++{
++    return m == 0x0000 || m == 0x0180 || m == 0x0184 || m == 0x0188 ||
++           (m >= 0x030C && m <= 0x0328);
++}
++
++static void nv0039_copy(void)
++{
++    extern u8* vm_base;
++    const u32 len = s_nv0039.line_len, lines = s_nv0039.line_count;
++    u32 in_inc = s_nv0039.fmt & 0xFFu, out_inc = (s_nv0039.fmt >> 8) & 0xFFu;
++    if (!in_inc) in_inc = 1;
++    if (!out_inc) out_inc = 1;
++    /* CELL_GCM_CONTEXT_DMA_REPORT_LOCATION_LOCAL as the source: the title
++     * copies its local reports (s_report_data, 16 bytes a slot) out to main
++     * memory with cellGcmSetTransferReportData, and reads them there. */
++    if (s_nv0039.dma_in == 0x66626660u && (s_nv0039.dma_out & ~1u) == 0xFEED0000u &&
++        vm_base && len && lines) {
++        const u32 dst = cellGcmResolveLocated(s_nv0039.dma_out != 0xFEED0001u,
++                                              s_nv0039.off_out);
++        for (u32 y = 0; dst && y < lines; y++)
++            for (u32 x = 0; x < len; x++) {
++                const u32 at = s_nv0039.off_in + (u32)((s32)y * s_nv0039.pitch_in) + x;
++                const u32 slot = at / 16u, b = at % 16u;
++                u8 v = 0;
++                if (slot < CELL_GCM_MAX_REPORT_COUNT) {
++                    const u64 ts = s_report_data[slot].timestamp;
++                    const u32 val = s_report_data[slot].value;
++                    if (b < 8)       v = (u8)(ts >> (56 - 8 * b));
++                    else if (b < 12) v = (u8)(val >> (24 - 8 * (b - 8)));
++                }
++                vm_base[(u32)(dst + (u32)((s32)y * s_nv0039.pitch_out) + x * out_inc)] = v;
++            }
++        return;
++    }
++    /* Anything but the two memory DMA objects is not a transfer this engine
++     * knows how to address; skip it loudly rather than write somewhere. */
++    const int dma_ok = (s_nv0039.dma_in  & ~1u) == 0xFEED0000u &&
++                       (s_nv0039.dma_out & ~1u) == 0xFEED0000u;
++    const u32 src = cellGcmResolveLocated(s_nv0039.dma_in  != 0xFEED0001u, s_nv0039.off_in);
++    const u32 dst = cellGcmResolveLocated(s_nv0039.dma_out != 0xFEED0001u, s_nv0039.off_out);
++    static int logged, bad;
++    if (!dma_ok || !vm_base || !len || !lines || !src || !dst) {
++        if (bad++ < 8)
++            printf("[NV0039] skipped copy: dma %08X->%08X off 0x%X->0x%X len %u lines %u%c",
++                   s_nv0039.dma_in, s_nv0039.dma_out, s_nv0039.off_in, s_nv0039.off_out,
++                   len, lines, 10);
++        return;
++    }
++    if (logged++ < 4)
++        printf("[NV0039] copy %u x %u B: %s 0x%X (pitch %d) -> %s 0x%X (pitch %d) fmt 0x%X%c",
++               lines, len, s_nv0039.dma_in == 0xFEED0001u ? "main" : "local",
++               s_nv0039.off_in, s_nv0039.pitch_in,
++               s_nv0039.dma_out == 0xFEED0001u ? "main" : "local",
++               s_nv0039.off_out, s_nv0039.pitch_out, s_nv0039.fmt, 10);
++    /* Rendered surfaces exist on the host GPU: bring a source one back to
++     * guest memory first, and push the result into a destination one after.
++     * The engine's coherence works in 32-bit pixels at a positive pitch. */
++    const int coherent = rsx_draw_engine_enabled() && in_inc == 1 && out_inc == 1 &&
++                         !(len & 3u) && s_nv0039.pitch_in > 0 && s_nv0039.pitch_out > 0;
++    const u32 loc_in  = s_nv0039.dma_in  == 0xFEED0001u ? RSX_LOCATION_MAIN : RSX_LOCATION_LOCAL;
++    const u32 loc_out = s_nv0039.dma_out == 0xFEED0001u ? RSX_LOCATION_MAIN : RSX_LOCATION_LOCAL;
++    if (coherent)
++        rsx_draw_engine_guest_read(loc_in, s_nv0039.off_in, (u32)s_nv0039.pitch_in,
++                                   len / 4u, lines);
++    for (u32 y = 0; y < lines; y++) {
++        const u8* sp = vm_base + (u32)(src + (s32)y * s_nv0039.pitch_in);
++        u8* dp = vm_base + (u32)(dst + (s32)y * s_nv0039.pitch_out);
++        if (in_inc == 1 && out_inc == 1) { memmove(dp, sp, len); continue; }
++        for (u32 x = 0; x < len; x++) dp[x * out_inc] = sp[x * in_inc];
++    }
++    if (coherent)
++        rsx_draw_engine_guest_wrote(loc_out, s_nv0039.off_out, (u32)s_nv0039.pitch_out,
++                                    len / 4u, lines);
++}
++
++static void nv0039_set(u32 method, u32 data)
++{
++    switch (method) {
++    case 0x0184: s_nv0039.dma_in     = data; return;
++    case 0x0188: s_nv0039.dma_out    = data; return;
++    case 0x030C: s_nv0039.off_in     = data; return;
++    case 0x0310: s_nv0039.off_out    = data; return;
++    case 0x0314: s_nv0039.pitch_in   = (s32)data; return;
++    case 0x0318: s_nv0039.pitch_out  = (s32)data; return;
++    case 0x031C: s_nv0039.line_len   = data; return;
++    case 0x0320: s_nv0039.line_count = data; return;
++    case 0x0324: s_nv0039.fmt        = data; return;
++    case 0x0328: nv0039_copy(); return;
++    }
++}
++
++/* Which engine subchannel 1 drives. libgcm binds NV0039 there, and the copies
++ * this title issues land on it; Twisted Metal's SPU-built lists bind NV4097
++ * there instead (see the walker). SET_OBJECT is not seen -- the HLE
++ * cellGcmInit emits no bindings -- so the methods decide: subchannel 1 is
++ * NV0039 until it carries one NV0039 does not have, and NV4097 from then on.
++ * GCM_SUBCH1_2D=1 / GCM_SUBCH1_3D=1 force either. */
++static int gcm_subch1_is_3d(u32 method)
++{
++    static int forced = -2, is_3d = 0;
++    if (forced == -2) {
++        forced = getenv("GCM_SUBCH1_2D") && atoi(getenv("GCM_SUBCH1_2D")) ? 0
++               : getenv("GCM_SUBCH1_3D") && atoi(getenv("GCM_SUBCH1_3D")) ? 1 : -1;
++    }
++    if (forced >= 0) return forced;
++    if (!is_3d && !nv0039_method(method)) {
++        is_3d = 1;
++        printf("[cellGcmSys] subchannel 1 carries method 0x%04X: NV4097 from now on, "
++               "not NV0039%c", method, 10);
++    }
++    return is_3d;
++}
++
+ static void gcm_2d_method(u32 subch, u32 method, u32 data)
+ {
+     /* GCM2D_TRACE=1: histogram of (subchannel, method) actually seen. The
+@@ -2078,11 +2209,14 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                  * NV308A/NV309E, NV3089), so anything arriving on 1 was being
+                  * dropped on the floor -- for this title that included
+                  * SET_SHADER_PROGRAM, leaving one stale fragment program bound
+-                 * for every draw in the game. Treat the subchannels the 2D path
+-                 * does not claim as 3D. GCM_SUBCH1_2D=1 restores the old split.
++                 * for every draw in the game. But libgcm's own default binding
++                 * for subchannel 1 is NV0039, and its copies arrive there too:
++                 * gcm_subch1_is_3d tells the two apart. Subchannels 2-6 are the
++                 * 2D objects and 7 the driver methods. Only what goes to 3D may
++                 * reach the 3D register files: NV3062/NV3089/NV0039 methods
++                 * masked to 0x1FFC are NV4097's alpha-test and blend registers.
+                  */
+-                static int s1_2d = -1;
+-                if (s1_2d < 0) { const char* e = getenv("GCM_SUBCH1_2D"); s1_2d = e ? atoi(e) : 0; }
++                const int to_3d = subch == 0 || (subch == 1 && gcm_subch1_is_3d(m));
+                 /* GCM_SUBCH_GATE=<file>: while <file> exists, log every method on a
+                  * non-zero subchannel -- what each binding slot actually carries. */
+                 { static const char* sg = (const char*)-1; static unsigned poll; static int open_g;
+@@ -2119,7 +2253,8 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                  * same reason the live engine does, and masks them itself. */
+                 { static int eng = -1;
+                   if (eng < 0) eng = rsx_draw_engine_enabled();
+-                  if (eng) rsx_draw_engine_method((subch << 13) | m, vm_read32(dea)); }
++                  if (eng && (to_3d || subch == 7))
++                      rsx_draw_engine_method((subch << 13) | m, vm_read32(dea)); }
+ 
+                 /* RSX_LIVE_FEED_DBG=1: what the FIFO actually carries. Counted
+                  * for any run, live engine or not, so the method stream and the
+@@ -2146,7 +2281,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                     cellGcmQueueUserCommand(vm_read32(dea));
+                 } else if (mfull == 0xE920u || mfull == 0xE924u) {
+                     cellGcmSetFlipCommand(vm_read32(dea) & 7u);
+-                } else if (subch == 0 || (subch == 1 && !s1_2d)) {
++                } else if (to_3d) {
+                     rsx_process_method(&s_state, m, vm_read32(dea));
+                     /* NV406E_SET_REFERENCE: queue the fence value for PACED
+                      * publication (gcm_ref_publish below) instead of letting a
+@@ -2177,7 +2312,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                             s_report_data[idx].value = val;
+                         }
+                     }
+-                } else
++                } else if (subch == 1)
++                    nv0039_set(m, vm_read32(dea));
++                else
+                     gcm_2d_method(subch, m, vm_read32(dea));
+                 }
+             }
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index f49f01d..de25bb1 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -730,9 +730,15 @@ void rsx_draw_engine_guest_read(u32 location, u32 offset, u32 pitch, u32 w, u32
+     }
+ }
+ 
++static void eng_textures_touch(u32 location, u32 offset, u32 bytes);
++
+ void rsx_draw_engine_guest_wrote(u32 location, u32 offset, u32 pitch, u32 w, u32 h)
+ {
+-    if (!g.ready || !g.be->color_target_write || !pitch || !w || !h) return;
++    if (!g.ready || !pitch || !w || !h) return;
++    /* Cached textures in those bytes re-hash on their next use, not next
++     * frame: a texture copied into VRAM is often drawn in the same frame. */
++    eng_textures_touch(location, offset, pitch * (h - 1u) + w * 4u);
++    if (!g.be->color_target_write) return;
+     u32 x = 0, y = 0;
+     const u32 slot = eng_surface_at(location, offset, pitch, &x, &y);
+     if (slot == ENG_INVALID) {
+diff --git a/tests/test_gcm_nv0039.c b/tests/test_gcm_nv0039.c
+new file mode 100644
+index 0000000..d1e97b1
+--- /dev/null
++++ b/tests/test_gcm_nv0039.c
+@@ -0,0 +1,147 @@
++/* NV0039 copies on subchannel 1, libgcm's default binding for it
++ * (cellGcmSetTransferData), are performed by the FIFO walker, and only
++ * methods routed to NV4097 reach the 3D register files. Then a method NV0039
++ * does not have arrives on subchannel 1, which makes it NV4097 from then on
++ * (Twisted Metal binds NV4097 there).
++ *
++ * Includes the real implementation, as test_gcm_prepare_flip.c does. */
++#include "../libs/video/cellGcmSys.c"
++#include <assert.h>
++
++uint8_t* vm_base;
++uint32_t ppu_vm_size;
++int g_resv_store_active;
++uint32_t g_ww_lo, g_ww_hi;
++void ppu_resv_break_store(uint64_t ea) { (void)ea; }
++void ps3_ww_report_inline(uint32_t a, uint64_t v, int w) { (void)a; (void)v; (void)w; }
++int spu_coh_is_reserved(uint32_t a) { (void)a; return 0; }
++void spu_coh_notify_write(uint32_t a) { (void)a; }
++void spu_lockline_lock(void) {}
++void spu_lockline_unlock(void) {}
++ps3_guest_caller_fn g_ps3_guest_caller;
++PPU_THREAD_LOCAL ppu_context* g_active_ctx;
++u32 g_rsx_last_reference;
++void (*g_spu_put_hook)(uint32_t ea, uint32_t size);
++void ppu_dump_bctrl_ring(uint32_t n, const char* why) { (void)n; (void)why; }
++void ppu_dump_guest_stack(ppu_context* c, const char* why) { (void)c; (void)why; }
++void rsx_raise_user_cmd(uint32_t arg) { (void)arg; }
++int  rsx_live_draw_enabled(void) { return 0; }
++void rsx_live_draw_method(u32 method, u32 arg) { (void)method; (void)arg; }
++int  rsx_live_draw_blit(u32 a, u32 b, u32 c, u32 d, u32 e, u32 f, u32 w, u32 h)
++{ (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)w; (void)h; return 0; }
++void rsx_live_draw_note_resolve(u32 a, u32 b, u32 c, u32 d) { (void)a; (void)b; (void)c; (void)d; }
++int  rsx_live_draw_resolve_blit(u32 a, u32 b, u32 c, u32 d, u32 e, u32 f, u32 g, u32 h,
++                                u32 i, u32 j, u32 k, u32 l)
++{ (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h; (void)i; (void)j; (void)k; (void)l; return 0; }
++void rsx_draw_engine_note_flip(u32 buffer_id) { (void)buffer_id; }
++#ifndef _WIN32
++BOOL SetEvent(HANDLE h) { (void)h; return 1; }   /* no interrupt worker here */
++#endif
++
++/* What reached the 3D side: the legacy state machine and the draw engine. */
++static u32 legacy[64], n_legacy, engine[64], n_engine;
++static unsigned guest_reads, guest_writes;
++void rsx_state_init(rsx_state* state) { (void)state; }
++int  rsx_process_method(rsx_state* state, u32 method, u32 data)
++{ (void)state; (void)data; if (n_legacy < 64) legacy[n_legacy++] = method; return 0; }
++int  rsx_draw_engine_enabled(void) { return 1; }
++void rsx_draw_engine_method(u32 method, u32 arg)
++{ (void)arg; if (n_engine < 64) engine[n_engine++] = method; }
++void rsx_draw_engine_guest_read(u32 l, u32 o, u32 p, u32 w, u32 h)
++{ (void)l; (void)o; (void)p; (void)w; (void)h; guest_reads++; }
++void rsx_draw_engine_guest_wrote(u32 l, u32 o, u32 p, u32 w, u32 h)
++{ (void)l; (void)o; (void)p; (void)w; (void)h; guest_writes++; }
++
++#define IO_ADDR   0x00100000u
++#define IO_SIZE   0x00100000u
++#define CMD_SIZE  0x00010000u
++#define SRC_IO    0x00020000u     /* IO offsets: main memory at IO_ADDR + off */
++#define DST_IO    0x00030000u
++
++static uint32_t g_heap = 0x00400000u;
++static u32 host_alloc(u32 size, u32 align)
++{
++    if (!align) align = 4;
++    g_heap = (g_heap + align - 1u) & ~(align - 1u);
++    u32 r = g_heap;
++    g_heap += size;
++    return r;
++}
++static void gw32(uint32_t ea, uint32_t v)
++{
++    uint8_t* p = vm_base + ea;
++    p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v;
++}
++
++static u32 head, cdata, ctrl;
++static void method(u32 subch, u32 m, u32 count, const u32* data)
++{
++    gw32(IO_ADDR + head, (count << 18) | (subch << 13) | m); head += 4;
++    for (u32 i = 0; i < count; i++) { gw32(IO_ADDR + head, data[i]); head += 4; }
++}
++static void kick(void)
++{
++    gw32(cdata + 0x8, IO_ADDR + head);
++    vm_write32(ctrl + 0, head);
++    cellGcm_rsx_process_fifo();
++    assert(vm_read32(ctrl + 4) == head);
++}
++static int saw(const u32* list, u32 n, u32 m)
++{
++    for (u32 i = 0; i < n; i++) if ((list[i] & 0x1FFCu) == m) return 1;
++    return 0;
++}
++
++int main(void)
++{
++    setvbuf(stdout, NULL, _IONBF, 0);
++    const uint32_t vm_size = ppu_hle_inject_base + 0x10000u;
++    vm_base = (uint8_t*)calloc(1, vm_size);
++    assert(vm_base);
++    ppu_vm_size = vm_size;
++    u32 ctx_out = host_alloc(4, 4);
++    cdata = cellGcmSetupContext(ctx_out, CMD_SIZE, IO_SIZE, IO_ADDR, host_alloc, gw32);
++    ctrl = (uint32_t)(uintptr_t)cellGcmGetControlRegister();
++
++    /* A 3-line, 8-byte-a-line copy between two pitched main-memory images. */
++    for (u32 i = 0; i < 0x100u; i++) vm_base[IO_ADDR + SRC_IO + i] = (u8)(i + 1u);
++    const u32 dma[2] = { 0xFEED0001u, 0xFEED0001u };
++    const u32 xfer[8] = { SRC_IO, DST_IO, 16, 32, 8, 3, 0x101, 0 };
++    method(1, 0x0184, 2, dma);
++    method(1, 0x030C, 8, xfer);              /* ... 0x0328 BUFFER_NOTIFY starts it */
++    kick();
++    for (u32 y = 0; y < 3; y++)
++        for (u32 x = 0; x < 32; x++) {
++            const u8 want = x < 8 ? (u8)(y * 16u + x + 1u) : 0;
++            assert(vm_base[IO_ADDR + DST_IO + y * 32u + x] == want);
++        }
++    assert(guest_reads == 1 && guest_writes == 1);
++    /* None of it is 3D state: masked to 0x1FFC, 0x030C..0x0328 are NV4097's
++     * blend and colour-mask registers. */
++    assert(n_legacy == 0 && n_engine == 0);
++    puts("[PASS] NV0039 copy on subchannel 1, no 3D register written");
++
++    /* 2D objects on 3 (NV3062) and 6 (NV3089) stay out of the 3D files too. */
++    const u32 fmt = 0xA;
++    method(3, 0x0300, 1, &fmt);
++    method(6, 0x0300, 1, &fmt);
++    kick();
++    assert(n_legacy == 0 && n_engine == 0);
++    puts("[PASS] NV3062/NV3089 methods do not reach the 3D register files");
++
++    /* NV4097 on subchannel 0 does, and so does subchannel 1 once it carries a
++     * method NV0039 lacks (SET_SHADER_PROGRAM 0x08E4). */
++    const u32 v = 1;
++    method(0, 0x030C, 1, &v);
++    method(1, 0x08E4, 1, &v);
++    method(1, 0x030C, 1, &v);
++    kick();
++    assert(saw(legacy, n_legacy, 0x030C) && saw(engine, n_engine, 0x030C));
++    assert(saw(legacy, n_legacy, 0x08E4) && saw(engine, n_engine, 0x08E4));
++    assert(n_legacy == 3 && n_engine == 3);
++    puts("[PASS] subchannel 1 becomes NV4097 after a non-NV0039 method");
++
++    puts("test_gcm_nv0039: OK");
++    free(vm_base);
++    return 0;
++}
+diff --git a/tools/test_gcm_nv0039.py b/tools/test_gcm_nv0039.py
+new file mode 100755
+index 0000000..06893e6
+--- /dev/null
++++ b/tools/test_gcm_nv0039.py
+@@ -0,0 +1,21 @@
++#!/usr/bin/env python3
++"""NV0039 copies on subchannel 1 run; 2D methods stay out of the 3D register files."""
++import os
++from pathlib import Path
++import subprocess
++import sys
++import tempfile
++from gen_hle_nids import scan
++root=Path(__file__).resolve().parents[1]
++assert any(n == 'cellGcmSetupContext' for _, n in scan(root/'libs/video/cellGcmSys.c')), 'Missing cellGcmSetupContext registration'
++if os.name=='nt':
++    print('SKIP: fixture currently uses POSIX linking; registration checked')
++    raise SystemExit(0)
++with tempfile.TemporaryDirectory(prefix='gcm-nv0039-') as tmp:
++    binary=Path(tmp)/'test'
++    linker=['-Wl,-dead_strip'] if sys.platform=='darwin' else ['-Wl,--gc-sections','-pthread','-lm']
++    subprocess.run([os.environ.get('CC','cc'),'-std=gnu17','-D_GNU_SOURCE','-O1','-UNDEBUG',
++        '-ffunction-sections','-fdata-sections','-I'+str(root/'include'),
++        str(root/'tests/test_gcm_nv0039.c'),*linker,'-o',str(binary)],check=True)
++    subprocess.run([str(binary)],check=True,timeout=10,
++        env={k:v for k,v in os.environ.items() if not k.startswith('A2O_')})
+-- 
+2.47.3
+

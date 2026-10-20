@@ -35,6 +35,8 @@ of runtime env vars is generated upstream in `external/ps3recomp/docs/DIAGNOSTIC
 | `PS3_LWCOND_POLL_MS`, `PS3_LWCOND_SLEEP` | lwcond wait tuning (patch 0019; waits now wake on signal) |
 | `PPU_THREAD_SLOTS`, `PPU_THREAD_END_STALL_US` | PPU thread table size / end-of-thread stall (patch 0020) |
 | `PS3_VFS_OVERLAY=<dir>` | Lay patched files over the dump (patch 0021) |
+| `RSX_ENGINE_PASS_DUMP=<dir>` (+ `_AFTER=<s>`, `_MAX`, `_DRAWS=1`, `_TEX=1`) | Per-pass render-target/depth capture, one line per draw (textures with mip count, pitch, filter, control0) and, with `_TEX`, every texture level decoded during the capture (patches 0046, 0047). Recipe below |
+| `GCM_SUBCH1_2D=1` / `GCM_SUBCH1_3D=1` | Force subchannel 1 to NV0039 or NV4097 (default: NV0039 until a non-NV0039 method shows up there; patch 0048) |
 | `PAD_TRACE=1`, `PAD_TRIGGERS=port,value,start[,len]` | Log the pad buffer the game reads; force trigger values. Timing counts from the first GetData (~4.0 s on 01.09), not launch (patch 0017) |
 
 Verify a variable still exists in the pinned `DIAGNOSTICS.md` before relying on it.
@@ -75,6 +77,21 @@ timeout -k 5 -s TERM 60 tools/run.sh > analysis/run.log 2>&1
   parallel work only kill the PID your own `timeout` started.
 - View a dump: `python3 tools/ppm2png.py captures/frame.ppm`, then open the PNG with the
   Read tool. It also prints how many sampled pixels are non-black.
+
+**Which pass, draw or texture of a frame is wrong (T045, 2026-10-20).** Into the arena and
+capture from 100 s:
+```bash
+mkdir -p /tmp/pd && tools/task.sh lock boot env RSX_ENGINE_PASS_DUMP=/tmp/pd \
+  RSX_ENGINE_PASS_DUMP_AFTER=100 RSX_ENGINE_PASS_DUMP_DRAWS=1 RSX_ENGINE_PASS_DUMP_TEX=1 \
+  RSX_ENGINE_PASS_DUMP_MAX=16 tools/boot_check.sh 112 --version 0109 --quiet \
+  --pad 'cross@40*4/5,cross@70,r2:200@90,cross@100'
+```
+`passes.txt` lists the passes (targets, zeta, depth range, clears, first draw's state),
+`draws.txt` each draw's textures, `presentNNN.ppm` the frame. `tex_<offset>_f<fmt>_<w>x<h>_m<n>`
+are the decoded levels (`.dds` opens in PIL). A texture that decodes as blocks of other
+textures in Morton-shaped staircases is stale VRAM: its upload never ran (that was NV0039).
+To see what a non-zero subchannel carries, `GCM_SUBCH_GATE=<file>` logs it while the file
+exists (it re-checks only every 256 such methods, so rare methods can be missed).
 
 **Filter the log.** A run writes 15–20k lines. Drop the per-frame noise first:
 ```bash
