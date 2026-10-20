@@ -48,6 +48,12 @@ method and the next steps are in subsystems.md "Menu frame rate". pi's T024/T029
 readback, `SARPBC_FRAME_STATS`, desktop `./run.sh` window) is merged; pi ran out of usage
 (HANDOFF notes on those tasks).
 
+**Desktop launch (T042):** native Wayland now works on the Fedora / RX 7800 XT
+host. Patch 0041 removes a 64-format limit (RADV reports 99). `./run.sh` needs no
+X11 override; `SDL_VIDEODRIVER=wayland ./run.sh` explicitly selects Wayland. A
+45-second window test presented 3,581 guest frames without a headless fallback;
+this is not a main-menu FPS measurement. See build-linux.md "Desktop launch".
+
 **This machine (since 2026-10-19 evening):** Debian 13 container, 16 threads, 15 GB RAM, ~16 GB free
 disk, RTX 2070 SUPER in a bottom PCIe slot (slower than usual for uploads and readbacks). perf is
 blocked. Builds use `-j10` with ccache off. Setup notes are in the T033 log.
@@ -126,6 +132,14 @@ the board: `tools/task.sh list` (protocol: [workflow.md](workflow.md)). Highest 
 ## Log
 
 ### 2026-10-20 (session 9, cont.): menu fps 19.8 -> 29.2
+- T042 (pi, user-requested Wayland fix): patch 0041 dynamically enumerates surface
+  formats and bounds retries on `VK_INCOMPLETE`. The desktop's RADV Wayland list
+  has 99 entries; the old 64-entry cap silently dropped the window. GCC/Clang
+  regressions, Valgrind and the full patch stack pass; 01.09 rebuilt and native
+  Wayland presented 3,581 guest frames in 45 s; X11 passed with 2,074 in 30 s.
+  Captured Guest1 profile screen and compositor buffer attachments confirm
+  presentation. Both test games were stopped. Sanitizer runtimes are missing
+  locally. Details and commands: build-linux.md "Desktop launch".
 - T040 (claude): Vulkan draw batching, geometry content cache in BAR memory, constant reuse, no
   per-frame readback on the engine path (patch T040). Merged with pi's uncommitted work (pi out of
   usage): T024 centre-texel present readback (claude finished its test runner), T029 frame telemetry,

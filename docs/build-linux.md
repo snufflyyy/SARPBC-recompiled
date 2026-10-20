@@ -118,7 +118,36 @@ Xvfb, opened a mapped 1280×720 `SARPBC` window on the RTX 2070 SUPER. SDL selec
 X11 and Vulkan created a three-image swapchain. `xwininfo` confirmed `IsViewable`
 again five seconds later; no headless fallback or presentation error appeared.
 This checks an actual window, not just the scaffold's “window open” message.
-Physical-monitor/Wayland testing is still separate from this X11 smoke.
+
+**Native Wayland verified (T042, 2026-10-20, Fedora / RX 7800 XT):** patch
+`0041-vk-wayland-surface-formats.patch` removes the 64-entry surface-format limit.
+RADV exposes 99 format/colorspace pairs on this desktop. The old fill call returned
+`VK_INCOMPLETE` (5), which the backend treated as fatal, then continued headless.
+The scaffold still printed “window open”, so that line alone is not proof.
+
+The backend now allocates the full list and retries up to four times if the list
+changes during enumeration. UNORM preference and headless behavior are unchanged.
+`SDL_VIDEODRIVER=wayland ./run.sh` created a native 1280×720, four-image swapchain
+(format 44). A 45-second desktop test presented 3,581 guest frames with no headless
+fallback or presentation errors. Wayland protocol logs confirm surface buffer
+attachments and commits; the captured frame shows the Guest1 profile screen.
+An X11 regression test also passed: 2,074 guest frames in 30 seconds, with no
+headless fallback or presentation errors. Both tests stopped their own game at
+the time limit. These are window/presentation tests, **not main-menu FPS benchmarks**.
+
+```bash
+./run.sh                                      # SDL chooses the desktop driver
+SDL_VIDEODRIVER=wayland ./run.sh               # require native Wayland
+SDL_VIDEODRIVER=x11 ./run.sh                   # X11/XWayland; older-build workaround
+python3 external/ps3recomp/libs/video/tests/test_vulkan_surface_formats.py
+```
+
+The new GPU-independent regression fails on the old 64-entry implementation. It
+covers large lists, format preference, changing counts, driver errors, allocation
+failure and cleanup. GCC and Clang pass; Valgrind reports zero errors or leaks.
+ASan/UBSan could not link because their runtime libraries are absent on this host.
+Logs and captures: `analysis/pi-desktop/wayland-fixed.{log,ppm,png}`. The original
+failure and X11 workaround logs are `game.log` and `game-x11.log` in that directory.
 
 `python3 tools/test_run.py` tests the real launcher chain without game files or a
 display: defaults, 01.02 selection, build option, caller overrides, paths/arguments
