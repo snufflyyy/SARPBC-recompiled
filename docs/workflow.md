@@ -58,7 +58,7 @@ agent picks its own task from the board, works in its own worktree, and merges i
 ## Finishing a task
 
 1. Verify it: build, boot or test, and keep the command and its output for the log. Then
-   `tools/lint.py` (add `--tests` when you changed a patch or a tool): it must report 0
+   `tools/lint.py` (add `--tests` when you changed a patch or a tool; logs of every test script land in `.cache/lint-tests/`, skips are listed, `--strict` makes them fail): it must report 0
    problems, and `merge_to_main.sh` checks it again.
 2. Add one bullet to the newest [status.md](status.md) log entry, or start today's entry. Update
    "Resume here" and the AGENTS.md current-state line if the headline changed. Keep these edits

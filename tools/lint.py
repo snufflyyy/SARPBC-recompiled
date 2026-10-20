@@ -5,7 +5,9 @@ Fast (a few seconds, no build, no game data needed) and stdlib only. Run it befo
 commit; tools/merge_to_main.sh runs it before it merges.
 
   tools/lint.py            # all fast checks; exit 1 if anything is wrong
-  tools/lint.py --tests    # also run tools/test_*.py and ps3recomp's tools/test_*.py
+  tools/lint.py --tests    # also run tools/test_*.py, ps3recomp's tools/test_*.py and its
+                           # three nested SDL/Vulkan suites (NESTED_TESTS); logs in .cache/lint-tests/
+  tools/lint.py --strict   # a missing shellcheck/pyflakes/submodule or a skipped test is a problem
   tools/lint.py --only docs,patches   # a subset (names below)
 
 Checks:
@@ -17,7 +19,9 @@ Checks:
            runtime/ libs/ include/ tests/); every patches/ps3recomp/*.patch, and every
            `T###-name` patch or task, a doc names exists (merged patches become NNNN-).
            Skipped: docs/status.md's "## Log" (history), the task logs, and paths in the two
-           docs about other repos (dod3-reuse.md, reference-ports.md)
+           docs about other repos (dod3-reuse.md, reference-ports.md). A path that is
+           git-ignored (src/recomp, game/, ...) is accepted without existing, so a clean
+           clone lints without game data
   patches  patches/ps3recomp/ holds NNNN-*.patch numbered 0001.. without gaps, plus T###-*
            ones only on a task branch; the README table has one row per file, in order
   board    every docs/tasks/*/T###-*.md has Status (matching its folder), Owner, Priority
@@ -29,6 +33,7 @@ Checks:
 """
 import argparse
 import concurrent.futures
+import hashlib
 import os
 import re
 import shutil
@@ -40,6 +45,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SUB = ROOT / "external" / "ps3recomp"
 problems = []
 notes = []
+strict = False
 
 
 def problem(where, msg):
@@ -88,17 +94,35 @@ def doc_lines(path):
             yield n, line
 
 
+def is_ignored(tok):
+    """True for a path .gitignore covers (local-only: generated lifts, game data, build dirs)."""
+    if tok.startswith("external/"):
+        return False                      # git cannot check paths inside a submodule
+    return subprocess.run(["git", "check-ignore", "-q", "--", tok], cwd=ROOT,
+                          stderr=subprocess.DEVNULL).returncode == 0
+
+
+def sub_present():
+    return (SUB / ".git").exists()
+
+
 def ref_exists(tok, doc):
+    if is_ignored(tok):
+        return True
     if tok.startswith("external/ps3recomp/"):
-        return (ROOT / tok).exists()
+        return (ROOT / tok).exists() or not sub_present()
     if tok.startswith(SUB_PREFIXES):
-        return (SUB / tok).exists()
+        return (SUB / tok).exists() or not sub_present()
     # Docs name ps3recomp's own tools and docs by their path inside the submodule.
     return ((ROOT / tok).exists() or (doc.parent / tok).exists()
-            or (tok.startswith(("tools/", "docs/")) and (SUB / tok).exists()))
+            or (tok.startswith(("tools/", "docs/")) and ((SUB / tok).exists() or not sub_present())))
 
 
 def check_docs():
+    if not sub_present():
+        notes.append("external/ps3recomp not checked out: paths inside it are not verified")
+        if strict:
+            problem("external/ps3recomp", "submodule missing (--strict)")
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     for d in sorted((ROOT / "docs").glob("*.md")):
         if f"(docs/{d.name})" not in agents:
@@ -217,6 +241,8 @@ def check_scripts():
             problem("shellcheck", l)
     else:
         notes.append("shellcheck not installed: shell checks skipped")
+        if strict:
+            problem("shellcheck", "not installed (--strict)")
     flakes = shutil.which("pyflakes3") or shutil.which("pyflakes")
     if flakes:
         r = subprocess.run([flakes, *py], cwd=ROOT, capture_output=True, text=True)
@@ -224,29 +250,93 @@ def check_scripts():
             problem("pyflakes", l)
     else:
         notes.append("pyflakes not installed: Python checks skipped")
+        if strict:
+            problem("pyflakes", "not installed (--strict)")
 
 
 # --- tests ----------------------------------------------------------------------------
+# ps3recomp's regression runners for our patches that live next to their code instead of
+# under tools/: patch 0015 (cellPad SDL), 0037/0038 (Vulkan present), 0039 (surface formats).
+NESTED_TESTS = ("libs/input/tests/test_cellpad_sdl.py",
+                "libs/video/tests/test_vulkan_present_readback.py",
+                "libs/video/tests/test_vulkan_surface_formats.py")
+# Files upstream tests rewrite in their own tree (test_ppu_lift.py: scratch/ppu_conformance.cpp).
+# Their bytes are saved before the run and written back after it: never `git checkout`, which
+# would also discard edits that were there before.
+MUTATED_FIXTURES = ("scratch/ppu_conformance.cpp",)
+TEST_TIMEOUT = 600
+SKIP_RE = re.compile(r"skipped=\d+|\bSKIP(PED)?\b", re.I)
+
+
+def test_manifest():
+    """Every test script to run, as (path, cwd): tools/test_*.py of both trees plus NESTED_TESTS."""
+    root, sub = ROOT, SUB
+    found = [(t, root) for t in sorted((root / "tools").glob("test_*.py"))]
+    if (sub / ".git").exists():
+        found += [(t, sub) for t in sorted((sub / "tools").glob("test_*.py"))]
+        for n in NESTED_TESTS:
+            if (sub / n).exists():
+                found.append((sub / n, sub))
+            else:
+                problem("tools/lint.py", f"NESTED_TESTS lists {n}, which is missing in the submodule")
+    else:
+        notes.append("external/ps3recomp not checked out: its tests are not run")
+        if strict:
+            problem("external/ps3recomp", "submodule missing (--strict)")
+    return found
+
+
+def run_one(t, cwd, py, logdir):
+    """Run one script; returns (status, detail). Status: passed, skipped, failed, timeout."""
+    log = logdir / (str(t.relative_to(ROOT if t.is_relative_to(ROOT) else cwd)).replace("/", "__") + ".log")
+    try:
+        r = subprocess.run([py, str(t)], cwd=cwd, capture_output=True, text=True, timeout=TEST_TIMEOUT)
+        out, rc = r.stdout + r.stderr, r.returncode
+    except subprocess.TimeoutExpired as e:
+        out = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        log.write_text(out, encoding="utf-8")
+        return "timeout", f"no result after {TEST_TIMEOUT}s; partial output in {log.relative_to(ROOT)}"
+    log.write_text(out, encoding="utf-8")
+    if rc:
+        return "failed", f"exit {rc}, full output in {log.relative_to(ROOT)}:\n    " + out[-1500:].strip().replace("\n", "\n    ")
+    return ("skipped" if SKIP_RE.search(out) else "passed"), ""
+
+
+def status_lines():
+    r = subprocess.run(["git", "status", "--porcelain"], cwd=SUB, capture_output=True, text=True)
+    if r.returncode:
+        problem("external/ps3recomp", f"git status failed: {r.stderr.strip()}")
+        return None
+    return set(r.stdout.splitlines())
+
+
 def run_tests():
     py = str(ROOT / ".venv" / "bin" / "python") if (ROOT / ".venv" / "bin" / "python").exists() else sys.executable
-    tests = sorted((ROOT / "tools").glob("test_*.py")) + sorted((SUB / "tools").glob("test_*.py"))
-
-    def one(t):
-        r = subprocess.run([py, str(t)], cwd=t.parent.parent, capture_output=True, text=True, timeout=600)
-        return t, r.returncode, (r.stdout + r.stderr)[-1500:]
-
-    before = git("status", "--porcelain", cwd=SUB)
+    logdir = ROOT / ".cache" / "lint-tests"
+    logdir.mkdir(parents=True, exist_ok=True)
+    tests = test_manifest()
+    saved = {f: (SUB / f).read_bytes() for f in MUTATED_FIXTURES if (SUB / f).exists()}
+    before = status_lines() if sub_present() else None
+    results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as ex:
-        for t, rc, tail in ex.map(one, tests):
-            if rc:
-                problem(str(t.relative_to(ROOT)), f"test failed (exit {rc}):\n    " + tail.strip().replace("\n", "\n    "))
-    # Some upstream tests regenerate files in their own tree (test_ppu_lift.py rewrites
-    # scratch/ppu_conformance.cpp). Put back what this run changed; never commit it.
-    changed = [l[3:] for l in git("status", "--porcelain", cwd=SUB).splitlines() if l not in before.splitlines()]
-    if changed:
-        git("checkout", "--", *changed, cwd=SUB)
-        notes.append(f"restored files the tests rewrote in external/ps3recomp: {', '.join(changed)}")
-    notes.append(f"ran {len(tests)} test scripts")
+        for (t, cwd), (st, detail) in zip(tests, ex.map(lambda tc: run_one(*tc, py, logdir), tests)):
+            results.append((t, st))
+            if st in ("failed", "timeout"):
+                problem(str(t.relative_to(ROOT) if t.is_relative_to(ROOT) else t.relative_to(SUB)), f"test {st}: {detail}")
+            elif st == "skipped":
+                notes.append(f"{t.name} reported skipped tests (see {logdir.relative_to(ROOT)})")
+                if strict:
+                    problem(t.name, "test skipped (--strict)")
+    for f, data in saved.items():
+        if (SUB / f).read_bytes() != data:
+            (SUB / f).write_bytes(data)
+            notes.append(f"external/ps3recomp/{f}: put back the bytes it had before the tests ({hashlib.sha256(data).hexdigest()[:8]})")
+    if before is not None:
+        after = status_lines()
+        for line in sorted((after or set()) - before):
+            problem("external/ps3recomp", f"tests changed `{line}`; not restoring it automatically, check it by hand")
+    counts = {k: sum(1 for _, st in results if st == k) for k in ("passed", "skipped", "failed", "timeout")}
+    notes.append(f"ran {len(tests)} test scripts: " + ", ".join(f"{v} {k}" for k, v in counts.items()))
 
 
 CHECKS = {"data": check_data, "docs": check_docs, "patches": check_patches,
@@ -256,8 +346,12 @@ CHECKS = {"data": check_data, "docs": check_docs, "patches": check_patches,
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--tests", action="store_true", help="also run the test scripts (about a minute)")
+    ap.add_argument("--strict", action="store_true",
+                    help="missing tools/submodule and skipped tests are problems, not notes")
     ap.add_argument("--only", help="comma-separated subset of: " + ", ".join(CHECKS))
     args = ap.parse_args()
+    global strict
+    strict = args.strict
     names = args.only.split(",") if args.only else list(CHECKS)
     for n in names:
         if n not in CHECKS:

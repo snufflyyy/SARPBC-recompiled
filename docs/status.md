@@ -111,6 +111,9 @@ T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena
 
 ## Log
 
+### 2026-10-20: reliable verification (T048, claude)
+- `tools/lint.py --tests` now includes the 3 nested SDL/Vulkan suites, keeps per-script logs in `.cache/lint-tests/`, reports skips/timeouts, no longer uses `git checkout` to undo test side effects (saves/restores the one known fixture's bytes; reports anything else), and `--strict` fails on skips or missing tools. Doc lint works on a clean clone (git-ignored paths accepted). `tools/test_lint.py` proves it. 94 scripts: 90 pass, 4 skip (Metal, MP3 encoder, PPU lift tool) on this host.
+
 ### 2026-10-20: predictable tooling (T049, claude)
 - `apply_patches.sh --ensure` verifies tree identity in a scratch worktree, refuses a dirty runtime, and `build.sh` holds a per-checkout lock; `task.sh` serializes board writes and checks owners. Fixtures: `tools/test_build.py`, `tools/test_task.py`. Real submodule verified in 0.45 s, no rewrite. Note: `build.sh` now fails on a dirty `external/ps3recomp` (override `SARPBC_ALLOW_DIRTY_RUNTIME=1`).
 

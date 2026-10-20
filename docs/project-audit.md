@@ -126,6 +126,8 @@ Add a long-path regression that does not require game data.
 
 ### A03 — High: the advertised test gate omits three relevant regression scripts
 
+**Resolved by T048 (2026-10-20):** `tools/lint.py --tests` runs `tools/test_*.py` of both trees plus the explicit `NESTED_TESTS` list; each script is a result (passed / skipped / failed / timeout) with its full output kept in `.cache/lint-tests/`; `--strict` turns skips and missing tools into problems.
+
 **Evidence:** `tools/lint.py:230-235` discovers only the two top-level tools folders.
 It omits `libs/input/tests/test_cellpad_sdl.py`,
 `libs/video/tests/test_vulkan_present_readback.py`, and
@@ -156,6 +158,8 @@ not a commit count. Preflight before mutations, and serialize the whole build
 transaction for a checkout. Test with throwaway source-only repositories.
 
 ### A05 — Medium: test cleanup can overwrite pre-existing source changes
+
+**Resolved by T048 (2026-10-20):** no `git checkout`. Bytes of the known rewritten fixture (`MUTATED_FIXTURES`) are saved and written back; any other file a test run changes is reported, never reverted. Timeouts and failures are results. (The upstream fix, a temporary directory for the fixture, is still open.)
 
 **Evidence:** `tools/lint.py:239-248` snapshots porcelain status, runs tests in the
 source tree, then restores newly changed paths with Git checkout. A previously
@@ -242,6 +246,8 @@ lock; validate owner on done/release. Document the shared-board commit behavior.
 Keep the file-based board; no scheduler or database is warranted.
 
 ### A11 — Low: documentation and contribution metadata need one cleanup pass
+
+**Partly resolved by T048 (2026-10-20):** the doc check accepts git-ignored paths (generated lifts, game data) without them existing, and a missing submodule is a note (`--strict`: a problem), so a clean clone lints. The status/README/license items remain.
 
 **Evidence:** status still names desktop patch 0041 instead of 0039, lists completed
 T043 in the queue, and says "goal 60" in the phase table. `src/stubs.cpp` retains
