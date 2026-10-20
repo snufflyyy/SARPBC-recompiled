@@ -128,6 +128,7 @@ Details and every flag: [docs/pipeline.md](docs/pipeline.md).
 | [docs/dod3-reuse.md](docs/dod3-reuse.md) | Before writing anything new: what Drakengard 3's port / fork already has, what's ported, a ranked "Port next" list, and the complete commit-by-commit inventory |
 | [docs/subsystems.md](docs/subsystems.md) | Working on graphics, audio, input, SPU/SPURS, saves, video, network, trophies |
 | [docs/debugging.md](docs/debugging.md) | Something hangs, crashes or draws wrong; `tools/boot_check.sh` (paste the first line of `analysis/boot_report.txt` into task notes), env vars, triage recipes |
+| [docs/project-audit.md](docs/project-audit.md) | Maintainability audit (T046): evidence, safety/tooling gaps, and a minimal cleanup sequence |
 | [docs/workflow.md](docs/workflow.md) | Before any work: task board, claiming, worktrees, locks, merging, **pausing and resuming** |
 | [docs/hle-coverage.md](docs/hle-coverage.md) | Which firmware imports have HLE handlers (stub/impl), named NIDs, ranked gaps (`tools/hle_coverage.py`) |
 

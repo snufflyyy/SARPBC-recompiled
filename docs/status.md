@@ -108,6 +108,16 @@ T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena
 
 ## Log
 
+### 2026-10-20: maintainability audit (T046, pi)
+- Read-only implementation review: keep generated lifts / title overrides / exported runtime
+  patches as the architecture. Findings and cleanup sequence: [project-audit.md](project-audit.md).
+  Priorities: native zlib/VFS boundary checks, complete and non-mutating test discovery,
+  reliable patch/build provenance, then explicit startup/configuration. Main fast lint passes;
+  all 85 discovered test scripts return zero, as do three nested SDL/Vulkan scripts omitted
+  by the current runner. Private-worktree lint initially reports 10 missing local-data paths
+  (not source failures); clean-clone verification needs to stop requiring ignored game trees.
+  No runtime code changed, no new boot/FPS claim, and T038 graphics work was left alone.
+
 ### 2026-10-20 (session 10): pin bumped to v0.16.0 (T043); two Sonnet subagents (T010, T021)
 - claude: T043: the patch stack rebased onto upstream v0.16.0 (`749182e`): 65 commits in 47
   files, renumbered (old -> new table and what was merged or dropped: patches README). A/B on
