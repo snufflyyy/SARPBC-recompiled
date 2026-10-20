@@ -125,7 +125,7 @@ Details and every flag: [docs/pipeline.md](docs/pipeline.md).
 | [docs/build-linux.md](docs/build-linux.md) | Toolchain, CMake options, Vulkan, Linux-specific gaps |
 | [docs/unreal-engine-3.md](docs/unreal-engine-3.md) | Reasoning about the game's own code: threads, file I/O, renderer, UnrealScript |
 | [docs/reference-ports.md](docs/reference-ports.md) | Before solving a UE3 problem: Drakengard 3 (dod3-recomp) is a finished UE3 port on ps3recomp |
-| [docs/dod3-reuse.md](docs/dod3-reuse.md) | Before writing anything new: what Drakengard 3's port / fork already has, what's ported, what's next (partial inventory) |
+| [docs/dod3-reuse.md](docs/dod3-reuse.md) | Before writing anything new: what Drakengard 3's port / fork already has, what's ported, a ranked "Port next" list, and the complete commit-by-commit inventory |
 | [docs/subsystems.md](docs/subsystems.md) | Working on graphics, audio, input, SPU/SPURS, saves, video, network, trophies |
 | [docs/debugging.md](docs/debugging.md) | Something hangs, crashes or draws wrong; `tools/boot_check.sh` (paste the first line of `analysis/boot_report.txt` into task notes), env vars, triage recipes |
 | [docs/workflow.md](docs/workflow.md) | Before any work: task board, claiming, worktrees, locks, merging, **pausing and resuming** |
