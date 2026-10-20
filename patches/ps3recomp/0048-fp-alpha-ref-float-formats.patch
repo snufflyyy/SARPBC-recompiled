@@ -1,0 +1,89 @@
+From d3c61660cf3e280c55c0c05be8e0452a030f95e1 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Tue, 20 Oct 2026 18:28:11 +0000
+Subject: [PATCH] fp decompiler: alpha-test reference in the SDK's float
+ surface formats
+
+rsx_fp_alpha_ref read the reference as a half for surface colour format
+14 and a float for 15/16, but the SDK's float formats are 0x0B
+(W16Z16Y16X16), 0x0C (W32Z32Y32X32) and 0x0D (X32), the values
+rsx_fp_srgb_output_enabled already uses. A draw into a half-float target
+compared alpha against the low byte of the half. SARPBC renders its arena
+into an FP16 target (format 0x0B). Same fix as soyjxck/ps3recomp 3f20f13.
+
+Test: tools/test_fp_alpha_ref.py.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_fp_decompiler.c | 12 ++++++++----
+ tools/test_fp_alpha_ref.py     | 34 ++++++++++++++++++++++++++++++++++
+ 2 files changed, 42 insertions(+), 4 deletions(-)
+ create mode 100755 tools/test_fp_alpha_ref.py
+
+diff --git a/libs/video/rsx_fp_decompiler.c b/libs/video/rsx_fp_decompiler.c
+index cebd2a1..415046a 100644
+--- a/libs/video/rsx_fp_decompiler.c
++++ b/libs/video/rsx_fp_decompiler.c
+@@ -1438,11 +1438,15 @@ static float fp_half_to_float(u16 h)
+ 
+ float rsx_fp_alpha_ref(u32 raw, u32 surface_color_format)
+ {
+-    /* NV4097 surface color formats: 14=W16Z16Y16X16,
+-     * 15=W32Z32Y32X32, 16=X32. */
+-    if (surface_color_format == 14u)
++    /* The SDK's float surface colour formats: 0x0B W16Z16Y16X16 (the
++     * reference is a half), 0x0C W32Z32Y32X32 and 0x0D X32 (a float), as
++     * rsx_fp_srgb_output_enabled has them. This read 14/15/16, so a draw
++     * into a half-float target compared alpha against the low byte of the
++     * half: SARPBC's arena (FP16 scene target) drew alpha-tested particles
++     * as solid shards. Same fix as soyjxck/ps3recomp 3f20f13. */
++    if (surface_color_format == 0x0Bu)
+         return fp_half_to_float((u16)(raw & 0xFFFFu));
+-    if (surface_color_format == 15u || surface_color_format == 16u) {
++    if (surface_color_format == 0x0Cu || surface_color_format == 0x0Du) {
+         float value;
+         memcpy(&value, &raw, sizeof(value));
+         return value;
+diff --git a/tools/test_fp_alpha_ref.py b/tools/test_fp_alpha_ref.py
+new file mode 100755
+index 0000000..897c105
+--- /dev/null
++++ b/tools/test_fp_alpha_ref.py
+@@ -0,0 +1,34 @@
++#!/usr/bin/env python3
++"""rsx_fp_alpha_ref reads the alpha-test reference in the surface's format:
++a half for W16Z16Y16X16 (0x0B), a float for W32Z32Y32X32/X32 (0x0C/0x0D),
++a byte otherwise."""
++import os
++from pathlib import Path
++import subprocess
++import sys
++import tempfile
++root = Path(__file__).resolve().parents[1]
++SRC = r'''
++#include <assert.h>
++#include <stdio.h>
++#include <string.h>
++#include "rsx_fp_decompiler.h"
++int main(void) {
++    float f = 0.25f; unsigned raw; memcpy(&raw, &f, 4);
++    assert(rsx_fp_alpha_ref(0x3800u, 0x0Bu) == 0.5f);      /* half 0.5 */
++    assert(rsx_fp_alpha_ref(0x3C00u, 0x0Bu) == 1.0f);      /* half 1.0, not 0/255 */
++    assert(rsx_fp_alpha_ref(raw, 0x0Cu) == 0.25f);
++    assert(rsx_fp_alpha_ref(raw, 0x0Du) == 0.25f);
++    assert(rsx_fp_alpha_ref(0x80u, 0x08u) == 128.0f / 255.0f);   /* A8R8G8B8 */
++    assert(rsx_fp_alpha_ref(0x3C80u, 0x08u) == 128.0f / 255.0f); /* only the low byte */
++    puts("fp alpha ref: OK");
++    return 0;
++}
++'''
++with tempfile.TemporaryDirectory(prefix='fp-alpha-ref-') as tmp:
++    c = Path(tmp) / 't.c'; c.write_text(SRC); exe = Path(tmp) / 't'
++    linker = [] if sys.platform == 'darwin' else ['-lm']
++    subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu17', '-O1', '-UNDEBUG',
++                    '-I' + str(root / 'include'), '-I' + str(root / 'libs/video'), str(c),
++                    str(root / 'libs/video/rsx_fp_decompiler.c'), *linker, '-o', str(exe)], check=True)
++    subprocess.run([str(exe)], check=True, timeout=10)
+-- 
+2.47.3
+

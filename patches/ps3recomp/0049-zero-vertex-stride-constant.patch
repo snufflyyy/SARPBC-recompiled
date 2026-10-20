@@ -1,0 +1,53 @@
+From ada88d1b415762de396c801695fe22ec0f2485b6 Mon Sep 17 00:00:00 2001
+From: soyjxck <soyjxck@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 18:28:11 +0000
+Subject: [PATCH] rsx: a zero vertex stride is a constant attribute
+
+Every vertex reads the one element at the offset (RPCS3 treats it the same
+way). Read as tightly packed, vertex N got the N-th element past it: Unreal
+Engine 3 binds a shared white vertex-colour stream that way, so meshes
+without their own vertex colours drew dark. An inline array with no stride
+of its own still uses the element size.
+
+Ported to SARPBC-recomp (T021) from soyjxck/ps3recomp 0eee9dd (MIT), the
+rsx_vertex_compact.c part only; original author kept. The draw-engine C
+tests (test_rsx_draw_engine, test_shadow_engine) pass.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_vertex_compact.c | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/libs/video/rsx_vertex_compact.c b/libs/video/rsx_vertex_compact.c
+index 7fa5f31..7ff67be 100644
+--- a/libs/video/rsx_vertex_compact.c
++++ b/libs/video/rsx_vertex_compact.c
+@@ -127,8 +127,13 @@ void rsx_vertex_fetch_plan_init(
+         rsx_dsp_get_vertex_attr(rsx, attr, &fetch->desc);
+         fetch->elem_size =
+             rsx_vertex_attrib_size(fetch->desc.type, fetch->desc.size);
+-        fetch->stride =
+-            fetch->desc.stride ? fetch->desc.stride : fetch->elem_size;
++        /* A zero stride is a constant attribute: every vertex reads the one
++         * element at the offset. Read as tightly packed, vertex N got the N-th
++         * element past it -- for Unreal Engine 3's shared white vertex-colour
++         * stream, white for the first vertex and whatever follows for the
++         * rest, so meshes without their own vertex colours drew dark.
++         * From soyjxck/ps3recomp 0eee9dd (MIT). */
++        fetch->stride = fetch->desc.stride;
+         rsx_dsp_vertex_default(rsx, attr, fetch->default_value);
+         if (attr == 3 &&
+             fetch->default_value[0] == 0.0f &&
+@@ -202,7 +207,8 @@ void rsx_vertex_fetch_plan_prepare(
+          * the right base. */
+         if (plan->inline_data) {
+             const u32 stride =
+-                plan->inline_stride ? plan->inline_stride : fetch->stride;
++                plan->inline_stride ? plan->inline_stride
++                : fetch->stride ? fetch->stride : fetch->elem_size;
+             const u32 off = plan->inline_off[attr];
+             if (!stride || off + fetch->elem_size > stride)
+                 continue;
+-- 
+2.47.3
+

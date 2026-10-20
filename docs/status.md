@@ -5,6 +5,16 @@ work session. Newest log entry first. Use absolute dates.
 
 ## Resume here (updated 2026-10-20)
 
+**User priorities (2026-10-20, in order):** 1. ~~move ps3recomp to v0.16.0~~ (T043 done);
+2. **now: visual glitches and bugs**; 3. then a steady 30 fps in game (the game's own cap).
+Next steps for 2: the T021 "Port next" list at the top of docs/dod3-reuse.md (items 1-2 are
+ported as 0048/0049; next: 5 prepared flips at their FIFO position, 7 scissored depth clears
+and cropped depth copies for shadows, 8 fragment decompiler DDX/DDY/NRM/precision, 10
+anisotropic filtering); T038 (upside-down Loading screen); the `null-read,null-write` alerts a
+165 s arena survey raised (boot_report, not yet looked at); the glass canisters' shards draw
+opaque white (maybe correct, unverified). For 3: T040, and the dod3 pacing recipe in
+dod3-reuse.md (FIFO wake on guest usleep, `GetMaxTickRate`).
+
 **To restart, start an agent (Claude Code, pi, Antigravity, ...) in the main checkout and say:**
 > Read AGENTS.md, docs/status.md "Resume here" and docs/workflow.md, then take the next task
 > from `tools/task.sh next`.
@@ -30,8 +40,8 @@ boot_check is PROGRESSING with 3513 flips; the main menu runs at **29.5 fps** (1
 26.3-32.3), ~130% CPU, 28 threads. Where a menu frame's ~31 ms go, and what to try next:
 subsystems.md "Menu frame rate".
 
-**State of `main`:** 47 patch files (65 commits) on upstream `749182e` (v0.16.0, T043); every one of the
-84 test scripts (ours and ps3recomp's) passes on that stack (2026-10-20, `tools/lint.py --tests`). The upstream lifter did not
+**State of `main`:** 49 patch files (67 commits) on upstream `749182e` (v0.16.0, T043); every one of the
+85 test scripts (ours and ps3recomp's) passes on that stack (2026-10-20, `tools/lint.py --tests`). The upstream lifter did not
 change, so the lifts were kept. The big fixes of the last two days: the SPURS CreateTask race that started tasks twice
 (0036, T033: ~1500% CPU to ~100%) and Vulkan draw batching with a VRAM geometry cache (0038, T040:
 menu 19.8 to 29.5 fps).
