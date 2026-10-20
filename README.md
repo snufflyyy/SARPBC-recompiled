@@ -35,6 +35,7 @@ tools/lint.py --tests                   # repository checks and every test scrip
 | [docs/workflow.md](docs/workflow.md) | the task board used by the people and agents working on it |
 | `src/overrides/` | port-side replacements, keyed by guest address or NID |
 | `patches/ps3recomp/` | our patches on the pinned upstream runtime |
+| `.github/workflows/lint.yml` | CI: patch stack applies, `tools/lint.py --strict`, the source-only tests |
 
 ## License
 

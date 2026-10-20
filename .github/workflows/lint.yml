@@ -1,0 +1,26 @@
+# Source-only checks: no game data, no GPU, no build of the lifted code (those need the
+# game's PKG, which this repository never contains). Linux/Vulkan is the verified platform;
+# Windows and macOS are not built here (docs/project-audit.md A08).
+name: lint
+on:
+  push:
+  pull_request:
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Tools
+        run: sudo apt-get update && sudo apt-get install -y shellcheck pyflakes3 clang git
+      - name: Patch stack applies to the pinned runtime
+        run: tools/apply_patches.sh
+      - name: Repository checks
+        run: python3 tools/lint.py --strict
+      - name: Source-only tests
+        run: |
+          python3 tools/test_task.py
+          python3 tools/test_build.py
+          python3 tools/test_lint.py
+          python3 tools/test_input_config.py
