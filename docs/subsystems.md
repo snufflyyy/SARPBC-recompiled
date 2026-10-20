@@ -272,9 +272,9 @@ Y=-1 and `v=1` at Y=+1. The window formula maps Y=-1 to 720 (the **bottom** edge
 so v=0 must sample the bottom source row, exactly as the requested decoder mode
 specifies. No special handling of `LOADSCREEN.VPO` is needed.
 
-Patch `T051-1-pngdec-output-mode` validates/reports output mode and selects source
+Patch `0051-pngdec-output-mode` validates/reports output mode and selects source
 rows per decoder without changing stb global state. Channel swizzles and padded
-pitch are preserved. Patch `T051-2-shader-independent-viewports` fully removes
+pitch are preserved. Patch `0052-shader-independent-viewports` fully removes
 0050's unsafe two-instruction Y-flip heuristic. The existing viewport formulas and
 compiler are unchanged: glslang's `setInvertY(true)` applies to **all** vertex
 stages, not just projection-matrix shaders.

@@ -153,8 +153,8 @@ numbers:
 | `0048-fp-alpha-ref-float-formats.patch` | Alpha-test reference read in the SDK's float surface formats (0x0B half, 0x0C/0x0D float; it checked 14/15/16), as the fork's `3f20f13`. SARPBC's arena renders into FP16 (0x0B). Test `tools/test_fp_alpha_ref.py` | to offer |
 | `0049-zero-vertex-stride-constant.patch` | T021 port of fork `0eee9dd` (soyjxck, author kept): a zero vertex stride is a constant attribute, not a packed array (UE3's shared white vertex-colour stream). Draw-engine C tests pass | fork author's fix: offer with them |
 | `0050-loadscreen-passthrough-orientation.patch` | T038 historical workaround: flips Y for every two-instruction guest VP. T050 disproved its generic safety; the cause was ignored PNG output row order, not projection-dependent Vulkan behavior. T051 removes this heuristic | superseded; do not offer |
-| `T051-1-pngdec-output-mode.patch` | T051: honour and report per-decoder PNG top-to-bottom/bottom-to-top output order; reject invalid modes atomically. Synthetic guest-ABI coverage for 72 row-order/channel/pitch cases and invalid-mode handling | to offer |
-| `T051-2-shader-independent-viewports.patch` | T051: fully undo 0050's shader-length Y flip after fixing the decoder cause. Add neutral-backend regressions for equivalent NOP-padded VPs, constant/arithmetic VPs, both viewport signs and non-centered offsets | reversal is downstream-only; offer tests |
+| `0051-pngdec-output-mode.patch` | T051: honour and report per-decoder PNG top-to-bottom/bottom-to-top output order; reject invalid modes atomically. Synthetic guest-ABI coverage for 72 row-order/channel/pitch cases and invalid-mode handling | to offer |
+| `0052-shader-independent-viewports.patch` | T051: fully undo 0050's shader-length Y flip after fixing the decoder cause. Add neutral-backend regressions for equivalent NOP-padded VPs, constant/arithmetic VPs, both viewport signs and non-centered offsets | reversal is downstream-only; offer tests |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `git -C external/ps3recomp format-patch -1 -o ../../patches/ps3recomp/ --start-number N`.

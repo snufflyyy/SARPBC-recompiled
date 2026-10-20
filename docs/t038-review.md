@@ -20,10 +20,10 @@ to explain the failure. Evidence: pi worktree `analysis/t051-mode-boot.log` and 
 2026-10-20 20:30 boot log.
 
 **F01 and F02 are resolved:**
-- `patches/ps3recomp/T051-1-pngdec-output-mode.patch` validates and reports the requested
+- `patches/ps3recomp/0051-pngdec-output-mode.patch` validates and reports the requested
   scanline order and selects source rows locally while preserving channel order and pitch.
   It does not change stb's global flip state.
-- `patches/ps3recomp/T051-2-shader-independent-viewports.patch` removes the entire
+- `patches/ps3recomp/0052-shader-independent-viewports.patch` removes the entire
   instruction-count workaround. The original viewport formulas, shader compiler,
   culling and scissor conventions remain unchanged for every backend and program.
 - The new PNG guest-ABI fixture covers 72 row-order/channel/pitch combinations across
