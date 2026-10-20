@@ -93,6 +93,38 @@ elsewhere. Without glslang the Vulkan backend still builds but stays fixed-funct
 | `PS3RECOMP_VK_DUMP=<path>` + `PS3RECOMP_VK_DUMP_EVERY=<n>` | Write presented frames as PPM |
 | `PS3RECOMP_RSX_ENGINE=dispatch\|vtable` | Choose draw path explicitly |
 
+## Desktop launch (T041)
+
+Use `./run.sh` on a normal X11 or Wayland desktop. It selects 01.09 and requests
+an SDL2/Vulkan window by default (`PS3RECOMP_VK_WINDOW=1`), with guest shaders on.
+The window title defaults to `SARPBC`. Keyboard configuration comes from the
+checkout's `config.toml`, even when a desktop shortcut starts in another directory.
+Caller-provided title, config, renderer, and path settings still take precedence.
+
+```bash
+./run.sh                                      # visible desktop game window
+./run.sh --build                              # build, then open the window
+PS3RECOMP_VK_WINDOW=0 ./run.sh                  # explicit headless operation
+```
+
+For a windowed Linux launch, the launcher rejects a known Vulkan-disabled CMake
+build or `SDL_VIDEODRIVER=dummy` / `offscreen`. Its error gives the repair command.
+Unset a headless SDL driver for desktop play. A working Vulkan presentation driver
+and the desktop session environment are required; do not strip `DISPLAY` or
+`WAYLAND_DISPLAY` when starting the game through SSH or `sudo`.
+
+**Verified (2026-10-20):** the real `./run.sh`, executed outside the checkout under
+Xvfb, opened a mapped 1280×720 `SARPBC` window on the RTX 2070 SUPER. SDL selected
+X11 and Vulkan created a three-image swapchain. `xwininfo` confirmed `IsViewable`
+again five seconds later; no headless fallback or presentation error appeared.
+This checks an actual window, not just the scaffold's “window open” message.
+Physical-monitor/Wayland testing is still separate from this X11 smoke.
+
+`python3 tools/test_run.py` tests the real launcher chain without game files or a
+display: defaults, 01.02 selection, build option, caller overrides, paths/arguments
+with spaces, exit status, and explicit headless use. Window tests do not establish
+main-menu FPS; performance acceptance remains a separate benchmark.
+
 ## Known Linux gaps (upstream, as of v0.15.0)
 
 - No title had booted to gameplay from the upstream tree on Linux. **SARPBC boots on
