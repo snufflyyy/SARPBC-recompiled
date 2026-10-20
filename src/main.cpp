@@ -207,8 +207,28 @@ static DWORD WINAPI frame_clock(LPVOID)
     unsigned  last_flip = 0;
     ULONGLONG next_tick = GetTickCount64();
 
+    /* FRAME_CLOCK_SLEEP_MS: the outer drain cadence (default 4 ms; 1 ms was
+     * ~10% faster before draw batching, T040). FRAME_CLOCK_STATS=1: where this
+     * thread's time goes, as ms per 5 s in sleep / FIFO drain / present. */
+    DWORD outer_ms = 4;
+    if (const char* e = getenv("FRAME_CLOCK_SLEEP_MS")) outer_ms = (DWORD)atoi(e);
+    const int stats = getenv("FRAME_CLOCK_STATS") != nullptr;
+    auto now_us = []() -> unsigned long long {
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+        return (unsigned long long)ts.tv_sec * 1000000ull + (unsigned long long)ts.tv_nsec / 1000ull;
+    };
+    unsigned long long st_sleep = 0, st_fifo = 0, st_present = 0, st_t0 = now_us(), st_n = 0;
+    unsigned st_presents = 0;
+    #define FC_TIMED(acc, stmt) do { if (stats) { unsigned long long _t = now_us(); stmt; acc += now_us() - _t; } else { stmt; } } while (0)
+
     for (;;) {
-        Sleep(4);
+        FC_TIMED(st_sleep, Sleep(outer_ms));
+        if (stats && now_us() - st_t0 >= 5000000ull) {
+            fprintf(stderr, "[frame_clock] per 5 s: sleep %llu ms, fifo %llu ms, present %llu ms (%u presents), loops %llu\n",
+                    st_sleep / 1000, st_fifo / 1000, st_present / 1000, st_presents, st_n);
+            st_sleep = st_fifo = st_present = st_n = 0; st_presents = 0; st_t0 = now_us();
+        }
+        st_n++;
         ULONGLONG now = GetTickCount64();
 
         int fired = 0;
@@ -221,13 +241,13 @@ static DWORD WINAPI frame_clock(LPVOID)
              * after the drain races the guest's next-frame writes and shows a
              * mixed one. */
             if (rsx_ok && cellGcm_take_flip_pending()) {
-                present_guest_frame();
+                FC_TIMED(st_present, present_guest_frame()); st_presents++;
                 last_flip = cellGcm_flip_request_count();
             }
             /* Drain the FIFO every tick. This is what writes the RSX sync-fence
              * labels the game's per-frame logic blocks on, so it has to keep
              * advancing at 60 Hz even while present() throttles. */
-            if (rsx_ok) cellGcm_rsx_process_fifo();
+            if (rsx_ok) FC_TIMED(st_fifo, cellGcm_rsx_process_fifo());
             next_tick += 16;             /* ~60 Hz */
             fired++;
         }
@@ -239,10 +259,10 @@ static DWORD WINAPI frame_clock(LPVOID)
          * The real RSX writes them in microseconds. */
         if (rsx_ok) {
             if (cellGcm_take_flip_pending()) {
-                present_guest_frame();
+                FC_TIMED(st_present, present_guest_frame()); st_presents++;
                 last_flip = cellGcm_flip_request_count();
             }
-            cellGcm_rsx_process_fifo();
+            FC_TIMED(st_fifo, cellGcm_rsx_process_fifo());
 
             if (rsx_backend_pump() != 0) {
                 rsx_ok = 0;              /* window closed */
@@ -253,7 +273,7 @@ static DWORD WINAPI frame_clock(LPVOID)
              * present freely, so the window is not blank during boot. */
             unsigned fc = cellGcm_flip_request_count();
             if (fc != last_flip) {
-                present_guest_frame();
+                FC_TIMED(st_present, present_guest_frame()); st_presents++;
                 last_flip = fc;
             } else if (fc == 0) {
                 rsx_backend_present();

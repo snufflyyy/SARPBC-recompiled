@@ -1,0 +1,796 @@
+From ea2611bc59cb558511a8f4cfd85aaf7a45c8296d Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Tue, 20 Oct 2026 00:38:40 +0000
+Subject: [PATCH] vulkan: batch engine draws, cache geometry in VRAM, no
+ per-frame readback
+
+Every engine draw was its own command buffer, submitted and waited on,
+because all draws shared one vertex buffer, constant buffer and
+descriptor set. On SARPBC 01.09's menus (~150-190 draws a frame) the
+FIFO thread sat in vkWaitForFences for every draw.
+
+- Draws record into one open command buffer, each with its own slice
+  of per-batch vertex/index/constant arenas and its own descriptor set,
+  ordered by a memory barrier. The batch is submitted by anything else
+  that needs the GPU (vk_begin: uploads, clears, readbacks, present),
+  by any destroy, and by the engine's submit_and_wait, so everything
+  outside it keeps the "complete on return" contract.
+  PS3RECOMP_VK_BATCH=0 submits after each draw again.
+- Vertex and index data go through a 64 MB content cache (128-bit hash
+  of the bytes) in device-local, host-visible memory when there is
+  some: data drawn before is not uploaded again. Menus pass ~38 KB of
+  vertices+indices per draw, mostly the same every frame; read from
+  host memory a draw cost 30-70 us of GPU time (1.2 ms for a 7.8k-vertex
+  mesh) on a PCIe 2.0 x4 link. PS3RECOMP_VK_GEO_CACHE=0 disables it.
+- Unchanged constants reuse the previous draw's slice in the batch (69%
+  of the 8 KB vertex-constant binds are unchanged).
+- On the engine path, present reads nothing back unless a frame dump is
+  due (the engine answers readback_center itself); test case added.
+- Diagnostics: PS3RECOMP_VK_BATCH_STATS=1 (draws per batch, GPU wait
+  time), PS3RECOMP_VK_DRAW_TIMES=1 (GPU timestamps per draw).
+
+SARPBC 01.09 Choose Profile screen, PS3_VERBOSE=0, same machine:
+~23 fps -> 32.5 fps, identical frames.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_vulkan_backend.c               | 528 ++++++++++++++++--
+ .../tests/test_vulkan_present_readback.c      |  14 +-
+ 2 files changed, 496 insertions(+), 46 deletions(-)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index a217f8f..928be4f 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -42,6 +42,7 @@
+ 
+ #define VK_NO_PROTOTYPES
+ #include <vulkan/vulkan.h>
++#include <time.h>
+ 
+ #include "rsx_vulkan_backend.h"
+ #include "rsx_vertex_fetch.h"
+@@ -88,7 +89,7 @@
+     X(vkCreateRenderPass) X(vkDestroyRenderPass) X(vkCreateFramebuffer) X(vkDestroyFramebuffer) \
+     X(vkCreateShaderModule) X(vkDestroyShaderModule) \
+     X(vkCreateDescriptorSetLayout) X(vkDestroyDescriptorSetLayout) \
+-    X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) \
++    X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) X(vkResetDescriptorPool) \
+     X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) \
+     X(vkCreatePipelineLayout) X(vkDestroyPipelineLayout) \
+     X(vkCreateGraphicsPipelines) X(vkDestroyPipeline) \
+@@ -100,7 +101,9 @@
+     X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdDraw) \
+     X(vkCmdSetStencilReference) X(vkCmdSetDepthBounds) \
+     X(vkCmdBindIndexBuffer) X(vkCmdDrawIndexed) \
+-    X(vkCreateSemaphore) X(vkDestroySemaphore) X(vkCmdBlitImage)
++    X(vkCreateSemaphore) X(vkDestroySemaphore) X(vkCmdBlitImage) \
++    X(vkCreateQueryPool) X(vkDestroyQueryPool) X(vkCmdWriteTimestamp) X(vkCmdResetQueryPool) \
++    X(vkGetQueryPoolResults)
+ /* Window-system entry points, loaded only when a window was requested, so a
+  * headless run never depends on a driver that can present. */
+ #define VK_WSI_INSTANCE_FNS(X) \
+@@ -425,15 +428,135 @@ static int vk_create_image(vk_image* im, VkFormat fmt, u32 w, u32 h,
+     return vk_create_image_levels(im, fmt, w, h, 1, usage, aspect);
+ }
+ 
++/* ---------------------------------------------------------------------------
++ * Batched engine draws
++ *
++ * Every engine draw used to end in vk_submit_and_wait: its own command buffer,
++ * submitted and waited on before the next draw could reuse the one vertex
++ * buffer, constant buffer and descriptor set. A UE3 menu frame is hundreds of
++ * draws, so the FIFO thread spent its time in vkWaitForFences, one GPU round
++ * trip per draw (SARPBC 01.09: 15 of 15 stack samples there, ~23 fps on one
++ * core). Now draws record into one open command buffer, each with its own
++ * slice of the vertex, index and constant arenas and its own descriptor set.
++ * The batch is submitted when anything else needs the GPU: vk_begin (uploads,
++ * clears, readbacks, present), a destroy, or the engine's submit_and_wait. So
++ * code outside the batch keeps the old contract: a submission is complete
++ * when it returns. PS3RECOMP_VK_BATCH=0 submits after every draw again.
++ * -------------------------------------------------------------------------*/
++#define VK_BATCH_SETS 512u
++#define VK_BATCH_NONE ((VkDeviceSize)~0ull)
++
++static struct {
++    int              open;      /* s_vk.cmd is recording draws not yet submitted */
++    int              mode;      /* -1 unread, 0 one submit per draw, 1 batch */
++    vk_buffer        vb, ib, ubo;           /* per-batch arenas, filled from 0 */
++    VkDeviceSize     vb_off, ib_off, ubo_off, ubo_align;
++    VkDescriptorPool pool;                  /* per-draw sets, reset per batch */
++    u32              sets;
++    /* Where this batch's last draw put its constants, reused while they are
++     * unchanged (69% of SARPBC's 8 KB vertex-constant binds are). NONE after a
++     * flush or a bind that changed them. */
++    VkDeviceSize     vs_at, ps_at, vs_len_at, ps_len_at;
++    u64              draws, flushes;        /* PS3RECOMP_VK_BATCH_STATS */
++} s_batch = { .mode = -1, .vs_at = VK_BATCH_NONE, .ps_at = VK_BATCH_NONE };
++
++static int vk_submit_and_wait(void);
++static void vk_geo_release(void);
++
++/* PS3RECOMP_VK_DRAW_TIMES=1: GPU time of every batched draw (timestamp pair
++ * around it), summed per pipeline and target size, with the slowest draws,
++ * logged every 1500 batches. It is how the cost of geometry read from host
++ * memory showed up (T040); timestamps serialize nothing, but cost a little. */
++static struct {
++    int on;                         /* -1 unread */
++    VkQueryPool pool;
++    double ns_per_tick;
++    u32 n;                          /* draws stamped in the open batch */
++    struct { u32 pipe, verts, idx, w, h, nrt, topo; } meta[VK_BATCH_SETS];
++    struct { u32 pipe, w, h; u64 ns, n; } agg[256];
++    u64 total_ns, draws, flushes;
++    struct { u64 ns; u32 pipe, verts, idx, w, h; } top[8];
++} s_ts = { .on = -1 };
++
++static void vk_ts_collect(void)
++{
++    if (s_ts.on != 1 || !s_ts.n) { s_ts.n = 0; return; }
++    u64 v[2 * VK_BATCH_SETS];
++    if (pvkGetQueryPoolResults(s_vk.device, s_ts.pool, 0, 2 * s_ts.n, sizeof v, v, sizeof(u64),
++                               VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS) {
++        for (u32 i = 0; i < s_ts.n; i++) {
++            const u64 ns = (u64)((double)(v[2 * i + 1] - v[2 * i]) * s_ts.ns_per_tick);
++            s_ts.total_ns += ns; s_ts.draws++;
++            int k;
++            for (k = 0; k < 256; k++)
++                if (!s_ts.agg[k].n || (s_ts.agg[k].pipe == s_ts.meta[i].pipe &&
++                                       s_ts.agg[k].w == s_ts.meta[i].w && s_ts.agg[k].h == s_ts.meta[i].h)) break;
++            if (k < 256) { s_ts.agg[k].pipe = s_ts.meta[i].pipe; s_ts.agg[k].w = s_ts.meta[i].w;
++                           s_ts.agg[k].h = s_ts.meta[i].h; s_ts.agg[k].ns += ns; s_ts.agg[k].n++; }
++            int lo = 0;
++            for (int t = 1; t < 8; t++) if (s_ts.top[t].ns < s_ts.top[lo].ns) lo = t;
++            if (ns > s_ts.top[lo].ns) {
++                s_ts.top[lo].ns = ns; s_ts.top[lo].pipe = s_ts.meta[i].pipe; s_ts.top[lo].verts = s_ts.meta[i].verts;
++                s_ts.top[lo].idx = s_ts.meta[i].idx; s_ts.top[lo].w = s_ts.meta[i].w; s_ts.top[lo].h = s_ts.meta[i].h;
++            }
++        }
++    }
++    s_ts.n = 0;
++    if (++s_ts.flushes % 1500u == 0) {
++        VK_LOG("ts: %llu draws, GPU %.1f ms total, %.1f us/draw\n", (unsigned long long)s_ts.draws,
++               (double)s_ts.total_ns / 1e6, s_ts.draws ? (double)s_ts.total_ns / 1e3 / (double)s_ts.draws : 0.0);
++        for (int k = 0; k < 256 && s_ts.agg[k].n; k++)
++            if (s_ts.agg[k].ns > s_ts.total_ns / 50u)
++                VK_LOG("ts:   pipe %u %ux%u: %llu draws, %.1f ms (%.1f us each)\n", s_ts.agg[k].pipe,
++                       s_ts.agg[k].w, s_ts.agg[k].h, (unsigned long long)s_ts.agg[k].n,
++                       (double)s_ts.agg[k].ns / 1e6, (double)s_ts.agg[k].ns / 1e3 / (double)s_ts.agg[k].n);
++        for (int t = 0; t < 8; t++)
++            if (s_ts.top[t].ns)
++                VK_LOG("ts:   slow: %.1f us pipe %u verts %u idx %u %ux%u\n", (double)s_ts.top[t].ns / 1e3,
++                       s_ts.top[t].pipe, s_ts.top[t].verts, s_ts.top[t].idx, s_ts.top[t].w, s_ts.top[t].h);
++        memset(s_ts.agg, 0, sizeof s_ts.agg); memset(s_ts.top, 0, sizeof s_ts.top);
++        s_ts.total_ns = s_ts.draws = 0;
++    }
++}
++
++/* Submit the open batch and wait for it, then recycle its arenas and sets. */
++static int vk_batch_flush(void)
++{
++    if (!s_batch.open) return 0;
++    s_batch.open = 0;
++    const int rc = vk_submit_and_wait();
++    vk_ts_collect();
++    s_batch.vb_off = s_batch.ib_off = s_batch.ubo_off = 0;
++    s_batch.vs_at = s_batch.ps_at = VK_BATCH_NONE;
++    if (s_batch.sets) { pvkResetDescriptorPool(s_vk.device, s_batch.pool, 0); s_batch.sets = 0; }
++    s_batch.flushes++;
++    return rc;
++}
++
+ static void vk_destroy_image(vk_image* im)
+ {
++    vk_batch_flush();   /* a recorded draw may still use it */
+     if (im->view) pvkDestroyImageView(s_vk.device, im->view, NULL);
+     if (im->img)  pvkDestroyImage(s_vk.device, im->img, NULL);
+     if (im->mem)  pvkFreeMemory(s_vk.device, im->mem, NULL);
+     memset(im, 0, sizeof *im);
+ }
+ 
++static int vk_create_host_buffer_ex(vk_buffer* b, VkDeviceSize size, VkBufferUsageFlags usage,
++                                    int prefer_vram);
+ static int vk_create_host_buffer(vk_buffer* b, VkDeviceSize size, VkBufferUsageFlags usage)
++{
++    return vk_create_host_buffer_ex(b, size, usage, 0);
++}
++
++/* prefer_vram: a buffer the CPU only writes and the GPU reads every draw.
++ * Take device-local memory the host can map (the 256 MB BAR window most
++ * discrete GPUs expose) when there is one, so the GPU reads it from VRAM
++ * instead of across PCIe on every fetch. Draws reading their vertices,
++ * indices and constants from system memory cost 30-70 us each, and a 7.8k
++ * vertex draw 1.2 ms, on an RTX 2070 SUPER in an x4 slot (SARPBC 01.09). */
++static int vk_create_host_buffer_ex(vk_buffer* b, VkDeviceSize size, VkBufferUsageFlags usage,
++                                    int prefer_vram)
+ {
+     VkBufferCreateInfo bci = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                .size = size, .usage = usage,
+@@ -451,7 +574,9 @@ static int vk_create_host_buffer(vk_buffer* b, VkDeviceSize size, VkBufferUsageF
+      * invalidate, so a non-coherent one is fine. */
+     const VkMemoryPropertyFlags cached = vis | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+     const int readback = usage == VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+-    if (readback && vk_find_memory_type(req.memoryTypeBits, cached | coh, &type) == 0) b->coherent = 1;
++    if (prefer_vram && vk_find_memory_type(req.memoryTypeBits,
++                                           coh | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &type) == 0) b->coherent = 1;
++    else if (readback && vk_find_memory_type(req.memoryTypeBits, cached | coh, &type) == 0) b->coherent = 1;
+     else if (readback && vk_find_memory_type(req.memoryTypeBits, cached, &type) == 0) b->coherent = 0;
+     else if (vk_find_memory_type(req.memoryTypeBits, coh, &type) == 0) b->coherent = 1;
+     else if (vk_find_memory_type(req.memoryTypeBits, vis, &type) == 0) b->coherent = 0;
+@@ -467,6 +592,7 @@ static int vk_create_host_buffer(vk_buffer* b, VkDeviceSize size, VkBufferUsageF
+ 
+ static void vk_destroy_buffer(vk_buffer* b)
+ {
++    vk_batch_flush();
+     if (b->ptr) pvkUnmapMemory(s_vk.device, b->mem);
+     if (b->buf) pvkDestroyBuffer(s_vk.device, b->buf, NULL);
+     if (b->mem) pvkFreeMemory(s_vk.device, b->mem, NULL);
+@@ -489,6 +615,8 @@ static void vk_invalidate(vk_buffer* b)
+  * -------------------------------------------------------------------------*/
+ static int vk_begin(void)
+ {
++    /* Anything that records its own work runs after the batched draws. */
++    if (s_batch.open && vk_batch_flush()) return -1;
+     VK_CHECK(pvkResetCommandBuffer(s_vk.cmd, 0), "vkResetCommandBuffer");
+     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                     .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+@@ -496,14 +624,28 @@ static int vk_begin(void)
+     return 0;
+ }
+ 
++/* Time spent waiting on the GPU, for PS3RECOMP_VK_BATCH_STATS. */
++static u64 s_vk_wait_ns, s_vk_submits;
++
++static u64 vk_now_ns(void)
++{
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (u64)ts.tv_sec * 1000000000ull + (u64)ts.tv_nsec;
++}
++
+ static int vk_submit_and_wait(void)
+ {
+     VK_CHECK(pvkEndCommandBuffer(s_vk.cmd), "vkEndCommandBuffer");
+     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                         .commandBufferCount = 1, .pCommandBuffers = &s_vk.cmd };
+     VK_CHECK(pvkResetFences(s_vk.device, 1, &s_vk.fence), "vkResetFences");
++    const u64 t0 = vk_now_ns();
+     VK_CHECK(pvkQueueSubmit(s_vk.queue, 1, &si, s_vk.fence), "vkQueueSubmit");
+     VK_CHECK(pvkWaitForFences(s_vk.device, 1, &s_vk.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
++    const u64 dt = vk_now_ns() - t0;
++    s_vk_wait_ns += dt;
++    s_vk_submits++;
+     return 0;
+ }
+ 
+@@ -1855,6 +1997,17 @@ static void vk_cb_present(void* ud, u32 buffer_id)
+      * blits the GPU image; the public probe needs just its center texel.
+      * Keep the same waits and refresh the probe on every successful present. */
+     const int dump = s_vk.dump_path && ((s_vk.presented + 1u) % s_vk.dump_every) == 0;
++    /* The draw engine answers readback_center itself (rsx_draw_engine_readback_center),
++     * so on its path a frame with no dump due reads nothing back and costs no
++     * GPU round trip here (one per frame, ~5 ms through SARPBC's PCIe 2.0 x4). */
++    if (s_vk.eng_active && !dump) {
++        s_vk.presented++;
++        s_g.last_draws = s_g.draws;
++        s_g.draws = 0;
++        vk_present_window();
++        return;
++    }
++
+     if (vk_begin()) return;
+     vk_barrier_image(s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+     VkBufferImageCopy region = {
+@@ -1895,9 +2048,10 @@ static void vk_cb_present(void* ud, u32 buffer_id)
+  * PS3RECOMP_RSX_ENGINE=dispatch; only one of the two paths is registered at a
+  * time, since the FIFO walker feeds both and would record every draw twice.
+  *
+- * Every operation is still one synchronous submission, so submit_and_wait has
+- * nothing left to do by the time the engine calls it -- which is exactly the
+- * contract it asks for (staging is free to reuse on return).
++ * Draws are batched into one command buffer (see "Batched engine draws");
++ * every other operation submits and waits, after the batch, so it is
++ * complete when it returns. submit_and_wait flushes the batch, which is the
++ * contract the engine asks for (staging is free to reuse on return).
+  *
+  * Stage E1: colour and depth targets, clears, present and readback.
+  * Pipelines, draws and textures are the next stages; until then
+@@ -2091,7 +2245,8 @@ static void vk_eng_shutdown(void* user)
+ 
+ static void vk_eng_submit_and_wait(void* user, u32 reason)
+ {
+-    (void)user; (void)reason;      /* every submission has already completed */
++    (void)user; (void)reason;
++    vk_batch_flush();              /* everything else completed as it was submitted */
+ }
+ 
+ static u32 vk_eng_color_target_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+@@ -2507,6 +2662,7 @@ static struct {
+     u32          scratch_w, scratch_h;
+     u32          pipeline;
+     u32          vs_bytes, ps_bytes;
++    u8          *vs_data, *ps_data;   /* last bound constants; each draw copies its own */
+     u32          tex[RSX_BE_MAX_TEXTURES];
+     rsx_be_sampler_desc samp[RSX_BE_MAX_TEXTURES];
+     u32          tex_mask;
+@@ -2533,6 +2689,7 @@ static u32 s_esamp_count;
+ 
+ static void vk_eng_drop_framebuffers(void)
+ {
++    vk_batch_flush();
+     for (u32 i = 0; i < s_e2.fb_count; i++)
+         if (s_e2.fb[i].fb) pvkDestroyFramebuffer(s_vk.device, s_e2.fb[i].fb, NULL);
+     s_e2.fb_count = 0;
+@@ -2737,6 +2894,7 @@ static void vk_eng_pipeline_release(void* user, u32 pipeline)
+ {
+     (void)user;
+     if (!pipeline || pipeline > VK_ENG_MAX_PIPE || !s_epipe[pipeline - 1].used) return;
++    vk_batch_flush();
+     vk_eng_pipe* P = &s_epipe[pipeline - 1];
+     for (u32 t = 0; t < VK_ENG_TOPOLOGIES; t++)
+         if (P->variant[t]) pvkDestroyPipeline(s_vk.device, P->variant[t], NULL);
+@@ -2858,6 +3016,14 @@ static void vk_eng_bind_pipeline(void* user, u32 pipeline) { (void)user; s_e2.pi
+ 
+ static void vk_eng2_shutdown(void* user)
+ {
++    vk_batch_flush();
++    vk_destroy_buffer(&s_batch.vb);
++    vk_destroy_buffer(&s_batch.ib);
++    vk_destroy_buffer(&s_batch.ubo);
++    vk_geo_release();
++    if (s_batch.pool) pvkDestroyDescriptorPool(s_vk.device, s_batch.pool, NULL);
++    s_batch.pool = VK_NULL_HANDLE;
++    free(s_e2.vs_data); free(s_e2.ps_data);
+     for (u32 i = 1; i <= VK_ENG_MAX_PIPE; i++) vk_eng_pipeline_release(user, i);
+     vk_eng_drop_framebuffers();
+     for (u32 f = 0; f < VK_ENG_RT_FORMATS; f++)
+@@ -2873,24 +3039,38 @@ static void vk_eng2_shutdown(void* user)
+     s_esamp_count = 0;
+ }
+ 
+-/* Constants go straight into the shared UBO: vertex at 0, pixel at ps_off.
+- * Every operation is waited on, so overwriting per draw is safe. */
++/* Constants are kept here and copied into the batch's constant arena at each
++ * draw (vk_eng_draw), so draws recorded in one batch each keep their own.
++ * Capacities are the shared UBO's: vertex 0..ps_off, pixel the rest. A
++ * draw with none bound reads the first 16 bytes of the last ones bound, as it
++ * did from the shared UBO. */
++static u8* vk_eng_constant_store(u8** p, u32 cap)
++{
++    if (!*p) *p = (u8*)calloc(1, cap > 16u ? cap : 16u);
++    return *p;
++}
+ static void vk_eng_bind_vs_constants(void* user, const void* data, u32 bytes)
+ {
+     (void)user;
+-    if (!s_g.on || !data) { s_e2.vs_bytes = 0; return; }
++    if (!s_g.on || !data) { if (s_e2.vs_bytes) s_batch.vs_at = VK_BATCH_NONE; s_e2.vs_bytes = 0; return; }
+     const u32 cap = (u32)s_g.ps_off;
+     if (bytes > cap) { bytes = cap; if (!(s_e2.warned & 2u)) { VK_LOG("engine: VS constants truncated\n"); s_e2.warned |= 2u; } }
+-    memcpy(s_g.ubo.ptr, data, bytes);
++    u8* d = vk_eng_constant_store(&s_e2.vs_data, cap);
++    if (!d) { s_e2.vs_bytes = 0; return; }
++    if (bytes != s_e2.vs_bytes || memcmp(d, data, bytes)) s_batch.vs_at = VK_BATCH_NONE;
++    memcpy(d, data, bytes);
+     s_e2.vs_bytes = bytes;
+ }
+ static void vk_eng_bind_ps_constants(void* user, const void* data, u32 bytes)
+ {
+     (void)user;
+-    if (!s_g.on || !data) { s_e2.ps_bytes = 0; return; }
++    if (!s_g.on || !data) { if (s_e2.ps_bytes) s_batch.ps_at = VK_BATCH_NONE; s_e2.ps_bytes = 0; return; }
+     const u32 cap = (u32)(s_g.ubo.size - s_g.ps_off);
+     if (bytes > cap) { bytes = cap; if (!(s_e2.warned & 4u)) { VK_LOG("engine: PS constants truncated\n"); s_e2.warned |= 4u; } }
+-    memcpy((u8*)s_g.ubo.ptr + s_g.ps_off, data, bytes);
++    u8* d = vk_eng_constant_store(&s_e2.ps_data, cap);
++    if (!d) { s_e2.ps_bytes = 0; return; }
++    if (bytes != s_e2.ps_bytes || memcmp(d, data, bytes)) s_batch.ps_at = VK_BATCH_NONE;
++    memcpy(d, data, bytes);
+     s_e2.ps_bytes = bytes;
+ }
+ static void vk_eng_bind_textures(void* user, const u32* textures,
+@@ -2980,16 +3160,6 @@ static VkImageView vk_eng_scratch_depth(u32 w, u32 h)
+     return s_e2.scratch_depth.view;
+ }
+ 
+-static int vk_eng_ensure_indices(VkDeviceSize bytes)
+-{
+-    if (s_e2.indices.buf && s_e2.indices.size >= bytes) return 0;
+-    VkDeviceSize size = s_e2.indices.size ? s_e2.indices.size : 64 * 1024;
+-    while (size < bytes) size *= 2;
+-    vk_destroy_buffer(&s_e2.indices);
+-    if (vk_create_host_buffer(&s_e2.indices, size, VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) return -1;
+-    return s_e2.indices.coherent ? 0 : -1;
+-}
+-
+ /* rsx_be_sampler_desc is the registers decoded the D3D12 way; the wrap codes
+  * stay the guest's 1..8, which vk_gcm_wrap already translates. */
+ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
+@@ -3049,19 +3219,21 @@ static VkImageView vk_eng_dummy_cube_view(void)
+     return s_eobj[s_e2.dummy_cube].im.view;
+ }
+ 
+-/* Fill the set the bound pipeline uses: the shared one (sixteen textures in
+- * one binding), or for a pipeline with cube units the split one (one binding
+- * per unit). Returns the set, or VK_NULL_HANDLE. */
+-static VkDescriptorSet vk_eng_write_descriptors(const vk_eng_pipe* P)
++/* Fill `set`, which has the layout the bound pipeline uses: the shared one
++ * (sixteen textures in one binding), or for a pipeline with cube units the
++ * split one (one binding per unit). The constants are the draw's own copies
++ * in the batch arena at vs_off / ps_off. Returns the set, or VK_NULL_HANDLE. */
++static VkDescriptorSet vk_eng_write_descriptors(const vk_eng_pipe* P, VkDescriptorSet set,
++                                                VkDeviceSize vs_off, VkDeviceSize vs_len,
++                                                VkDeviceSize ps_off, VkDeviceSize ps_len)
+ {
+     const int split = P->cube_mask != 0;
+-    const VkDescriptorSet set = split ? s_e2.split_set : s_g.set;
+     if (!set) return VK_NULL_HANDLE;
+     const VkImageView dummy_cube = split ? vk_eng_dummy_cube_view() : VK_NULL_HANDLE;
+     if (split && !dummy_cube) return VK_NULL_HANDLE;
+     VkDescriptorBufferInfo bi[2] = {
+-        { s_g.ubo.buf, 0, s_e2.vs_bytes ? s_e2.vs_bytes : 16u },
+-        { s_g.ubo.buf, s_g.ps_off, s_e2.ps_bytes ? s_e2.ps_bytes : 16u },
++        { s_batch.ubo.buf, vs_off, vs_len },
++        { s_batch.ubo.buf, ps_off, ps_len },
+     };
+     VkDescriptorImageInfo ii[RSX_MAX_TEXTURES], si[RSX_MAX_TEXTURES];
+     for (u32 u = 0; u < RSX_MAX_TEXTURES; u++) {
+@@ -3099,6 +3271,154 @@ static VkDescriptorSet vk_eng_write_descriptors(const vk_eng_pipe* P)
+     return set;
+ }
+ 
++/* Make `b` hold at least `bytes`; only while no batch is open (callers flush
++ * first), since growing destroys the old buffer. */
++static int vk_batch_arena(vk_buffer* b, VkDeviceSize bytes, VkDeviceSize first,
++                          VkBufferUsageFlags usage)
++{
++    if (b->buf && b->size >= bytes) return 0;
++    VkDeviceSize size = b->size ? b->size : first;
++    while (size < bytes) size *= 2;
++    vk_destroy_buffer(b);
++    if (vk_create_host_buffer_ex(b, size, usage, 1)) {     /* BAR full: system memory */
++        vk_destroy_buffer(b);
++        if (vk_create_host_buffer(b, size, usage)) return -1;
++    }
++    if (!b->coherent) { VK_LOG("engine: batch arena memory is not host-coherent\n"); vk_destroy_buffer(b); return -1; }
++    return 0;
++}
++
++static int vk_batch_ready(void)
++{
++    if (s_batch.mode < 0) {
++        const char* e = getenv("PS3RECOMP_VK_BATCH");
++        s_batch.mode = (e && *e == '0') ? 0 : 1;
++    }
++    if (s_batch.pool) return 0;
++    VkPhysicalDeviceProperties p;
++    pvkGetPhysicalDeviceProperties(s_vk.phys, &p);
++    s_batch.ubo_align = p.limits.minUniformBufferOffsetAlignment ? p.limits.minUniformBufferOffsetAlignment : 256;
++    /* Enough for every set of either layout (vk_eng_split_layout has the same
++     * descriptor counts as the shared one, spread over more bindings). */
++    VkDescriptorPoolSize ps[3] = {
++        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2u * VK_BATCH_SETS },
++        { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, RSX_MAX_TEXTURES * VK_BATCH_SETS },
++        { VK_DESCRIPTOR_TYPE_SAMPLER, RSX_MAX_TEXTURES * VK_BATCH_SETS },
++    };
++    VkDescriptorPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
++                                       .maxSets = VK_BATCH_SETS, .poolSizeCount = 3, .pPoolSizes = ps };
++    if (pvkCreateDescriptorPool(s_vk.device, &pci, NULL, &s_batch.pool) != VK_SUCCESS) {
++        s_batch.pool = VK_NULL_HANDLE;
++        VK_LOG("engine: no descriptor pool for draw batches\n");
++        return -1;
++    }
++    return 0;
++}
++
++static VkDeviceSize vk_batch_align(VkDeviceSize v, VkDeviceSize a) { return (v + a - 1u) / a * a; }
++
++/* Vertex and index data by content. The engine hands every draw its decoded
++ * vertices, ~38 KB a draw in SARPBC's menus (static meshes included), and
++ * every byte crossed PCIe each frame: from host memory on every GPU fetch, or
++ * once through the BAR window. Either way that was the frame on a PCIe 2.0 x4
++ * slot. Data seen before is now drawn from the copy already in VRAM, found by
++ * a 128-bit hash of its bytes; only new data is written. The cache fills
++ * linearly and starts over (after a flush: recorded draws read it) when the
++ * buffer or the table is full. PS3RECOMP_VK_GEO_CACHE=0 turns it off. */
++#define VK_GEO_BYTES (64u << 20)
++#define VK_GEO_SLOTS 8192u                  /* power of two */
++
++static struct {
++    int          off;                       /* -1 unread, 1 off/unavailable */
++    vk_buffer    buf;
++    VkDeviceSize used;
++    u32          gen, live;
++    struct { u64 h0, h1; VkDeviceSize bytes, at; } slot[VK_GEO_SLOTS];
++} s_geo = { .off = -1 };
++
++static u64 vk_geo_mix(u64 x)
++{
++    x ^= x >> 33; x *= 0xFF51AFD7ED558CCDull;
++    x ^= x >> 33; x *= 0xC4CEB9FE1A85EC53ull;
++    return x ^ (x >> 33);
++}
++
++static void vk_geo_hash(const u8* p, size_t n, u64* o0, u64* o1)
++{
++    u64 a = 0x9E3779B97F4A7C15ull ^ (u64)n, b = 0xC2B2AE3D27D4EB4Full + (u64)n;
++    size_t i = 0;
++    for (; i + 16u <= n; i += 16u) {
++        u64 x, y;
++        memcpy(&x, p + i, 8); memcpy(&y, p + i + 8, 8);
++        a = (a ^ x) * 0x87C37B91114253D5ull; a ^= a >> 31;
++        b = (b ^ y) * 0x4CF5AD432745937Full; b ^= b >> 29;
++    }
++    u64 t0 = 0, t1 = 0;
++    const size_t r = n - i;
++    memcpy(&t0, p + i, r < 8u ? r : 8u);
++    if (r > 8u) memcpy(&t1, p + i + 8, r - 8u);
++    a = (a ^ t0) * 0x87C37B91114253D5ull;
++    b = (b ^ t1) * 0x4CF5AD432745937Full;
++    *o0 = vk_geo_mix(a ^ (b << 31 | b >> 33));
++    *o1 = vk_geo_mix(b + a * 5u);
++}
++
++static void vk_geo_release(void)
++{
++    vk_destroy_buffer(&s_geo.buf);
++    memset(s_geo.slot, 0, sizeof s_geo.slot);
++    s_geo.used = 0; s_geo.live = 0; s_geo.gen++;
++}
++
++/* Whether `bytes` of geometry go through the cache (allocating it once). */
++static int vk_geo_usable(VkDeviceSize bytes)
++{
++    if (s_geo.off < 0) {
++        const char* e = getenv("PS3RECOMP_VK_GEO_CACHE");
++        s_geo.off = (e && *e == '0') ? 1 : 0;
++    }
++    if (s_geo.off) return 0;
++    if (!s_geo.buf.buf) {
++        if (vk_create_host_buffer_ex(&s_geo.buf, VK_GEO_BYTES,
++                                     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, 1) ||
++            !s_geo.buf.coherent) {
++            vk_destroy_buffer(&s_geo.buf);
++            s_geo.off = 1;
++            VK_LOG("engine: no memory for the geometry cache; drawing from the batch arenas\n");
++            return 0;
++        }
++    }
++    return bytes > 0 && bytes <= VK_GEO_BYTES / 4u;
++}
++
++/* The offset in s_geo.buf of a copy of `data`. A full cache flushes the
++ * batch and starts over, which bumps s_geo.gen. */
++static void vk_geo_get(const void* data, VkDeviceSize bytes, VkDeviceSize align, VkDeviceSize* at)
++{
++    u64 h0, h1;
++    vk_geo_hash((const u8*)data, (size_t)bytes, &h0, &h1);
++    u32 i = (u32)h0 & (VK_GEO_SLOTS - 1u);
++    for (; s_geo.slot[i].bytes; i = (i + 1u) & (VK_GEO_SLOTS - 1u))
++        if (s_geo.slot[i].h0 == h0 && s_geo.slot[i].h1 == h1 && s_geo.slot[i].bytes == bytes) {
++            *at = s_geo.slot[i].at;
++            return;
++        }
++    VkDeviceSize a = vk_batch_align(s_geo.used, align);
++    if (a + bytes > s_geo.buf.size || s_geo.live >= VK_GEO_SLOTS / 4u * 3u) {
++        vk_batch_flush();
++        memset(s_geo.slot, 0, sizeof s_geo.slot);
++        s_geo.used = 0; s_geo.live = 0; s_geo.gen++;
++        a = 0;
++        i = (u32)h0 & (VK_GEO_SLOTS - 1u);
++    }
++    memcpy((u8*)s_geo.buf.ptr + a, data, (size_t)bytes);
++    s_geo.slot[i].h0 = h0; s_geo.slot[i].h1 = h1;
++    s_geo.slot[i].bytes = bytes; s_geo.slot[i].at = a;
++    s_geo.live++;
++    s_geo.used = a + bytes;
++    *at = a;
++}
++
+ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices, u32 vertex_count,
+                         u32 stride, const u32* indices, u32 index_count)
+ {
+@@ -3133,19 +3453,124 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+     VkFramebuffer fb = vk_eng_framebuffer(rp, s_eng_bound.rt, n, dview, dkey, w, h);
+     if (!pipe || !rp || !fb) return;
+ 
++    /* Everything above may flush the batch (a framebuffer eviction, the
++     * scratch depth, the dummy cube); nothing below does until the draw is
++     * recorded, so the arena slices reserved here stay this draw's. */
++    if (vk_batch_ready()) return;
++    if (P->cube_mask && !vk_eng_dummy_cube_view()) return;   /* may upload: before reserving */
+     const VkDeviceSize vbytes = (VkDeviceSize)vertex_count * stride;
+-    if (vk_ensure_vertex_buffer(vbytes)) return;
+-    memcpy(s_vk.vertices.ptr, vertices, (size_t)vbytes);
+-    if (indices && index_count) {
+-        if (vk_eng_ensure_indices((VkDeviceSize)index_count * 4u)) return;
+-        memcpy(s_e2.indices.ptr, indices, (size_t)index_count * 4u);
++    const VkDeviceSize ibytes = (indices && index_count) ? (VkDeviceSize)index_count * 4u : 0;
++
++    /* Geometry first: a cache miss may flush (the cache was full), and that
++     * has to happen before any slice of the batch is reserved below. If the
++     * index lookup restarted the cache, the vertices go in again. */
++    VkBuffer vbuf = VK_NULL_HANDLE, ibuf = VK_NULL_HANDLE;
++    VkDeviceSize vb_off = 0, ib_off = 0;
++    const int cached = vk_geo_usable(vbytes + ibytes);
++    if (cached) {
++        u32 gen;
++        do {
++            vk_geo_get(vertices, vbytes, 16u, &vb_off);
++            gen = s_geo.gen;
++            if (ibytes) vk_geo_get(indices, ibytes, 4u, &ib_off);
++        } while (s_geo.gen != gen);
++        vbuf = ibuf = s_geo.buf.buf;
++    }
++
++    const VkDeviceSize vs_len = s_e2.vs_bytes ? s_e2.vs_bytes : 16u;
++    const VkDeviceSize ps_len = s_e2.ps_bytes ? s_e2.ps_bytes : 16u;
++    const VkDeviceSize ua = s_batch.ubo_align;
++    const VkDeviceSize gvb = cached ? 0 : vbytes, gib = cached ? 0 : ibytes;
++    int vs_new = 1, ps_new = 1;
++    VkDeviceSize ubytes = 0, vb_at = 0, ib_at = 0, ub_at = 0;
++    for (int pass = 0; pass < 2; pass++) {
++        /* Unchanged constants reuse the slice the last draw of this batch wrote. */
++        vs_new = !(s_batch.open && s_batch.vs_at != VK_BATCH_NONE && s_batch.vs_len_at == vs_len);
++        ps_new = !(s_batch.open && s_batch.ps_at != VK_BATCH_NONE && s_batch.ps_len_at == ps_len);
++        ubytes = (vs_new ? vk_batch_align(vs_len, ua) : 0) + (ps_new ? vk_batch_align(ps_len, ua) : 0);
++        vb_at = vk_batch_align(s_batch.vb_off, 16u);
++        ib_at = vk_batch_align(s_batch.ib_off, 4u);
++        ub_at = vk_batch_align(s_batch.ubo_off, ua);
++        if (!s_batch.open) break;
++        if (vb_at + gvb <= s_batch.vb.size && ib_at + gib <= s_batch.ib.size &&
++            ub_at + ubytes <= s_batch.ubo.size && s_batch.sets < VK_BATCH_SETS) break;
++        if (vk_batch_flush()) return;
++    }
++    if (!s_batch.open) {
++        if (vk_batch_arena(&s_batch.vb, gvb ? gvb : 16u, 4u << 20, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) ||
++            vk_batch_arena(&s_batch.ib, gib ? gib : 4u, 1u << 20, VK_BUFFER_USAGE_INDEX_BUFFER_BIT) ||
++            vk_batch_arena(&s_batch.ubo, ubytes, 4u << 20, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT))
++            return;
++        vb_at = ib_at = ub_at = 0;
+     }
+-    const VkDescriptorSet set = vk_eng_write_descriptors(P);
+-    if (!set) return;
+ 
+-    if (vk_begin()) return;
+-    /* Everything submitted before is complete (each submission is waited
+-     * on); this orders memory for the surfaces this draw touches. */
++    const int split = P->cube_mask != 0;
++    VkDescriptorSetLayout layout = split ? s_e2.split_layout : s_g.set_layout;
++    VkDescriptorSet set = VK_NULL_HANDLE;
++    VkDescriptorSetAllocateInfo dai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
++                                        .descriptorPool = s_batch.pool, .descriptorSetCount = 1,
++                                        .pSetLayouts = &layout };
++    if (!layout || pvkAllocateDescriptorSets(s_vk.device, &dai, &set) != VK_SUCCESS) return;
++    s_batch.sets++;
++
++    if (!cached) {
++        vbuf = s_batch.vb.buf; vb_off = vb_at;
++        memcpy((u8*)s_batch.vb.ptr + vb_off, vertices, (size_t)vbytes);
++        s_batch.vb_off = vb_off + vbytes;
++        if (ibytes) {
++            ibuf = s_batch.ib.buf; ib_off = ib_at;
++            memcpy((u8*)s_batch.ib.ptr + ib_off, indices, (size_t)ibytes);
++            s_batch.ib_off = ib_off + ibytes;
++        }
++    }
++    VkDeviceSize vs_off = s_batch.vs_at, ps_off = s_batch.ps_at, u = ub_at;
++    {   /* the last bound constants, or zeros before any were bound */
++        static const u8 zero16[16];
++        if (vs_new) {
++            memcpy((u8*)s_batch.ubo.ptr + u, s_e2.vs_data ? s_e2.vs_data : zero16, (size_t)vs_len);
++            vs_off = u; u += vk_batch_align(vs_len, ua);
++            s_batch.vs_at = vs_off; s_batch.vs_len_at = vs_len;
++        }
++        if (ps_new) {
++            memcpy((u8*)s_batch.ubo.ptr + u, s_e2.ps_data ? s_e2.ps_data : zero16, (size_t)ps_len);
++            ps_off = u; u += vk_batch_align(ps_len, ua);
++            s_batch.ps_at = ps_off; s_batch.ps_len_at = ps_len;
++        }
++        if (vs_new || ps_new) s_batch.ubo_off = u;
++    }
++    if (!vk_eng_write_descriptors(P, set, vs_off, vs_len, ps_off, ps_len)) return;
++
++    if (!s_batch.open) {
++        if (vk_begin()) return;
++        s_batch.open = 1;
++        if (s_ts.on < 0) {
++            s_ts.on = getenv("PS3RECOMP_VK_DRAW_TIMES") ? 1 : 0;
++            if (s_ts.on) {
++                VkPhysicalDeviceProperties pp; pvkGetPhysicalDeviceProperties(s_vk.phys, &pp);
++                s_ts.ns_per_tick = pp.limits.timestampPeriod;
++                VkQueryPoolCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
++                                              .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 2 * VK_BATCH_SETS };
++                if (pvkCreateQueryPool(s_vk.device, &qci, NULL, &s_ts.pool) != VK_SUCCESS) s_ts.on = 0;
++            }
++        }
++        if (s_ts.on == 1) { pvkCmdResetQueryPool(s_vk.cmd, s_ts.pool, 0, 2 * VK_BATCH_SETS); s_ts.n = 0; }
++    }
++    const u32 ts_i = s_ts.n;
++    if (s_ts.on == 1 && ts_i < VK_BATCH_SETS) {
++        s_ts.meta[ts_i].pipe = s_e2.pipeline; s_ts.meta[ts_i].verts = vertex_count;
++        s_ts.meta[ts_i].idx = index_count; s_ts.meta[ts_i].w = w; s_ts.meta[ts_i].h = h;
++        pvkCmdWriteTimestamp(s_vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_ts.pool, 2 * ts_i);
++    }
++    /* Order this draw after every command recorded before it, as the
++     * submit-and-wait between draws used to: a draw may sample what the one
++     * before rendered, or blend over it. Layouts stay GENERAL throughout. */
++    {
++        VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
++                               .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
++                               .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
++        pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
++                              VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
++    }
+     for (u32 i = 0; i < n; i++)
+         vk_barrier_image(s_eobj[s_eng_bound.rt[i]].im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+     VkRenderPassBeginInfo rbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+@@ -3174,16 +3599,29 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+     pvkCmdBindDescriptorSets(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              P->cube_mask ? s_e2.split_pipe_layout : s_g.pipe_layout,
+                              0, 1, &set, 0, NULL);
+-    VkDeviceSize off = 0;
+-    pvkCmdBindVertexBuffers(s_vk.cmd, 0, 1, &s_vk.vertices.buf, &off);
+-    if (indices && index_count) {
+-        pvkCmdBindIndexBuffer(s_vk.cmd, s_e2.indices.buf, 0, VK_INDEX_TYPE_UINT32);
++    pvkCmdBindVertexBuffers(s_vk.cmd, 0, 1, &vbuf, &vb_off);
++    if (ibytes) {
++        pvkCmdBindIndexBuffer(s_vk.cmd, ibuf, ib_off, VK_INDEX_TYPE_UINT32);
+         pvkCmdDrawIndexed(s_vk.cmd, index_count, 1, 0, 0, 0);
+     } else {
+         pvkCmdDraw(s_vk.cmd, vertex_count, 1, 0, 0);
+     }
+     pvkCmdEndRenderPass(s_vk.cmd);
+-    vk_submit_and_wait();
++    if (s_ts.on == 1 && ts_i < VK_BATCH_SETS) {
++        pvkCmdWriteTimestamp(s_vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_ts.pool, 2 * ts_i + 1);
++        s_ts.n = ts_i + 1;
++    }
++    s_batch.draws++;
++    if (s_batch.mode == 0) vk_batch_flush();
++    {   /* PS3RECOMP_VK_BATCH_STATS=1: draws per submission, now and then */
++        static int on = -1;
++        if (on < 0) { const char* e = getenv("PS3RECOMP_VK_BATCH_STATS"); on = e && *e && *e != '0'; }
++        if (on && (s_batch.draws % 5000u) == 0)
++            VK_LOG("engine: %llu draws in %llu batches (%.1f per batch); %llu submits, %.0f ms in GPU waits\n",
++                   (unsigned long long)s_batch.draws, (unsigned long long)s_batch.flushes,
++                   s_batch.flushes ? (double)s_batch.draws / (double)s_batch.flushes : 0.0,
++                   (unsigned long long)s_vk_submits, (double)s_vk_wait_ns / 1e6);
++    }
+ }
+ 
+ static const rsx_draw_backend s_vk_engine_backend = {
+diff --git a/libs/video/tests/test_vulkan_present_readback.c b/libs/video/tests/test_vulkan_present_readback.c
+index a90e76f..665ea90 100644
+--- a/libs/video/tests/test_vulkan_present_readback.c
++++ b/libs/video/tests/test_vulkan_present_readback.c
+@@ -115,6 +115,18 @@ static void exercise(const char* path, u32 w, u32 h)
+     assert(s_vk.presented == 4 && copy_calls == 5 && s_vk.last_center == last);
+     expect_dump(path, 64);
+     assert(window_calls == 4);
++
++    /* Draw-engine path: the engine answers the centre probe itself, so a
++     * present with no dump due copies nothing; a due dump still copies all. */
++    fail_submit = 0;
++    s_vk.eng_active = 1;
++    s_vk.dump_every = 3;                    /* presented == 4: next dump at 6 */
++    vk_cb_present(NULL, 0);
++    assert(s_vk.presented == 5 && copy_calls == 5 && window_calls == 5);
++    vk_cb_present(NULL, 0);
++    assert(s_vk.presented == 6 && copy_calls == 6 && window_calls == 6);
++    expect_region(1);
++    s_vk.eng_active = 0;
+ }
+ int main(int argc, char** argv)
+ {
+@@ -124,6 +136,6 @@ int main(int argc, char** argv)
+     exercise(argv[1], 5, 3);                /* odd dimensions */
+     exercise(argv[1], 4, 4);                /* even dimensions */
+     exercise(argv[1], 1, 1);                /* smallest legal surface */
+-    puts("vulkan present readback: OK (probe, cadence, dump pixels, failure paths)");
++    puts("vulkan present readback: OK (probe, cadence, dump pixels, failure paths, engine path)");
+     return 0;
+ }
+-- 
+2.47.3
+
