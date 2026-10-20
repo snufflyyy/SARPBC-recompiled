@@ -19,7 +19,8 @@ tool changed).
 intro is Loading, ESRB with the car, Powered by Unreal, the Psyonix logo, the safe-area screen
 (needs X), then the menu: CROSS at 45 s and again at 50 s by `PAD_FILE` (T036 will make that
 `boot_check --pad`). New Game now loads MP_SOCCARARENA + PYRAMID_COLLECTBOOST and keeps presenting (T037, T044),
-but the arena frame is mostly black with corrupt rectangles (T045, priority 1). Real MP3 audio
+and **the arena now renders** (T045 depth-clear fix: the game uses reversed-Z). Left in T045:
+noisy textures on some surfaces, garbage HUD, no car in view. Real MP3 audio
 plays (T007). `boot_check --pad` scripts the presses (T036). There's no Bink in 01.09.
 
 **Last verified on `main` (fc9cdf4, 2026-10-20, `PS3_VERBOSE=0`, under the boot lock):** a 120 s
@@ -27,8 +28,8 @@ boot_check is PROGRESSING with 3513 flips; the main menu runs at **29.5 fps** (1
 26.3-32.3), ~130% CPU, 28 threads. Where a menu frame's ~31 ms go, and what to try next:
 subsystems.md "Menu frame rate".
 
-**State of `main`:** 40 patch files (58 commits) on upstream `39a3629` (v0.15.0); every one of the
-73 test scripts (ours and ps3recomp's) passes on that stack. Upstream is now at v0.16.0 with
+**State of `main`:** 46 patch files (64 commits) on upstream `39a3629` (v0.15.0); every one of the
+79 test scripts (ours and ps3recomp's) passes on that stack (2026-10-20, `tools/lint.py --tests`). Upstream is now at v0.16.0 with
 fixes and menu-relevant perf work we don't have yet: T043 bumps the pin. Both versions are
 relifted. The big fixes of the last two days: the SPURS CreateTask race that started tasks twice
 (0038, T033: ~1500% CPU to ~100%) and Vulkan draw batching with a VRAM geometry cache (0040, T040:
@@ -48,11 +49,11 @@ X11 override; `SDL_VIDEODRIVER=wayland ./run.sh` explicitly selects Wayland. A
 45-second window test presented 3,581 guest frames without a headless fallback;
 this is not a main-menu FPS measurement. See build-linux.md "Desktop launch".
 
-**Queue:** the board's `Priority:` lines (`tools/task.sh next`): T040 (60 fps), T043 (pin bump),
-T029 (profiler mixer metric), T032/T031 (SPU DMA, codegen), T036 (`boot_check --pad`), T034
-(callback stacks), T037 (hang after New Game), T038 (upside-down Loading), then T007, T020, T017,
-T021, T012, T009, T018, T005, T010, T011, T013, T014. T015 (multiplayer) is **blocked** until the
-user has permission.
+**Queue:** the board's `Priority:` lines (`tools/task.sh next`): **T045 (arena textures/HUD, P1,
+read its HANDOFF)**, T040 (60 fps), T043 (pin bump), T029 (profiler mixer metric), T032/T031 (SPU
+DMA, codegen), T034 (callback stacks), T038 (upside-down Loading), then T020, T017, T021, T012, T009,
+T018, T005, T010, T011, T013, T014. T015 (multiplayer) is **blocked** until the user has permission.
+T007, T036, T037 and T044 were closed on 2026-10-20.
 
 ## Phases
 
@@ -96,7 +97,7 @@ user has permission.
 
 ## Log
 
-### 2026-10-20 (session 9, cont.): New Game loads the arena; audio plays
+### 2026-10-20 (session 9, cont.): New Game loads and renders the arena; audio plays
 - pi (merged by claude after pi ran out of usage): T037: the arena hang had two SPURS causes.
   The taskset attribute dropped its 64-bit argument (collision tasks polled EA 0), and the HLE's
   synthetic job-chain completion broadcast (`data2=0`) told the slab service thread
@@ -106,8 +107,11 @@ user has permission.
   T007: MultiStream's second DSP bank (filter) is now lifted too; real MP3 audio reaches
   PulseAudio. T036: `boot_check --pad`. Verified (claude, 120 s, `--pad
   'cross@40*4/5,cross@70,r2:120@90,cross@100'`): MP_SOCCARARENA + PYRAMID_COLLECTBOOST load,
-  6025 flips, frames presented to the end, unresolved 0. **The arena frame is mostly black
-  with small corrupt rectangles** (T045, next).
+  6025 flips, frames presented to the end, unresolved 0. The arena frame was black.
+- claude: T045: the arena was black because UE3 here uses reversed-Z (clears depth with
+  `ZSTENCIL_CLEAR_VALUE=0`, draws GEQUAL) and the draw engine read a zero clear value as 1.0.
+  Patch `T045-zstencil-clear-zero`; the arena now draws (subsystems.md "Arena renders black").
+  Still wrong: noisy textures on some surfaces, HUD garbage, no car in view (T045 HANDOFF).
 
 ### 2026-10-20 (session 9, cont.): project audit (T039)
 - User asked for an audit of the whole project, to keep it clean and uniform as it grows.

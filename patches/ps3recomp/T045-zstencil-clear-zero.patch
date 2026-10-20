@@ -1,0 +1,64 @@
+From 13e1110dfdc3045b36242bc9ae3fdb18f2513c94 Mon Sep 17 00:00:00 2001
+From: Braden <robertsaiden135@gmail.com>
+Date: Tue, 20 Oct 2026 11:35:14 -0500
+Subject: [PATCH] rsx engine: a zero ZSTENCIL_CLEAR_VALUE clears depth to 0
+
+sink_clear read a zero clear value as depth 1.0. rsx_dispatch_init already
+seeds the nv40 reset value 0xFFFFFF00, so a title that never sets the
+register still clears to the far plane; an explicit 0 is a reversed-Z
+clear (near = 1, depth func GEQUAL). Read as 1.0, every GEQUAL draw
+failed and the scene stayed black.
+
+The per-pass capture (RSX_ENGINE_PASS_DUMP) also logs each clear's colour
+and zeta clear values.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libs/video/rsx_draw_engine.c | 15 ++++++++++-----
+ 1 file changed, 10 insertions(+), 5 deletions(-)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 0f41022..66c48ff 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -87,6 +87,7 @@ extern u32 ppu_vm_size;
+ #define M_DEPTH_WRITE         0x0A70
+ #define M_DEPTH_TEST_ENABLE   0x0A74
+ #define M_ZSTENCIL_CLEAR      0x1D8C
++#define M_COLOR_CLEAR         0x1D90
+ 
+ /* ---- module state -------------------------------------------------------- */
+ 
+@@ -2141,8 +2142,9 @@ static void pd_note(const u32* targets, u32 n_targets, u32 zslot,
+         const u32 v = rsx_dsp_reg(&g.rsx, M_SCISSOR_VERTICAL);
+         const size_t n = strlen(s_pd.first);
+         snprintf(s_pd.first + n, sizeof s_pd.first - n,
+-                 " [clear after %u draws, scissor %u,%u %ux%u]",
+-                 s_pd.draws, h & 0xFFFFu, v & 0xFFFFu, h >> 16, v >> 16);
++                 " [clear after %u draws, scissor %u,%u %ux%u, color %08X zs %08X]",
++                 s_pd.draws, h & 0xFFFFu, v & 0xFFFFu, h >> 16, v >> 16,
++                 rsx_dsp_reg(&g.rsx, M_COLOR_CLEAR), rsx_dsp_reg(&g.rsx, M_ZSTENCIL_CLEAR));
+         return;
+     }
+     if (s_pd.draws_log) {
+@@ -2476,11 +2478,14 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+          * field 1). Read as Z24S8, a Z16 surface's 0xFFFF -- its far plane --
+          * would clear it to 255/16777215, nearly the near plane, and every
+          * LESS or LEQUAL draw into it would then fail. The nv40 reset
+-         * 0xFFFFFF00 seeded by rsx_dispatch_init clears to 1.0 / 0. */
++         * 0xFFFFFF00 seeded by rsx_dispatch_init clears to 1.0 / 0, so a
++         * title that never sets the register still clears to the far plane.
++         * A value of 0 is a real clear to depth 0: reversed-Z renderers
++         * (near = 1, GEQUAL) clear to it, and reading it as 1.0 made every
++         * GEQUAL draw fail -- a black scene with only the HUD left. */
+         const u32 zs = rsx_dsp_reg(&g.rsx, M_ZSTENCIL_CLEAR);
+         const int z16 = sf.depth_format == 1u;
+-        const float depth = !zs ? 1.0f
+-                          : z16 ? (float)(zs & 0xFFFFu) / 65535.0f
++        const float depth = z16 ? (float)(zs & 0xFFFFu) / 65535.0f
+                                 : (float)(zs >> 8) / 16777215.0f;
+         g.be->clear_depth_stencil(g.be->user, g.zdepths[zslot].handle, flags,
+                                   depth, z16 ? 0 : (u8)(zs & 0xFFu));
+-- 
+2.55.0
+

@@ -13,7 +13,7 @@ you are touching instead of re-scanning the tree or the game files.
 
 **Phase 7 done: 01.09 reaches the main menu; now performance, goal 60 fps in the main menu** (user,
 2026-10-19). The PPU lift, all 15 SPU images, the 2 SPUJOBS jobs and the MultiStream overlay build
-on 01.02 and 01.09, with 45 ps3recomp patch files. New Game loads the arena (renders corrupt: T045). The menu runs at 29.5 fps (2026-10-20, from 19.8)
+on 01.02 and 01.09, with 46 ps3recomp patch files. New Game loads and renders the arena (textures/HUD still wrong: T045). The menu runs at 29.5 fps (2026-10-20, from 19.8)
 after the SPURS CreateTask race fix (T033) and Vulkan draw batching with a VRAM geometry cache
 (T040, in progress; the GPU is on PCIe 2.0 x4). Upstream ps3recomp is at v0.16.0: the pin bump is
 T043. The project audit (T039) ran on 2026-10-20 and left `tools/lint.py` behind. Agents the user

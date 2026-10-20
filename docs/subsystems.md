@@ -184,8 +184,35 @@ callbacks. With no worker, manual/HLE delivery still works. Failed thread
 startup closes and clears the event so it cannot disable that fallback.
 The fixture checks FIFO ordering, exactly-once delivery, tick retention and
 mocked CreateThread failure under GCC and Clang. No fences are skipped and
-no flips are fabricated. Arena boot verification is pending; the previous
-last frame is corrupt, so do not call the arena playable yet.
+no flips are fabricated. Verified 2026-10-20 (claude, 120 s boot with `--pad`):
+frames are presented to the end of the run (6025 flips); the frame was black
+until T045's depth-clear fix below.
+
+### Arena renders black: reversed-Z depth clear (T045, 2026-10-20)
+
+The arena frame was black except for a few corrupt HUD rectangles. The per-pass
+capture showed why (`RSX_ENGINE_PASS_DUMP=<dir> RSX_ENGINE_PASS_DUMP_AFTER=85
+RSX_ENGINE_PASS_DUMP_DRAWS=1`, 105 s boot with
+`--pad 'cross@40*4/5,cross@70,r2:120@90,cross@100'`):
+- The scene goes into an FP16 target `0x0A130000` (cfmt 11) with zeta
+  `0x09570000` (Z24S8). Each frame starts with a depth-only pre-pass into it
+  (10 draws, colour mask 0, depth func `0x206` GEQUAL, depth write on).
+- **UE3 here uses reversed-Z**: every clear sets `ZSTENCIL_CLEAR_VALUE = 0`
+  (21 of 21 clears; passes.txt now logs `color`/`zs` per clear).
+- `sink_clear` in `libs/video/rsx_draw_engine.c` mapped `zs == 0` to depth 1.0
+  (upstream `4df0909`, still in v0.16.0). With depth 1.0 and GEQUAL nothing
+  passes: the depth buffer stayed uniformly 1.0 and the scene black.
+- Patch `T045-zstencil-clear-zero`: a zero clear value clears to 0. The nv40
+  reset `0xFFFFFF00` that `rsx_dispatch_init` seeds still gives 1.0 to titles
+  that never set the register. After it the pre-pass writes depth (0..0.017)
+  and the arena draws (stadium, floor, walls). The D3D12 path,
+  `rsx_live_draw.c:7591`, has the same `!zs ? 1.0f` and is not patched yet.
+
+**Still wrong after the fix** (what T045 has left): some surfaces sample noisy
+textures (the yellow wall panels, the floor grid band: maybe a texture format,
+swizzle or mip issue, not investigated). The HUD rectangles (top centre, top
+right, boost meter bottom right) are still garbage. The frame has a black
+border (maybe the safe-area setting). No car is visible from the camera.
 
 ## Audio
 
