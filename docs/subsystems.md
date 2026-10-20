@@ -239,9 +239,10 @@ the floor, walls and windows are clean, the HUD is right (timer, score, stars,
 boost meter), and the car is drawn and drives into the goal tunnel on throttle.
 The car's shadow was then a dark square on the floor (next section). **Still
 wrong:** the scene fills only the
-middle 1088x612 (85%) of the 1280x720 frame with a black border, which may be
-the safe-area setting from the boot prompt and not a bug (not checked against
-hardware); D3D12 (`rsx_live_draw.c`) still gets every subchannel's methods and
+middle 1088x612 (85%) of the 1280x720 frame with a black border. The menus
+(Choose Profile) and dialogs have the same box, UI and 3D alike, so it is the
+game's screen-size setting from its safe-area screen, not a renderer bug (not
+checked against hardware); D3D12 (`rsx_live_draw.c`) still gets every subchannel's methods and
 has the `!zs ? 1.0f` clear (T011).
 
 ### Car shadow: depth-compare direction (T045, 2026-10-20)
