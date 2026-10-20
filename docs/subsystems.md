@@ -180,6 +180,11 @@ Where the frame went before (5 s of `FRAME_CLOCK_STATS`): fifo 2.95 s, present 1
 0.6 s; GPU waits were ~22 ms per frame. Next: vertex decode (`rsx_vertex_decode_element`, ~40%
 of FIFO samples), then overlapping GPU and CPU.
 
+SPU threads are not the limit any more (2026-10-20, `/proc/<pid>/task/*/stat` over 20 s on the
+Single Player screen, 0053 applied): the game uses ~190% CPU in total, three threads at 74%,
+59% and 43%, the rest under 10%. The 90% lock/spin share seen on 2026-10-19 was T033's
+double-started tasks. T029/T031/T032 (SPU speed) stay open for an SPU-heavy scene.
+
 ### Arena flip-callback stall (T044, 2026-10-20)
 
 After the slab-service repair lets the challenge package load, a 140 s boot
