@@ -1,0 +1,142 @@
+From 587904f211ff68716f032de70ad390194472ad5e Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Tue, 20 Oct 2026 23:01:03 +0000
+Subject: [PATCH] video(vulkan): record clears and colour snapshots into the
+ open batch
+
+They each flushed the batch and did their own submit-and-wait: ~9000 of ~20000
+submit-and-waits in 100 s of menus. Arena 34 -> 37 fps, menus +2%.
+---
+ libs/video/rsx_vulkan_backend.c | 72 +++++++++++++++++++++++----------
+ 1 file changed, 51 insertions(+), 21 deletions(-)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 0ce5227..23d8e7d 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -2501,6 +2501,50 @@ static void vk_eng_bind_targets(void* user, const u32* surfaces, u32 count, u32
+     s_eng_bound.depth = depth;
+ }
+ 
++static int vk_batch_ready(void);
++static int vk_batch_arena(vk_buffer* b, VkDeviceSize bytes, VkDeviceSize first,
++                          VkBufferUsageFlags usage);
++
++/* Open the batch's command buffer if it is not open (the draw's first step),
++ * with the timestamp queries reset when PS3RECOMP_VK_DRAW_TIMES asks for them. */
++static int vk_batch_open(void)
++{
++    if (s_batch.open) return 0;
++    if (vk_begin()) return -1;
++    s_batch.open = 1;
++    if (s_ts.on < 0) {
++        s_ts.on = getenv("PS3RECOMP_VK_DRAW_TIMES") ? 1 : 0;
++        if (s_ts.on) {
++            VkPhysicalDeviceProperties pp; pvkGetPhysicalDeviceProperties(s_vk.phys, &pp);
++            s_ts.ns_per_tick = pp.limits.timestampPeriod;
++            VkQueryPoolCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
++                                          .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 2 * VK_BATCH_SETS };
++            if (pvkCreateQueryPool(s_vk.device, &qci, NULL, &s_ts.pool) != VK_SUCCESS) s_ts.on = 0;
++        }
++    }
++    if (s_ts.on == 1) { pvkCmdResetQueryPool(s_vk.cmd, s_ts.pool, 0, 2 * VK_BATCH_SETS); s_ts.n = 0; }
++    return 0;
++}
++
++/* Record a transfer or clear into the open batch instead of submitting it and
++ * waiting: the batch's own command buffer, outside any render pass, ordered
++ * after the draws before it by the barriers the caller records. Returns 0 with
++ * s_vk.cmd ready to record into. Clears and colour snapshots were 9000 of the
++ * ~20000 submit-and-waits in 100 s of menus (T040). */
++static int vk_batch_begin_cmds(void)
++{
++    if (!s_batch.open) {
++        if (vk_batch_ready()) return -1;
++        if (vk_batch_arena(&s_batch.vb, 16u, 4u << 20, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) ||
++            vk_batch_arena(&s_batch.ib, 4u, 1u << 20, VK_BUFFER_USAGE_INDEX_BUFFER_BIT) ||
++            vk_batch_arena(&s_batch.ubo, 16u, 4u << 20, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT))
++            return -1;
++        if (vk_batch_open()) return -1;
++    }
++    if (s_batch.pass_fb) { pvkCmdEndRenderPass(s_vk.cmd); s_batch.pass_fb = VK_NULL_HANDLE; }
++    return 0;
++}
++
+ static void vk_eng_clear_color(void* user, u32 surface, const float rgba[4])
+ {
+     (void)user;
+@@ -2510,13 +2554,13 @@ static void vk_eng_clear_color(void* user, u32 surface, const float rgba[4])
+                       ((u32)(rgba[1] * 255.0f + 0.5f) <<  8) |
+                        (u32)(rgba[2] * 255.0f + 0.5f);
+     vk_eng_obj* o = vk_eng_get(surface, VK_ENG_COLOR);
+-    if (!o || vk_begin()) return;
++    if (!o || vk_batch_begin_cmds()) return;
+     VkClearColorValue v;
+     memcpy(v.float32, rgba, sizeof v.float32);
+     VkImageSubresourceRange r = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+     vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+     pvkCmdClearColorImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, &v, 1, &r);
+-    vk_submit_and_wait();
++    if (s_batch.mode == 0) vk_batch_flush();
+ }
+ 
+ static void vk_eng_clear_depth_stencil(void* user, u32 depth, u32 flags,
+@@ -2527,12 +2571,12 @@ static void vk_eng_clear_depth_stencil(void* user, u32 depth, u32 flags,
+     VkImageAspectFlags aspect = 0;
+     if (flags & RSX_BE_CLEAR_DEPTH) aspect |= VK_IMAGE_ASPECT_DEPTH_BIT;
+     if (flags & RSX_BE_CLEAR_STENCIL) aspect |= s_vk.depth_aspect & VK_IMAGE_ASPECT_STENCIL_BIT;
+-    if (!o || !aspect || vk_begin()) return;
++    if (!o || !aspect || vk_batch_begin_cmds()) return;
+     VkClearDepthStencilValue d = { depth_value, stencil };
+     VkImageSubresourceRange r = { aspect, 0, 1, 0, 1 };
+     vk_barrier_image(o->im.img, s_vk.depth_aspect, VK_IMAGE_LAYOUT_GENERAL);
+     pvkCmdClearDepthStencilImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, &d, 1, &r);
+-    vk_submit_and_wait();
++    if (s_batch.mode == 0) vk_batch_flush();
+ }
+ 
+ /* The named surface becomes the frame: blit it onto the display image, then
+@@ -2763,7 +2807,7 @@ static u32 vk_eng_color_snapshot(void* user, u32 surface)
+     }
+     o->kind = VK_ENG_COLOR; o->snapshot = 1;
+     o->fmt = t->fmt; o->bpp = t->bpp; o->w = t->w; o->h = t->h;
+-    if (vk_begin()) { vk_eng_release(user, hd); return 0; }
++    if (vk_batch_begin_cmds()) { vk_eng_release(user, hd); return 0; }
+     vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                      reused ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED);
+     vk_barrier_image(t->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+@@ -2776,7 +2820,7 @@ static u32 vk_eng_color_snapshot(void* user, u32 surface)
+                     o->im.img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+     /* The copy, made visible to whatever samples it next. */
+     vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+-    if (vk_submit_and_wait()) { vk_eng_release(user, hd); return 0; }
++    if (s_batch.mode == 0) vk_batch_flush();
+     return hd;
+ }
+ 
+@@ -3821,21 +3865,7 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+     }
+     if (!vk_eng_write_descriptors(P, set, vs_off, vs_len, ps_off, ps_len)) return;
+ 
+-    if (!s_batch.open) {
+-        if (vk_begin()) return;
+-        s_batch.open = 1;
+-        if (s_ts.on < 0) {
+-            s_ts.on = getenv("PS3RECOMP_VK_DRAW_TIMES") ? 1 : 0;
+-            if (s_ts.on) {
+-                VkPhysicalDeviceProperties pp; pvkGetPhysicalDeviceProperties(s_vk.phys, &pp);
+-                s_ts.ns_per_tick = pp.limits.timestampPeriod;
+-                VkQueryPoolCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+-                                              .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 2 * VK_BATCH_SETS };
+-                if (pvkCreateQueryPool(s_vk.device, &qci, NULL, &s_ts.pool) != VK_SUCCESS) s_ts.on = 0;
+-            }
+-        }
+-        if (s_ts.on == 1) { pvkCmdResetQueryPool(s_vk.cmd, s_ts.pool, 0, 2 * VK_BATCH_SETS); s_ts.n = 0; }
+-    }
++    if (vk_batch_open()) return;
+     const u32 ts_i = s_ts.n;
+     if (s_ts.on == 1 && ts_i < VK_BATCH_SETS) {
+         s_ts.meta[ts_i].pipe = s_e2.pipeline; s_ts.meta[ts_i].verts = vertex_count;
+-- 
+2.47.3
+

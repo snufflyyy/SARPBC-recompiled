@@ -41,7 +41,7 @@ boot_check is PROGRESSING with 3513 flips; the main menu runs at **29.5 fps** (1
 26.3-32.3), ~130% CPU, 28 threads. Where a menu frame's ~31 ms go, and what to try next:
 subsystems.md "Menu frame rate".
 
-**State of `main`:** 54 patch files (72 commits) on upstream `749182e` (v0.16.0, T043).
+**State of `main`:** 55 patch files (73 commits) on upstream `749182e` (v0.16.0, T043).
 All 88 discovered test scripts return zero (T051, 2026-10-20, `tools/lint.py --tests`), as do
 three explicitly run nested SDL/Vulkan suites; optional-tool skip visibility remains T048.
 The upstream lifter did not
@@ -110,6 +110,9 @@ T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena
   POSIX boot scaffold gets this UE3 title to the menus on Linux.
 
 ## Log
+
+### 2026-10-20: clears and snapshots join the batch (0055, claude)
+- Counting `vk_submit_and_wait` call sites over 100 s of menus: batch flushes 9.9k, depth clears 6.0k, colour snapshots 3.0k, uploads 0.7k. Clears and colour snapshots now record into the open batch (`vk_batch_begin_cmds`). Arena 34 -> ~37 fps, menus 53 -> 54; arena capture correct.
 
 ### 2026-10-20: frame clock drains every 1 ms (claude)
 - `frame_clock`'s outer `Sleep(4)` became `Sleep(1)` (src/main.cpp, `FRAME_CLOCK_SLEEP_MS`). The guest waits on labels the drain writes, so the 4 ms grain was latency: Single Player 36.8 -> 53.1 fps (min 48), arena 31 -> 33-36. The game is not capped at 30 by itself here, it runs as fast as the drain lets it; pacing to a cap is T012.
