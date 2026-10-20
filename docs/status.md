@@ -41,7 +41,7 @@ boot_check is PROGRESSING with 3513 flips; the main menu runs at **29.5 fps** (1
 26.3-32.3), ~130% CPU, 28 threads. Where a menu frame's ~31 ms go, and what to try next:
 subsystems.md "Menu frame rate".
 
-**State of `main`:** 52 patch files (70 commits) on upstream `749182e` (v0.16.0, T043).
+**State of `main`:** 53 patch files (71 commits) on upstream `749182e` (v0.16.0, T043).
 All 88 discovered test scripts return zero (T051, 2026-10-20, `tools/lint.py --tests`), as do
 three explicitly run nested SDL/Vulkan suites; optional-tool skip visibility remains T048.
 The upstream lifter did not
@@ -110,6 +110,9 @@ T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena
   POSIX boot scaffold gets this UE3 title to the menus on Linux.
 
 ## Log
+
+### 2026-10-20: shared render pass, 30 fps in menus and arena (T040, claude)
+- Patch 0053: consecutive draws into one framebuffer share a Vulkan render pass (a pass per draw cost ~33 us, 400 draws a frame). Single Player 19.5 -> ~32 fps, arena ~30; captures render identically. After it the frame-clock thread idles ~30% of samples, so the remaining dips are guest-side or GPU/CPU overlap; vertex decode is the next CPU cost. Details in subsystems.md "Menu frame rate".
 
 ### 2026-10-20: reliable verification (T048, claude)
 - `tools/lint.py --tests` now includes the 3 nested SDL/Vulkan suites, keeps per-script logs in `.cache/lint-tests/`, reports skips/timeouts, no longer uses `git checkout` to undo test side effects (saves/restores the one known fixture's bytes; reports anything else), and `--strict` fails on skips or missing tools. Doc lint works on a clean clone (git-ignored paths accepted). `tools/test_lint.py` proves it. 94 scripts: 90 pass, 4 skip (Metal, MP3 encoder, PPU lift tool) on this host.
