@@ -202,7 +202,7 @@ RSX_ENGINE_PASS_DUMP_DRAWS=1`, 105 s boot with
 - `sink_clear` in `libs/video/rsx_draw_engine.c` mapped `zs == 0` to depth 1.0
   (upstream `4df0909`, still in v0.16.0). With depth 1.0 and GEQUAL nothing
   passes: the depth buffer stayed uniformly 1.0 and the scene black.
-- Patch `T045-zstencil-clear-zero`: a zero clear value clears to 0. The nv40
+- Patch `0046-zstencil-clear-zero`: a zero clear value clears to 0. The nv40
   reset `0xFFFFFF00` that `rsx_dispatch_init` seeds still gives 1.0 to titles
   that never set the register. After it the pre-pass writes depth (0..0.017)
   and the arena draws (stadium, floor, walls). The D3D12 path,

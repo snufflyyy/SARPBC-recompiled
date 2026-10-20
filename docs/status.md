@@ -110,7 +110,7 @@ T007, T036, T037 and T044 were closed on 2026-10-20.
   6025 flips, frames presented to the end, unresolved 0. The arena frame was black.
 - claude: T045: the arena was black because UE3 here uses reversed-Z (clears depth with
   `ZSTENCIL_CLEAR_VALUE=0`, draws GEQUAL) and the draw engine read a zero clear value as 1.0.
-  Patch `T045-zstencil-clear-zero`; the arena now draws (subsystems.md "Arena renders black").
+  Patch `0046-zstencil-clear-zero`; the arena now draws (subsystems.md "Arena renders black").
   Still wrong: noisy textures on some surfaces, HUD garbage, no car in view (T045 HANDOFF).
 
 ### 2026-10-20 (session 9, cont.): project audit (T039)
