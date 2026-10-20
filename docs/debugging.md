@@ -98,6 +98,12 @@ exists (it re-checks only every 256 such methods, so rare methods can be missed)
 grep -v -E '^\s+(r[0-9]|rawstk|ARG)|timer_usleep\(30 us\)|opendir|CLEAR_SURFACE|SetFlipImmediate|SetPrepareFlip|GET_REPORT|label write|usercmd|sys_memory\] allocate|LWM-|DRAW_ARRAYS|port_send' analysis/run.log
 ```
 
+**Crashes name the guest function.** A fatal host signal (SIGSEGV, SIGBUS, SIGFPE, SIGILL,
+SIGABRT) now prints `[crash] ...`, the crashing thread's guest call chain and a host backtrace
+(src/overrides/crash_report.cpp), then dies as before, so the core dump and exit status are
+unchanged. `SARPBC_NO_CRASH_HANDLER=1` turns it off (use it under gdb if you want the raw
+signal). First user: T052, the round-end crash (`lr` pointed at the game's own assert path).
+
 **Count what a log line hides.** Several runtime messages print only their first few
 occurrences: `[edgezlib] #n` shows requests 0–3 only (the total is in the atexit
 `[edgezlib] N requests` line, which a TERM kill skips), and `[null-read]` stops after a
