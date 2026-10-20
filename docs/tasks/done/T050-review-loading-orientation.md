@@ -1,6 +1,6 @@
 # T050: Review Antigravity loading-screen orientation patch
 
-Status: claimed
+Status: done
 Owner: pi
 Priority: 1
 Touches: docs/t038-review.md (new), AGENTS.md (docs index), docs/status.md (review note only)
@@ -19,3 +19,5 @@ Record prioritized correctness findings and verified evidence, identify remainin
 - 2026-10-20 20:07 pi: boot_check 2026-10-20 20:04 v01.09 9c72623 120s: STALLED since 100.4s (frames still presented) | last open PYRAMID_COLLECTBOOST.XXX@56.2s | pkgs 15 (PYRAMID_COLLECTBOOST last) | zlib 3726 | dumps 49 lit 49 distinct 45 | flips 2630 | threads 19/9 alive | unresolved 0
 - 2026-10-20 20:07 pi: Fresh 120s capture 20261020-200217-1296812: first lit frame is upright Loading text; last frame is upright tutorial arena/car/HUD. Final 10s have four distinct dumps, so STALLED is no-new-log-shape heuristic, not a render freeze. No new FPS or other-platform claim.
 - 2026-10-20 20:09 pi: Review written in docs/t038-review.md. F01 (P1) is confirmed via semantic-equivalence counterexample; F02 (P2) corrects unsupported projection-dependent glslang rationale. Follow-up T051 is open at priority 1. Existing renderer suite passes; runtime patch remains unchanged. No additional implementation merge is necessary; merging documentation/board only.
+- 2026-10-20 20:10 pi: HANDOFF: Review merged/pushed in 443bb9f (board integration 4bf16bd). T038 implementation was already merged in ba70ca3 and is unchanged. Fresh 120 s Linux/Vulkan boot + neutral renderer suite verified; semantic counterexample confirms F01 and compiler source confirms F02. T051 contains the remaining corrective scope and test requirements; no pending implementation branch to merge. T048/T049 audit follow-ups remain open.
+- 2026-10-20 20:10 pi: DONE: Review complete: documented confirmed shader-length correctness defect and unsupported compiler rationale; verified upright Loading and arena/HUD in fresh 120 s run and passing neutral renderer suite. Filed T051; retained already-merged patch 0050 unchanged. Review 443bb9f is on main/origin.
