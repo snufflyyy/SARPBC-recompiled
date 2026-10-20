@@ -15,10 +15,10 @@ look for `.XXX`/`Coalesced`/`UObject`/`GNatives` in the repos).
 | Status | Playable start to finish; releases for Windows (D3D12) and macOS (Metal); Vulkan engine exists, Linux not a shipped target |
 | Scale | 30,134 PPU functions (ours should be similar: both EBOOTs ≈ 30 MB), 40 SPU programs + 2 raw SPURS jobs, ~550 MB lifted C++, clean build ~15 min |
 | License | MIT — code can be reused with attribution (keep their copyright notice) |
-| Toolkit | Submodule of its own fork **[soyjxck/ps3recomp](https://github.com/soyjxck/ps3recomp)**, 174 commits ahead / 268 behind upstream `sp00nznet/ps3recomp` as of 2026-10-18 |
+| Toolkit | Submodule of its own fork **[soyjxck/ps3recomp](https://github.com/soyjxck/ps3recomp)**: 208 non-merge commits not in upstream `sp00nznet/ps3recomp` v0.16.0 (`749182e`) as of 2026-10-20 (it was 174 ahead of v0.13.0 on 2026-10-18). The port itself is at `f6c24bf` "0.3.0 alpha". Full commit-by-commit inventory: [dod3-reuse.md](dod3-reuse.md) |
 | Read first | `docs/TECHNICAL.md` (how it works), `docs/DEBUGGING.md`, `CONTRIBUTING.md` (tree layout) |
 
-### What their fork has that upstream (v0.15.0) lacks
+### What their fork has that upstream (v0.16.0) lacks
 
 - **Lifter**: `--nonvolatile-locals` (registers as C locals, written back only where
   needed) and `--hook <addr>` (call a native replacement first). Upstream has `--chunks`,
@@ -30,13 +30,18 @@ look for `.XXX`/`Coalesced`/`UObject`/`GNatives` in the repos).
   targets read while drawn.
 - Runtime: guest memory through a 64 KiB page table (`ppu_vm_fast.h`), user-mode
   `sys_lwmutex`, `sys_lwcond` wakeups, pooled SPU task threads, frozen guest clocks.
+- Frame pacing: `rsx_present_pace` (even presents under a frame cap), a walker kick on
+  every guest `usleep`, vertex fetch by attribute, a vertex cache.
+- Landed upstream since v0.15.0 (so no longer a difference): SSE2/AVX2 SPU float paths,
+  GCM callbacks at `usleep`, the `cellFsOpen` flag values, the spinlock width, vertex-span-once.
+  What is ported to us and what is still open: [dod3-reuse.md](dod3-reuse.md).
 
 ### UE3 lessons that should transfer to SARPBC
 
 | Problem they hit | Their fix | Where |
 |---|---|---|
 | No vblank interrupt; render thread waits on GCM labels | Host "frame clock" thread ticks vblank, drains the GCM FIFO each tick (labels get written by the drain), kicks the walker on guest `usleep`; render thread's fence poll replaced natively | `src/main.cpp`, frame clock |
-| Frame rate locked/smoothed | Replace `UEngine::GetMaxTickRate` to return the cap; run vblank at 8× | `DOD3_FPS` |
+| Frame rate locked/smoothed | Replace `UEngine::GetMaxTickRate` (a `GEngine` virtual, through the function registry) to return the cap, or follow the scene on a ladder of caps (`DOD3_FPS=adaptive`); run vblank at 8×; `rsx_present_pace` spaces presents evenly | `DOD3_FPS`, `rsx_present_pace.h` |
 | Bink movies judder | Render thread ticks Bink at `GRenderingThreadMaxIdleTickFrequency`; raise it to 1000 while a movie plays | `DOD3_RENDER_TICK_HZ` |
 | Slow loading screens | UE3 async loader runs 5 ms/frame; spend the limiter's sleep in the loader while packages are pending | `src/patches/load_idle.cpp` |
 | UE3 garbage collector hitches | Reachability pass translated natively, multithreaded, purge deferred into the limiter sleep | `src/patches/gc*.cpp` |
@@ -73,7 +78,10 @@ and compares — copy that discipline.
   offsets, and which systems run on SPU will differ. Treat their addresses as hints for
   *what* to look for, never as values.
 - Disc title (`/dev_bdvd`, `PS3_GAME`) vs our HDD/PSN title (`/dev_hdd0/game/NPUB30035`).
-- They target Windows/macOS; we target Linux, so their Vulkan engine is the part to lean on.
+- They target Windows/macOS; we target Linux. Their Vulkan *engine* is `_WIN32`-only and a
+  different design from upstream's `rsx_vulkan_backend.c`, which is what we run and patch: lean
+  on their draw-engine and decompiler fixes and their pacing code, not on that engine
+  (details in [dod3-reuse.md](dod3-reuse.md)).
 
 ## Other ps3recomp ports worth knowing
 
