@@ -161,6 +161,7 @@ numbers:
 | `0056-vertex-fetch-all.patch` | T040: `rsx_vertex_fetch_all` fetches a draw attribute by attribute (type switch and plan resolved once per attribute); the draw engine uses it. Checked byte for byte against `rsx_vertex_fetch_one` in test_vertex_fetch_plan | generic, offer upstream |
 | `0057-callback-stack-lock-and-tls.patch` | T034: callback stacks are carved by `ppu_stack_carve()` under the thread-table lock instead of relying on a 16 MB headroom; a callback runs with the calling guest thread's r13 (its TLS block) and the shared block only on host-only threads. Tests: r13 inheritance, carve/allocate race | generic, offer upstream |
 | `0058-unresolved-imports-report.patch` | T020: unresolved imports take `ps3_hle_unresolved()`: one report per NID with the first caller's lr and thread (no 40-NID cap), thread-safe, `PS3_HLE_UNRESOLVED=fail` works (it was dead code). Test: 8 threads x 3 NIDs, both modes | generic, offer upstream |
+| `0059-netctl-offline-dialog-canceled.patch` | T014: offline `cellNetCtlNetStartDialogUnloadAsync` reports DIALOG_CANCELED (result 0 = connected contradicted the failing GetState, so SARPBC's Play Online sat on 'Logging in...' for ~18 s before 'Timed out'; now the online-service error shows within ~8 s). `PS3_NET_ONLINE=1` keeps result 0 | generic, offer upstream |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `tools/export_patch.sh <slug> "<description>" ["<upstream status>"]` (next free number, the README row,

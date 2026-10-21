@@ -39,7 +39,7 @@ boot_check is PROGRESSING with 3513 flips; the main menu runs at **29.5 fps** (1
 26.3-32.3), ~130% CPU, 28 threads. Where a menu frame's ~31 ms go, and what to try next:
 subsystems.md "Menu frame rate".
 
-**State of `main`:** 56 patch files (74 commits) on upstream `749182e` (v0.16.0, T043).
+**State of `main`:** 59 patch files (77 commits) on upstream `749182e` (v0.16.0, T043).
 All 88 discovered test scripts return zero (T051, 2026-10-20, `tools/lint.py --tests`), as do
 three explicitly run nested SDL/Vulkan suites; optional-tool skip visibility remains T048.
 The upstream lifter did not

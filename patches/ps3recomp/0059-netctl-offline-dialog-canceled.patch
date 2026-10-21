@@ -1,0 +1,36 @@
+From c0cc42fdf9e72b109e1fe2ce2665eb41de038ebc Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Wed, 21 Oct 2026 02:13:06 +0000
+Subject: [PATCH] cellNetCtl: offline NetStartDialog reports DIALOG_CANCELED
+
+The dialog stub reported result 0 (connected) while GetState fails offline, so a title
+went on to log in to PSN and waited for its own timeout (about 18 s). Offline it now
+reports DIALOG_CANCELED, as a console does when the player backs out of the failed
+connection; PS3_NET_ONLINE=1 keeps result 0.
+---
+ libs/network/cellNetCtl.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/libs/network/cellNetCtl.c b/libs/network/cellNetCtl.c
+index c7926c0..646fada 100644
+--- a/libs/network/cellNetCtl.c
++++ b/libs/network/cellNetCtl.c
+@@ -363,9 +363,13 @@ s32 cellNetCtlNetStartDialogUnloadAsync(CellNetCtlNetStartDialogResult* result)
+ {
+     if (result) {
+         result = GUEST_PTR(result, CellNetCtlNetStartDialogResult*);
+-        result->result = 0;   /* 0 = connected; endian-safe */
++        /* Offline, a console's dialog reports the failed connection and the player
++         * backs out: the title sees DIALOG_CANCELED and takes its "no connection"
++         * path at once, instead of logging in to PSN until its own timeout. */
++        result->result = netctl_online() ? 0 : (s32)ps3_bswap32((u32)CELL_NET_CTL_ERROR_DIALOG_CANCELED);
+     }
+-    printf("[cellNetCtl] NetStartDialogUnloadAsync() -> result=0 (connected)\n");
++    printf("[cellNetCtl] NetStartDialogUnloadAsync() -> %s\n",
++           netctl_online() ? "result=0 (connected)" : "DIALOG_CANCELED (offline)");
+     netstart_broadcast(CELL_SYSUTIL_NET_CTL_NETSTART_UNLOADED);
+     return CELL_OK;
+ }
+-- 
+2.47.3
+

@@ -1,7 +1,7 @@
 # T014: Robust offline play — online paths fail fast and cleanly
 
-Status: open
-Owner: -
+Status: done
+Owner: claude
 Priority: 25
 Touches: docs/online.md (new), src/overrides/net_*.cpp (new), patches/ps3recomp/T014-*.patch (libs/network/** only, offline behaviour)
 Reads: docs/subsystems.md (network), analysis/imports_named.json (sys_net, sceNp*, cellNetCtl)
@@ -21,3 +21,6 @@ docs/online.md describes the offline behaviour with evidence; online menus fail 
 (measured); split-screen checked; fast-fail overrides implemented where needed.
 
 ## Log
+- 2026-10-21 02:03 claude: claimed
+- 2026-10-21 02:13 claude: Play Online fails cleanly: patch 0059 (offline NetStartDialog = DIALOG_CANCELED) cut the wait from ~18 s 'Timed out' to ~8 s 'error retrieving data from the online service'; dismiss returns to the menu. Split Screen lobby reachable; multi-pad joining NOT verified (boot_check drives port 0 only). Details docs/online.md.
+- 2026-10-21 02:13 claude: DONE: 
