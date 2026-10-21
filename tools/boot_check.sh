@@ -38,7 +38,7 @@
 # the current directory is looked up in the main checkout, where versions/ lives.
 # It starts $BUILD_DIR/sarpbc the way tools/run.sh does, adding
 # PS3RECOMP_VK_WINDOW=0, SDL_AUDIODRIVER=dummy, PS3_FSLOG=1 and a frame dump;
-# anything set in the environment wins. It stops only the game
+# PS3_VERBOSE=0 (PS3_VERBOSE=1 for the full per-job log); anything set in the environment wins. It stops only the game
 # it started itself (by PID, checked against its own timeout process), so it is
 # safe while other agents' games run. Everything goes to
 # analysis/boot_check/<id>/ (log, timeline, gdb) and captures/boot_check/<id>/
@@ -145,6 +145,11 @@ export PS3RECOMP_VK_WINDOW=${PS3RECOMP_VK_WINDOW:-0}
 export PS3RECOMP_VK_GUEST_PROGRAMS=${PS3RECOMP_VK_GUEST_PROGRAMS:-1}   # as tools/run.sh
 export SDL_AUDIODRIVER=${SDL_AUDIODRIVER:-dummy}
 export PS3_FSLOG=${PS3_FSLOG:-1}
+# Quiet logging by default: with stderr in a file the runtime turns verbose on and writes
+# ~270k lines per 10 s (two per SPURS job), which slows the game and buries the log. The
+# report reads the same verdict from a 20x smaller log. PS3_VERBOSE=1 tools/boot_check.sh
+# brings the full log back.
+export PS3_VERBOSE=${PS3_VERBOSE:-0}
 # Without it src/overrides/edgezlib.cpp logs only requests #0-3 and the total only at
 # a clean exit, so a stall with zlib traffic still flowing would look dead.
 export SARPBC_ZLIB_TRACE=${SARPBC_ZLIB_TRACE:-1}

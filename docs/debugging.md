@@ -20,7 +20,7 @@ of runtime env vars is generated upstream in `external/ps3recomp/docs/DIAGNOSTIC
 
 | Var | Use |
 |---|---|
-| `PS3_VERBOSE=0` | Quiet logging. Verbose logging with stderr redirected can slow the game massively |
+| `PS3_VERBOSE=0` | Quiet logging (boot_check sets it by default since 2026-10-21: 1.5M log lines per 80 s became 76k, same verdict; `PS3_VERBOSE=1` restores the full log). Verbose logging with stderr redirected can slow the game massively |
 | `PS3_HLE_TRACE`, `PS3_HLE_ARGS`, `PS3_HLE_UNRESOLVED` | Trace HLE calls / arguments / unresolved NIDs |
 | `PS3_HLE_PTRCHECK=1` | Catch HLE returning host pointers into guest |
 | `PS3_FSLOG=1` (+ `_READS`, `_BT`) | Log every file open/read — first thing to run on this title |

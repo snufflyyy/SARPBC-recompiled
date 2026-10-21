@@ -237,6 +237,23 @@ def load_imports(path):
     return names
 
 
+def guest_fps(lines, window_ms=10000):
+    """Guest frames per second over the last window of SARPBC_FRAME_STATS lines, or None."""
+    pts = []
+    for ln in lines:
+        if ln.startswith("[frame-stats] "):
+            m = re.fullmatch(r"\[frame-stats\] clock_ms=(\d+) guest_frames=(\d+)\s*", ln)
+            if m:
+                pts.append((int(m.group(1)), int(m.group(2))))
+    if len(pts) < 2:
+        return None
+    t1, n1 = pts[-1]
+    t0, n0 = next((p for p in pts if p[0] >= t1 - window_ms), pts[-2])
+    if t1 <= t0 or n1 < n0:
+        return None
+    return (n1 - n0) * 1000.0 / (t1 - t0)
+
+
 def short(path):
     return path.rsplit("/", 1)[-1]
 
@@ -458,6 +475,9 @@ def cmd_report(a):
     if frames or meta:
         parts.append(f"dumps {len(frames)} lit {len(lit_frames)} distinct {distinct}")
     parts.append(f"flips {flips}")
+    fps = guest_fps(raw)
+    if fps is not None:
+        parts.append(f"guest fps {fps:.1f}")
     parts.append(f"threads {len(threads)}/{len(alive_threads)} alive")
     parts.append(f"unresolved {len(unres)}" + (f"+{len(unres_calls)} calls" if unres_calls else ""))
     if alerts:
