@@ -28,7 +28,8 @@ apt-get install gawk libsdl2-dev libvulkan-dev glslang-dev glslang-tools ccache 
 `gawk` because `tools/relift.sh` uses `strtonum` (Debian's default mawk lacks it), and
 `libopengl0` because RPCS3's AppImage (`tools/decrypt.sh`) needs `libOpenGL.so.0`. In that
 container perf is denied even at `perf_event_paranoid=2` (no permission for `task-clock`), so
-`tools/spu_profile.sh` falls back to `/proc` sampling.
+`tools/spu_profile.sh` falls back to per-thread `eu-stack` samples (elfutils, installed there) plus
+`/proc` thread CPU (debugging.md "Profiling").
 
 | Need | Fedora package / note |
 |---|---|
