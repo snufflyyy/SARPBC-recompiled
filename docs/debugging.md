@@ -153,7 +153,7 @@ Two independent shared-bitset boundaries allowed this:
 (159/159), but the guarded game still stops at 163.4 s with the same malformed
 range (`analysis/boot_check/20261021-023658-2887820/`). A deterministic publication
 interleaving test fails for all 128 task bits, both set and clear (256 failures).
-Patch `T052-coherent-taskset-lifecycle.patch` (numbered by the merge helper) locks both boundaries,
+Patch `0067-coherent-taskset-lifecycle.patch` (numbered by the merge helper) locks both boundaries,
 invalidates SPU reservations, preserves BE layout/write-watch/PPU-reservation
 hooks, and dispatches only after releasing the guest lock. No job-order or
 max-contention policy, NULL guard, or audio workaround is added. All 419 synthetic

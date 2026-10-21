@@ -10,7 +10,7 @@ work session. Newest log entry first. Use absolute dates.
 passes 300 s through results and back to the menu; two steady 40 s audio captures
 have no silent blocks, gaps or block-edge clicks. The user confirms the audio
 sounds good. Audio patches remain 0060–0062; the lifecycle repair is provisional
-`T052-coherent-taskset-lifecycle.patch`, numbered by the merge helper.
+`0067-coherent-taskset-lifecycle.patch`, numbered by the merge helper.
 Pi is finishing the remaining queue at the user's request after Claude exhausted
 usage. T052 now also passes 300 s with the latest shadow/profiler/port work
 (`53e852f`): 4810 zlib, 11062 flips, unresolved 0, returned main menu, no
@@ -124,7 +124,7 @@ T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena
 
 ### 2026-10-21: round-end repair integrated with latest main (T052, pi)
 
-Patch `T052-coherent-taskset-lifecycle.patch` makes both SPURS task-exit bitsets and PPU bitset read/modify/write
+Patch `0067-coherent-taskset-lifecycle.patch` makes both SPURS task-exit bitsets and PPU bitset read/modify/write
 coherent. Old shared bits could resurrect completed island tasks, creating extra
 queue completions; the PPU then consumed an older range count while a newer job
 rewrote its table. The malformed negative range caused the later NULL reads and
