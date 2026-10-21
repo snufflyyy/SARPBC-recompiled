@@ -38,7 +38,7 @@ of runtime env vars is generated upstream in `external/ps3recomp/docs/DIAGNOSTIC
 | `PS3_LWCOND_POLL_MS`, `PS3_LWCOND_SLEEP` | lwcond wait tuning (patch 0017; waits now wake on signal) |
 | `PPU_THREAD_SLOTS`, `PPU_THREAD_END_STALL_US` | PPU thread table size / end-of-thread stall (patch 0018) |
 | `PS3_VFS_OVERLAY=<dir>` | Lay patched files over the dump (patch 0019) |
-| `RSX_ENGINE_PASS_DUMP=<dir>` (+ `_AFTER=<s>`, `_MAX`, `_DRAWS=1`, `_TEX=1`) | Per-pass render-target/depth capture, one line per draw (textures with mip count, pitch, filter, control0) and, with `_TEX`, every texture level decoded during the capture (patches 0044, 0045). Recipe below |
+| `RSX_ENGINE_PASS_DUMP=<dir>` (+ `_AFTER=<s>`, `_MAX`, `_DRAWS=1`, `_TEX=1`, `_ALPHA=1`: FP16 target alpha as `.a.pgm` + raw `.a.f32`, depth as raw `.f32`; T054) | Per-pass render-target/depth capture, one line per draw (textures with mip count, pitch, filter, control0) and, with `_TEX`, every texture level decoded during the capture (patches 0044, 0045). Recipe below |
 | `GCM_SUBCH1_2D=1` / `GCM_SUBCH1_3D=1` | Force subchannel 1 to NV0039 or NV4097 (default: NV0039 until a non-NV0039 method shows up there; patch 0046) |
 | `PAD_TRACE=1`, `PAD_TRIGGERS=port,value,start[,len]` | Log the pad buffer the game reads; force trigger values. Timing counts from the first GetData (~4.0 s on 01.09), not launch (patch 0015) |
 
@@ -252,20 +252,42 @@ the command. That is how the flip handler `func_000DC144` was caught releasing t
 
 ## Profiling
 
-`tools/spu_profile.sh <secs> [--warmup N] [--version 0109] [--build-dir DIR] [-- VAR=val ...]` (T029) runs
-one boot_check under the boot lock with `perf record -F 499 --call-graph=fp -p <game pid>`
-(PID taken from boot_check's output, never by name), then writes
-`analysis/spu_profile_<ts>.txt` (raw data in `analysis/spu_profile_<ts>.d/`, delete when done) and
-prints one summary line for task notes. Helper: `tools/spu_profile.py`. No perf or paranoid > 2:
-it prints the `sudo` command to run and falls back to /proc thread CPU only.
-A container can also deny `perf_event_open` when paranoid is 2. The report then
-names the recorder log and uses /proc samples over the requested window.
-The harness waits only the remaining time after a partial recorder failure.
+`tools/spu_profile.sh <secs> [--warmup N] [--version 0109] [--build-dir DIR] [--scenario NAME] [--pad SPEC] [--sampler auto|perf|stacks|none] [--interval S] [-- VAR=val ...]` (T029) runs
+one boot_check under the boot lock, takes the game PID from boot_check's output (never by
+name), samples it, then writes `analysis/spu_profile_<ts>.txt` (raw data in
+`analysis/spu_profile_<ts>.d/`, delete when done) and prints one summary line for task notes.
+Helper: `tools/spu_profile.py`. `--scenario`/`--pad` go to boot_check (its pad route; the boot
+still lasts warmup + secs).
 
-Regression test: `python3 tools/test_spu_profile.py` uses a fake boot and recorder.
-It covers immediate denial and denial after 2 seconds. Before the fix, an 8-second
-run sampled CPU for 0.04 or 2.04 seconds instead of 5 seconds. Both cases now keep
-the 5-second sample window. The test needs no game files or performance counters.
+**Samplers.** `auto` (default) uses `perf record -F 499 --call-graph=fp -p <pid>` when a probe
+(`perf record -- true`, before the game starts) can record, else the **stacks sampler**. This
+container denies `perf_event_open` even at paranoid 2, so here it is always the stacks sampler:
+every `--interval` seconds (default 0.25) it lists the threads `/proc` shows in state R and
+unwinds each one alone with `eu-stack -1 -p <tid> -m -n 12` (elfutils). That stops only that
+thread, for ~25 ms; the rest of the game keeps running. A whole-process `eu-stack -p <pid>`
+(tried first) took ~0.2-0.3 s for 31 threads and stopped the game ~31% of the time with 1 s
+captures, and most of its "running" threads had blocked by the time it reached them. A
+sample whose leaf is a blocking call (`pthread_cond_*wait`, `clock_nanosleep`, `poll`, ...;
+`BLOCKING` in the helper) had gone to sleep between the /proc check and the stop: it is left
+out and counted. `sched_yield` and spin loops stay in (they are on-CPU). Each thread also gets a
+kind from its frames (SPU: lifted SPU code or `spu_drain_*`; PPU: `func_*`; RSX: `frame_clock`,
+`gcm_rsx*`, `rsx_*`), which names the top threads in the summary line (all game threads are
+called `sarpbc`). Stacks give hundreds of samples, not perf's tens of thousands: treat shares
+within about 5 points as noise and use 30 s or more. If perf records but fails partway, `auto`
+switches to stacks for the rest of the window. With neither tool (or `--sampler none`) the
+report has /proc thread CPU only and prints what to install.
+
+Lifted SPU symbols are `spu_<sha256>_spu_func_<ls>` (shown as the first 12 hex digits),
+`spu_prxjob_<id>_spu_func_*` (SPUJOBS) and `spu_ovl_<name>_<ls>_spu_func_*` (overlays, e.g.
+`spu_ovl_msdsp_37000` = MultiStream DSP). The per-image table is inclusive: a helper leaf
+(`mfc_do_transfer`, ...) called from lifted code within 5 frames counts for that image too.
+
+Regression test: `python3 tools/test_spu_profile.py` uses a fake boot, recorder and
+eu-stack. It covers denial at the probe (stacks from the start) and denial 2 seconds into
+the recording (stacks for the rest). Before the 2026-10-19 fix, an 8-second run sampled CPU
+for 0.04 or 2.04 seconds instead of 5 seconds; both cases keep the 5-second window. A
+synthetic capture file checks the parser, the running-only and blocked filters, thread kinds
+and categories. No game files or performance counters needed.
 ```bash
 tools/spu_profile.sh 60 --version 0109 --build-dir build-0109 -- GCM_INTR_THREAD=1 GCM_PARK_GRACE_MS=600000
 ```
@@ -282,9 +304,15 @@ reset counters produce `n/a`, not an inferred rate from image dumps.
 `python3 tools/test_profile_metrics.py` covers counter/window analysis.
 `tools/task.sh lock cpu python3 tools/test_frame_stats.py` checks the real C++ sink.
 
-The report also includes observed mixer PUT windows and the 01.09 mixer flag's
-wait rate. These event-driven diagnostics cover the boot log, not just the CPU
-window. Their last rate is not a whole-run average or proof of current activity.
+**Mixer metric (T025).** The harness sets `SPURS_EF_STATS=1 SPU_DMA_RANGE=58000000-58200000`.
+The game prints `[dma-range] N B/s put` every 5 s of DMA activity into the mixer buffer and
+`[ef-stats] flag=0x01372000 waits=N/s` for the 01.09 mixer event flag. Neither line has a
+time stamp, but stderr is line-ordered, so the lines printed between in-window
+`[frame-stats]` lines are the window's: the summary gives their mean PUT rate as a share of
+8 ch x 48 kHz x float32 (1536 KB/s), e.g. `mixer PUT in window 1620 KB/s (105.5% real
+time, 5 windows)`. Each PUT rate covers the 5 s before it was printed, so the first one can
+reach up to 5 s before the window. The whole-log PUT windows are listed as well. The rates
+print only on activity: none in the window means no mixer DMA, not proof of silence.
 
 **Hardware constraint (user, 2026-10-19):** the RTX 2070 SUPER occupies a bottom
 PCIe slot. Normal full-bandwidth 2070 SUPER comparisons do not apply. Under
@@ -302,10 +330,13 @@ telemetry measured **19.81 FPS over 26.6 seconds**, lowest telemetry window
 Frame dumps were enabled every 60 backend presents; final acceptance also needs
 measurement without dump I/O.
 
-Reading the report: host CPU% (100 = one core) and top threads from /proc; on-CPU sample shares by
-category (lifted SPU, interpreter, SPU runtime helpers, locks/spin, PPU lifted, GCM/Vulkan, other;
-leaf frame, user space only, blocked time is not sampled); lifted SPU per image hash with top
-functions; top symbols per category. `spu_lockline_lock` (reservation line spin) counts as lock.
+Reading the report: host CPU% (100 = one core) and top threads from /proc, each with its kind
+(SPU/PPU/RSX) when samples saw it; on-CPU sample shares by category (lifted SPU, interpreter, SPU
+runtime helpers, locks/spin, PPU lifted, GCM/Vulkan, other; leaf frame, user space only, blocked
+time is not sampled); lifted SPU per image (inclusive) with top functions; top symbols per
+category; samples per host thread with kind, main category and top leaf. Threads that exited
+during the window show as `(gone)` with 0% CPU (their CPU is still in the process total).
+`spu_lockline_lock` (reservation line spin) counts as lock.
 `perf script` needs `--no-inline` (else ~2 min and it was killed); done in the script.
 Historical baseline 01.09, before the 0036 CreateTask race fix (60 s, 2026-10-19): 1331% host CPU,
 167 threads; 375k samples; lifted SPU 0.8% (image 5af85a31 0.6%), PPU 0.2%, GCM/VK 0.2%,

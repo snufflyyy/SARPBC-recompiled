@@ -1,0 +1,106 @@
+From ae2f8b0681f61aedb7c7656bb537c4bf02b6e191 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Wed, 21 Oct 2026 14:03:58 +0000
+Subject: [PATCH] vulkan: anisotropic filtering of guest mipmapped textures
+ (RSX_ANISO, default 16)
+
+Idea from soyjxck/ps3recomp 66fd0a9 (MIT); ours is Vulkan-backend only. Only
+linear, mipmapped guest textures; render targets and snapshots keep the
+title's filter.
+---
+ libs/video/rsx_vulkan_backend.c | 31 ++++++++++++++++++++++++++++---
+ 1 file changed, 28 insertions(+), 3 deletions(-)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 23d8e7d..ba5fb80 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -218,6 +218,7 @@ typedef struct vk_state {
+      * additionally blits the frame into the window's swapchain. */
+     int              eng_active;      /* the register-file engine drives us */
+     int              bc_ok;           /* textureCompressionBC enabled       */
++    float            max_aniso;       /* samplerAnisotropy limit, 1 = off   */
+     int              depth_bounds_ok; /* depthBounds enabled                */
+     u32              max_dim;         /* maxImageDimension2D of the device  */
+     int              windowed;
+@@ -2242,6 +2243,7 @@ typedef struct vk_eng_obj {
+     u32      surface, remap, rsx_fmt;/* VIEW: what it is a view of          */
+     u8       cube;                   /* TEXTURE: six layers, a CUBE view    */
+     u8       snapshot;               /* COLOR: a feedback copy, never a target */
++    u8       mips;                   /* TEXTURE: mip levels                 */
+ } vk_eng_obj;
+ 
+ static vk_eng_obj s_eobj[VK_ENG_MAX_OBJ];
+@@ -2700,6 +2702,7 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+         vk_eng_make_view(o->im.img, vf, mips, vk_remap(remap, rsx_fmt), cube, &o->im.view))
+         goto fail;
+     o->kind = VK_ENG_TEXTURE; o->fmt = vf; o->w = w; o->h = h; o->cube = (u8)cube;
++    o->mips = (u8)(mips > 255 ? 255 : mips);
+     o->bpp = bc ? 0 : bpp; o->block = bc ? bpp : 0;
+     /* UNDEFINED -> GENERAL for every level and face before the uploads arrive. */
+     if (vk_begin()) goto fail;
+@@ -3477,14 +3480,14 @@ static VkImageView vk_eng_scratch_depth(u32 w, u32 h)
+ 
+ /* rsx_be_sampler_desc is the registers decoded the D3D12 way; the wrap codes
+  * stay the guest's 1..8, which vk_gcm_wrap already translates. */
+-static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
++static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d, int aniso)
+ {
+     u32 lo, hi;
+     memcpy(&lo, &d->min_lod, 4); memcpy(&hi, &d->max_lod, 4);
+     const u64 key = (u64)d->min_linear | ((u64)d->mag_linear << 1) | ((u64)d->mip_linear << 2)
+                   | ((u64)d->mip_present << 3) | ((u64)(d->wrap_s & 0xF) << 4)
+                   | ((u64)(d->wrap_t & 0xF) << 8) | ((u64)(d->wrap_r & 0xF) << 12)
+-                  | ((u64)(lo >> 16) << 16) | ((u64)(hi >> 16) << 32);
++                  | ((u64)(lo >> 16) << 16) | ((u64)(hi >> 16) << 32) | ((u64)(aniso != 0) << 48);
+     for (u32 i = 0; i < s_esamp_count; i++) if (s_esamp[i].key == key) return s_esamp[i].s;
+     if (s_esamp_count >= VK_ENG_SAMP_CACHE) return s_vk.sampler;
+     float min_lod = d->min_lod, max_lod = d->mip_present ? d->max_lod : d->min_lod;
+@@ -3498,6 +3501,7 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
+         .addressModeW = vk_gcm_wrap(d->wrap_r),
+         .minLod = min_lod, .maxLod = max_lod,
+         .borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK };
++    if (aniso) { sci.anisotropyEnable = VK_TRUE; sci.maxAnisotropy = s_vk.max_aniso; }
+     VkSampler smp;
+     if (pvkCreateSampler(s_vk.device, &sci, NULL, &smp) != VK_SUCCESS) return s_vk.sampler;
+     s_esamp[s_esamp_count].key = key;
+@@ -3555,7 +3559,16 @@ static VkDescriptorSet vk_eng_write_descriptors(const vk_eng_pipe* P, VkDescript
+         const int cube = (P->cube_mask >> u) & 1u;
+         VkImageView v = ((s_e2.tex_mask >> u) & 1u) ? vk_eng_sample_view(s_e2.tex[u], cube)
+                                                      : VK_NULL_HANDLE;
+-        VkSampler smp = v ? vk_eng_sampler(&s_e2.samp[u]) : s_vk.sampler;
++        /* Anisotropic filtering only for a guest texture with a real mip chain, and
++         * only when the title asks for linear mip filtering: render targets, their
++         * views and snapshots (shadow maps, packed depth, post inputs) keep the
++         * title's filter, 16x over those put speckle on floors (fork 66fd0a9). */
++        const vk_eng_obj* so = (s_e2.tex_mask >> u) & 1u ? &s_eobj[s_e2.tex[u]] : NULL;
++        const int aniso = v && so && so->kind == VK_ENG_TEXTURE && so->mips > 1 && !so->cube &&
++                          s_vk.max_aniso > 1.0f && s_e2.samp[u].min_linear &&
++                          s_e2.samp[u].mag_linear && s_e2.samp[u].mip_linear &&
++                          s_e2.samp[u].mip_present;
++        VkSampler smp = v ? vk_eng_sampler(&s_e2.samp[u], aniso) : s_vk.sampler;
+         ii[u] = (VkDescriptorImageInfo){ VK_NULL_HANDLE,
+                                          v ? v : (cube ? dummy_cube : s_vk.dummy.view),
+                                          VK_IMAGE_LAYOUT_GENERAL };
+@@ -4072,6 +4085,18 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+      * the geometry and its sky to the far plane with it. Optional in
+      * Vulkan; without it the test stays off, as before. */
+     want.depthBounds = have.depthBounds;
++    /* Anisotropic filtering of guest textures (vk_eng_sampler): RSX_ANISO=<n>,
++     * default 16, 1 = off, clamped to the device limit. */
++    want.samplerAnisotropy = have.samplerAnisotropy;
++    s_vk.max_aniso = 1.0f;
++    if (have.samplerAnisotropy) {
++        VkPhysicalDeviceProperties ap;
++        pvkGetPhysicalDeviceProperties(s_vk.phys, &ap);
++        const char* ae = getenv("RSX_ANISO");
++        float want_aniso = ae && *ae ? (float)atof(ae) : 16.0f;
++        if (want_aniso > ap.limits.maxSamplerAnisotropy) want_aniso = ap.limits.maxSamplerAnisotropy;
++        if (want_aniso > 1.0f) s_vk.max_aniso = want_aniso;
++    }
+     s_vk.depth_bounds_ok = have.depthBounds ? 1 : 0;
+     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+                                .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
+-- 
+2.47.3
+

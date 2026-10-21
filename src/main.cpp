@@ -198,6 +198,28 @@ static void present_guest_frame(void)
     g_frames_presented.fetch_add(1, std::memory_order_release);
 }
 
+/* The next time a capped flip may complete: one interval after the last
+ * deadline, or after now when the frame was late by more than an interval. */
+static unsigned long long flip_cap_deadline(unsigned long long prev, unsigned long long interval,
+                                            unsigned long long now)
+{
+    if (!interval) return 0;
+    unsigned long long next = prev + interval;
+    return next + interval < now ? now + interval : next;
+}
+
+/* Hold the thread until `deadline` (monotonic us): sleeps while more than 2 ms
+ * remain, then yields, so the cap lands within ~0.1 ms of the interval. */
+static void flip_cap_wait(unsigned long long deadline)
+{
+    for (;;) {
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+        const unsigned long long now = (unsigned long long)ts.tv_sec * 1000000ull + (unsigned long long)ts.tv_nsec / 1000ull;
+        if (now >= deadline) return;
+        if (deadline - now > 2000) Sleep(1); else Sleep(0);
+    }
+}
+
 static DWORD WINAPI frame_clock(LPVOID)
 {
     const char* title = getenv("PS3_TITLE");
@@ -222,6 +244,25 @@ static DWORD WINAPI frame_clock(LPVOID)
         else fprintf(stderr, "[frame_clock] ignoring FRAME_CLOCK_SLEEP_MS='%s' (want 0-100)\n", e);
     }
     const int stats = getenv("FRAME_CLOCK_STATS") != nullptr;
+    /* SARPBC_FPS_CAP=<n> (default off; 0 or >= 60 = off): an opt-in limiter. The game's own
+     * config asks for UE3 frame smoothing between 22 and 60 fps with vsync (COALESCED.INI,
+     * docs/frame-pacing.md) and no web source gives a hard 30 fps cap, so the faithful
+     * default is no cap (user, 2026-10-21: as close to the original as possible). The guest here is bound by how fast the drain runs, not by
+     * vsync (completing flips on the tick does not slow it), so the cap holds each
+     * guest flip's present back to a deadline that advances by whole intervals. The
+     * drain thread is the one waiting, which is what the RSX does at a flip: the
+     * next frame's commands and the labels the game fences on wait too. A slow frame
+     * is presented at once, never rounded up to a whole number of vblanks. */
+    long cap_fps = 0;
+    if (const char* e = getenv("SARPBC_FPS_CAP")) {
+        char* end = nullptr;
+        const long v = strtol(e, &end, 10);
+        if (end != e && *end == '\0' && v >= 0 && v <= 1000) cap_fps = v;
+        else fprintf(stderr, "[frame_clock] ignoring SARPBC_FPS_CAP='%s' (want 0-1000)\n", e);
+    }
+    const int cap_on = cap_fps > 0 && cap_fps < 60;
+    const unsigned long long cap_interval_us = cap_on ? 1000000ull / (unsigned long long)cap_fps : 0;
+    unsigned long long next_flip_us = 0;
     auto now_us = []() -> unsigned long long {
         struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
         return (unsigned long long)ts.tv_sec * 1000000ull + (unsigned long long)ts.tv_nsec / 1000ull;
@@ -253,8 +294,10 @@ static DWORD WINAPI frame_clock(LPVOID)
              * after the drain races the guest's next-frame writes and shows a
              * mixed one. */
             if (rsx_ok && cellGcm_take_flip_pending()) {
+                if (cap_on) FC_TIMED(st_sleep, flip_cap_wait(next_flip_us));
                 FC_TIMED(st_present, present_guest_frame()); st_presents++;
                 last_flip = cellGcm_flip_request_count();
+                next_flip_us = flip_cap_deadline(next_flip_us, cap_interval_us, now_us());
             }
             /* Drain the FIFO every tick. This is what writes the RSX sync-fence
              * labels the game's per-frame logic blocks on, so it has to keep
@@ -271,8 +314,10 @@ static DWORD WINAPI frame_clock(LPVOID)
          * The real RSX writes them in microseconds. */
         if (rsx_ok) {
             if (cellGcm_take_flip_pending()) {
+                if (cap_on) FC_TIMED(st_sleep, flip_cap_wait(next_flip_us));
                 FC_TIMED(st_present, present_guest_frame()); st_presents++;
                 last_flip = cellGcm_flip_request_count();
+                next_flip_us = flip_cap_deadline(next_flip_us, cap_interval_us, now_us());
             }
             FC_TIMED(st_fifo, cellGcm_rsx_process_fifo());
 
@@ -285,8 +330,10 @@ static DWORD WINAPI frame_clock(LPVOID)
              * present freely, so the window is not blank during boot. */
             unsigned fc = cellGcm_flip_request_count();
             if (fc != last_flip) {
+                if (cap_on) FC_TIMED(st_sleep, flip_cap_wait(next_flip_us));
                 FC_TIMED(st_present, present_guest_frame()); st_presents++;
                 last_flip = fc;
+                next_flip_us = flip_cap_deadline(next_flip_us, cap_interval_us, now_us());
             } else if (fc == 0) {
                 rsx_backend_present();
             }

@@ -31,7 +31,7 @@ intro is Loading, ESRB with the car, Powered by Unreal, the Psyonix logo, the sa
 `boot_check --pad`). New Game now loads MP_SOCCARARENA + PYRAMID_COLLECTBOOST and keeps presenting (T037, T044),
 and **the arena renders and plays** (T045: reversed-Z depth clear, then NV0039 texture copies):
 clean textures, a working HUD, the car drives on throttle, its shadow is right (depth-compare
-direction). T045 is done; the 85% black border is the game's own safe-area setting (menus have it too). Real MP3 audio
+direction, and T054: the shadow map snapshot is cropped to the 512x512 texture, patch 0064). T045 is done; the 85% black border is the game's own safe-area setting (menus have it too). Real MP3 audio
 plays (T007) without crackle (T053, 2026-10-21). `boot_check --pad` scripts the presses (T036). There's no Bink in 01.09.
 
 **Last verified on `main` (fc9cdf4, 2026-10-20, `PS3_VERBOSE=0`, under the boot lock):** a 120 s
@@ -61,8 +61,8 @@ X11 override; `SDL_VIDEODRIVER=wayland ./run.sh` explicitly selects Wayland. A
 45-second window test presented 3,581 guest frames without a headless fallback;
 this is not a main-menu FPS measurement. See build-linux.md "Desktop launch".
 
-**Queue:** the board's `Priority:` lines (`tools/task.sh next`): **T029 (profiler mixer metric), T032/T031 (SPU
-DMA, codegen), T034 (callback stacks), then T020, T017, T021, T012, T009,
+**Queue:** the board's `Priority:` lines (`tools/task.sh next`): **T032/T055 (SPU
+DMA, job hash), T034 (callback stacks), then T020, T017, T021, T012, T009,
 T018, T005, T010, T011, T013, T014. T015 (multiplayer) is **blocked** until the user has permission.
 T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena: a real match
 (phase 8: an exhibition with input over time, audio in the arena, frame rate there).
@@ -111,6 +111,9 @@ T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena
 
 ### 2026-10-21: SPU DMA fast paths (T032, opus-2)
 - In the arena one SPU issues all MFC DMA: the MultiStream mixer, ~168k GETs + ~65k PUTs/s. A PUT cost 853 ns (per-line reserved scans, an always-on POISON-DMA payload scan, a shared repeat-detector line); patch T032-spu-dma-put-fast-paths makes it 517 ns, mixer DMA time 84 -> 62 ms/s, bytes identical (`tools/test_spu_dma_hotpath.py`). Most of what is left is the GCM pushbuffer hook's 512-slot walk: follow-up T056. Numbers: subsystems.md "MFC DMA fast paths".
+
+### 2026-10-21: SPU profiler works without perf (T029, opus-1)
+- `tools/spu_profile.sh` falls back to per-thread `eu-stack` samples when perf cannot record (this container), adds `--scenario/--pad/--sampler/--interval` and a mixer PUT rate restricted to the sample window. No measurable cost (56.25 vs 56.58 fps). Single Player: lifted SPU 30%, SPU runtime 46% (28% is a per-job FNV hash of the whole job image: new T055); arena: lifted SPU 53%, the audio SPU thread (MultiStream DSP overlay + `e33837bb`) at 84% of a core. Numbers: subsystems.md "SPU time by category (T029)".
 
 ### 2026-10-21: audio crackle fixed (T053, claude)
 - The crackle was 66% silent blocks (the game wrote every 2nd-3rd ring slot because its mixer round ran 8-15 ms instead of 5.3 ms). Fixed by a faster audio SPU path (native float, lean LS, x86 `rotqby` family: patch 0060), the update thread's 5 ms nap scaled to 0 (patch 0061 + `src/overrides/audio_pacing.cpp`): 0.0% silent blocks and 0-1 block-edge clicks over 42-65 s menu/arena windows, was 860 clicks. Menu 55 fps, arena 38 fps. Details, numbers and `tools/audio_wav_report.py`: subsystems.md "Audio crackle". Not heard by an agent (no sound device here): the user should confirm by ear.

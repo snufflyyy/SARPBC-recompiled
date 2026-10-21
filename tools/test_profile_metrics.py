@@ -58,5 +58,25 @@ class RuntimeMetrics(unittest.TestCase):
         self.assertEqual(result["mixer_waits"], [90.5])
 
 
+    def test_mixer_window_is_bounded_by_frame_stats_lines(self):
+        text = """[dma-range] 100 B/s put, 0 B/s get
+[frame-stats] clock_ms=1000 guest_frames=10
+[dma-range] 200 B/s put, 0 B/s get
+[frame-stats] clock_ms=9000 guest_frames=20
+[dma-range] 768000 B/s put, 0 B/s get
+[ef-stats] flag=0x01372000 waits=90.5/s mean=6000us max=8000us
+[frame-stats] clock_ms=10000 guest_frames=50
+[dma-range] 1536000 B/s put, 0 B/s get
+[frame-stats] clock_ms=11000 guest_frames=80
+[frame-stats] clock_ms=12000 guest_frames=110
+[dma-range] 300 B/s put, 0 B/s get
+"""
+        result = profile.runtime_metrics(text, 9000, 11000)
+        # printed before the window (100, 200) or after it (300) do not count
+        self.assertEqual(result["mixer_put_window_bps"], [768000, 1536000])
+        self.assertEqual(result["mixer_waits_window"], [90.5])
+        self.assertEqual(len(result["mixer_put_bps"]), 5)
+
+
 if __name__ == "__main__":
     unittest.main()
