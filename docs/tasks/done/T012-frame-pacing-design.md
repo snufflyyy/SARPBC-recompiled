@@ -1,7 +1,7 @@
 # T012: Frame clock and pacing for UE3 — design from Drakengard 3, measured here
 
-Status: open
-Owner: -
+Status: done
+Owner: claude
 Priority: 18
 Touches: docs/frame-pacing.md (new); src/overrides/frame_*.cpp (new) only after T001 is done
 Reads: src/main.cpp (frame_clock), dod3-recomp src/main.cpp + docs/TECHNICAL.md, external/ps3recomp/libs/video/cellGcmSys.c
@@ -22,3 +22,6 @@ docs/frame-pacing.md has measurements and a ranked change list with addresses; f
 implementation tasks are proposed.
 
 ## Log
+- 2026-10-21 02:00 claude: claimed
+- 2026-10-21 02:00 claude: docs/frame-pacing.md written: measurements (arena frame clock 87% busy in FIFO drain), game's INI frame settings, dod3 change table, ranked follow-ups.
+- 2026-10-21 02:00 claude: DONE: 

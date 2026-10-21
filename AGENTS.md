@@ -131,6 +131,7 @@ Details and every flag: [docs/pipeline.md](docs/pipeline.md).
 | [docs/debugging.md](docs/debugging.md) | Something hangs, crashes or draws wrong; `tools/boot_check.sh` (paste the first line of `analysis/boot_report.txt` into task notes), env vars, triage recipes |
 | [docs/project-audit.md](docs/project-audit.md) | Maintainability audit (T046): evidence, safety/tooling gaps, and a minimal cleanup sequence |
 | [docs/t038-review.md](docs/t038-review.md) | Loading-screen review and resolution (T050/T051): PNG row-order root cause, regression tests and verified captures |
+| [docs/frame-pacing.md](docs/frame-pacing.md) | Frame clock, fps limits, what the game's own frame-rate settings are, ranked pacing changes |
 | [docs/workflow.md](docs/workflow.md) | Before any work: task board, claiming, worktrees, locks, merging, **pausing and resuming** |
 | [docs/hle-coverage.md](docs/hle-coverage.md) | Which firmware imports have HLE handlers (stub/impl), named NIDs, ranked gaps (`tools/hle_coverage.py`) |
 
