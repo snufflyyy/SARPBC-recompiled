@@ -1,0 +1,619 @@
+From 0ef9048cb48f238f43cbe87274fafc5cdf423bdd Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Wed, 21 Oct 2026 14:24:32 +0000
+Subject: [PATCH] spu_dma: PUT and list DMA 3-6x cheaper, no shared write per
+ transfer
+
+- PUT asks the reserved-line bitmap about the whole span at once
+  (new spu_coh_span_reserved) instead of two spu_coh_is_reserved calls per
+  128-byte line; the line walk runs only when a line in the span is marked.
+- The POISON-DMA detector (a payload scan of every PUT, print only) is armed by
+  SPU_POISON_DMA=1 instead of always on.
+- The wedged-job repeat detector (SPU_DMA_REPEAT_LIMIT) keeps its state in the
+  context's mfc_engine instead of shared statics: every DMA from every SPU
+  thread wrote that one cache line, and interleaved SPUs reset each other's
+  count.
+
+Results are unchanged: tools/test_spu_dma_hotpath.py runs the real spu_dma.h
+and spu_coherency.c against a byte model (GET/PUT at every size, lists,
+malformed transfers, reservation loss on PUT, span check vs per-line check,
+per-context repeat halt). runtime/spu/tests/bench_spu_dma.c bench mode, same
+host: PUT 1 KiB 167 -> 55 ns, 16 KiB 1961 -> 335 ns, GETL/PUTL 16x1 KiB
+1427 -> 546 ns, GET unchanged; 8 threads x 128 B aggregate 35.6 -> 9.7 ns/cmd.
+In a SARPBC arena the one DMA-issuing SPU (an audio mixer, ~65k PUTs/s) spends
+84 -> 62 ms/s in MFC commands.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ runtime/spu/spu_coherency.c                  |  16 +
+ runtime/spu/spu_coherency.h                  |   7 +
+ runtime/spu/spu_dma.h                        |  52 ++-
+ runtime/spu/tests/bench_spu_dma.c            | 341 +++++++++++++++++++
+ runtime/spu/tests/test_mfc_resume_elements.c |   1 +
+ tools/test_spu_dma_hotpath.py                |  53 +++
+ 6 files changed, 454 insertions(+), 16 deletions(-)
+ create mode 100644 runtime/spu/tests/bench_spu_dma.c
+ create mode 100644 tools/test_spu_dma_hotpath.py
+
+diff --git a/runtime/spu/spu_coherency.c b/runtime/spu/spu_coherency.c
+index 29f8ebc..0121e13 100644
+--- a/runtime/spu/spu_coherency.c
++++ b/runtime/spu/spu_coherency.c
+@@ -232,6 +232,22 @@ int spu_coh_is_reserved(uint32_t addr)
+     return (s_coh_bitmap[line >> 3] >> (line & 7)) & 1u;
+ }
+ 
++int spu_coh_span_reserved(uint32_t ea, uint32_t size)
++{
++    if (!s_coh_armed) return 0;
++    uint32_t l0 = ea >> SPU_COH_LINE_SHIFT;
++    uint32_t l1 = (uint32_t)(((uint64_t)ea + size - 1u) >> SPU_COH_LINE_SHIFT);
++    uint32_t b0 = l0 >> 3, b1 = l1 >> 3;
++    /* Bits l0..l1 inclusive: a partial mask on the first and last byte. */
++    unsigned lo_mask = 0xFFu << (l0 & 7);
++    unsigned hi_mask = 0xFFu >> (7 - (l1 & 7));
++    if (b0 == b1) return (s_coh_bitmap[b0] & lo_mask & hi_mask) != 0;
++    if (s_coh_bitmap[b0] & lo_mask) return 1;
++    for (uint32_t b = b0 + 1; b < b1; b++)
++        if (s_coh_bitmap[b]) return 1;
++    return (s_coh_bitmap[b1] & hi_mask) != 0;
++}
++
+ /* A DMA PUT is issued BY an SPU, and hardware does not take that SPU's own
+  * reservation away for its own MFC write -- the MFC is part of the same SPE.
+  * Our notify had no way to say "everyone but me", so an SPU that reserved a
+diff --git a/runtime/spu/spu_coherency.h b/runtime/spu/spu_coherency.h
+index ca76ccd..d7c3444 100644
+--- a/runtime/spu/spu_coherency.h
++++ b/runtime/spu/spu_coherency.h
+@@ -55,6 +55,13 @@ void spu_coh_reserve(spu_context* ctx, uint32_t ea);
+  * lookup guarded by a global that is zero until the first GETLLAR. */
+ int spu_coh_is_reserved(uint32_t addr);
+ 
++/* Is ANY line overlapping [ea, ea + size) marked? The same answer as calling
++ * spu_coh_is_reserved on each 128-byte line of the span, read a bitmap byte at
++ * a time: a 16 KiB DMA PUT asks about 128 lines, and two calls per line were
++ * most of what a large PUT cost beyond its memcpy. `size` must be non-zero and
++ * the span must not wrap past 4 GiB. */
++int spu_coh_span_reserved(uint32_t ea, uint32_t size);
++
+ /* A store by the PPU landed on `ea`'s line. Raise SPU_EVENT_LR on every SPU
+  * whose live reservation covers it, drop that reservation, and wake the host
+  * thread in case it is parked in `rdch SPU_RdEventStat`.
+diff --git a/runtime/spu/spu_dma.h b/runtime/spu/spu_dma.h
+index 9820cc2..7cec922 100644
+--- a/runtime/spu/spu_dma.h
++++ b/runtime/spu/spu_dma.h
+@@ -115,6 +115,10 @@ typedef struct mfc_engine {
+ 
+     /* Per-tag completion tracking (bitmask: bit N = tag N completed) */
+     uint32_t    tag_completed;
++
++    /* The last transfer's EA/LSA and how many times in a row it repeated:
++     * the wedged-job detector in mfc_submit (SPU_DMA_REPEAT_LIMIT). */
++    uint32_t    repeat_ea, repeat_lsa, repeat_count;
+ } mfc_engine;
+ 
+ /* External: pointer to host mapping of PS3 main memory.
+@@ -662,9 +666,16 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+          * The unreserved path re-checks afterwards because a line can be
+          * reserved between the scan and the end of the copy. That peer's
+          * snapshot may be torn, so it gets its event and loses its reservation
+-         * rather than committing against a line it never saw whole. */
++         * rather than committing against a line it never saw whole.
++         *
++         * Both scans ask the bitmap about the whole span at once
++         * (spu_coh_span_reserved) and walk it line by line only when some
++         * line is marked: per-line calls made a 16 KiB PUT cost ~6x a GET of
++         * the same size. Marks are never cleared, so a span the fast check
++         * calls reserved still is when the walk reads it. */
+         {
+             extern int  spu_coh_is_reserved(uint32_t);
++            extern int  spu_coh_span_reserved(uint32_t, uint32_t);
+             extern void spu_coh_notify_write(uint32_t);
+             extern void spu_coh_notify_write_except(uint32_t, const void*);
+             extern void spu_lockline_lock(void);
+@@ -673,11 +684,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+             spu_lockguard_check(spu, (uint32_t)ea, (const uint8_t*)ls_ptr, size, "PUT");
+             uint32_t a0 = (uint32_t)ea & ~127u;
+             uint32_t a1 = ((uint32_t)ea + size - 1u) & ~127u;
+-            int span_reserved = 0;
+-            for (uint32_t a = a0; ; a += 128u) {
+-                if (spu_coh_is_reserved(a)) { span_reserved = 1; break; }
+-                if (a == a1) break;
+-            }
++            int span_reserved = spu_coh_span_reserved((uint32_t)ea, size);
+             if (span_reserved) {
+                 spu_lockline_lock();
+                 memcpy(ea_ptr, ls_ptr, size);
+@@ -688,6 +695,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+                 spu_lockline_unlock();
+             } else {
+                 memcpy(ea_ptr, ls_ptr, size);
++                if (spu_coh_span_reserved((uint32_t)ea, size))
+                 for (uint32_t a = a0; ; a += 128u) {
+                     if (spu_coh_is_reserved(a)) {
+                         spu_lockline_lock();
+@@ -727,8 +735,14 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+         /* POISON-DMA detector: does an SPU PUT write the singleton object region
+          * (0x40003000-0x40005000) or carry the 0xC708C708 poison? This host-side
+          * memcpy bypasses vm_write32/AWATCH, so it's the prime suspect for the
+-         * garbage fn-ptr fields that cause the 0xC708C708 vcall crash. */
+-        { uint32_t e = (uint32_t)ea;
++         * garbage fn-ptr fields that cause the 0xC708C708 vcall crash.
++         *
++         * SPU_POISON_DMA=1 arms it. It used to run on every PUT, and the
++         * payload scan read every PUT a second time: most of a large PUT's
++         * cost beyond the copy itself. It only ever prints. */
++        { static int s_pd = -1; if (s_pd < 0) s_pd = getenv("SPU_POISON_DMA") ? 1 : 0;
++          if (s_pd) {
++          uint32_t e = (uint32_t)ea;
+           int hitregion = (e < 0x40005000u && e + size > 0x40003000u);
+           int haspoison = 0;
+           for (uint32_t o = 0; o + 4 <= size; o += 4) {
+@@ -740,7 +754,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+               if (_n++ < 12)
+                   fprintf(stderr, "[POISON-DMA] img%u PUT ea=0x%08X size=0x%X lsa=0x%X hitregion=%d haspoison=%d\n",
+                           spu->image_id, e, size, lsa, hitregion, haspoison);
+-          } }
++          } } }
+     }
+ 
+     return 0;
+@@ -1222,14 +1236,20 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+      * count only REJECTED transfers, so once the EA check started committing
+      * pages on demand the counter never advanced and a spinning job simply hung
+      * the chain walker instead. Count repeats whether or not the transfer
+-     * succeeds, and halt at a known pc rather than hanging silently. */
+-    { static uint32_t s_last_ea, s_last_lsa, s_rep;
+-      static uint32_t s_limit = 0;
++     * succeeds, and halt at a known pc rather than hanging silently.
++     *
++     * The run is tracked per context, in its engine. Shared statics made
++     * every SPU thread write the same cache line on every DMA: with 8 threads
++     * issuing 128-byte transfers the aggregate rate was under a third of what it is
++     * without that line, and interleaved SPUs kept resetting each other's
++     * count, so the wedge one SPU is in could go unseen. (Thread-local state
++     * was tried too: it cost ~4 ns per DMA on one thread, the engine does not.) */
++    { static uint32_t s_limit = 0;
+       if (!s_limit) { const char* e = getenv("SPU_DMA_REPEAT_LIMIT");
+                       s_limit = e ? (uint32_t)strtoul(e, 0, 0) : 256u; }
+-      if ((uint32_t)ea == s_last_ea && lsa == s_last_lsa) {
+-          if (++s_rep >= s_limit) {
+-              s_rep = 0;   /* re-arm: the chain may run this job again */
++      if ((uint32_t)ea == mfc->repeat_ea && lsa == mfc->repeat_lsa) {
++          if (++mfc->repeat_count >= s_limit) {
++              mfc->repeat_count = 0;   /* re-arm: the chain may run this job again */
+               extern void spu_halt(spu_context*);
+               fprintf(stderr, "[spu-dma] img=%d pc=0x%05X: %u identical "
+                       "transfers to ea=0x%08X -- halting the SPU\n",
+@@ -1238,7 +1258,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+               fflush(stderr);
+               spu_halt(spu);
+           }
+-      } else { s_last_ea = (uint32_t)ea; s_last_lsa = lsa; s_rep = 0; } }
++      } else { mfc->repeat_ea = (uint32_t)ea; mfc->repeat_lsa = lsa; mfc->repeat_count = 0; } }
+ 
+     /* Mark tag as in-progress */
+     mfc->tag_completed &= ~(1u << tag);
+diff --git a/runtime/spu/tests/bench_spu_dma.c b/runtime/spu/tests/bench_spu_dma.c
+new file mode 100644
+index 0000000..ae45aac
+--- /dev/null
++++ b/runtime/spu/tests/bench_spu_dma.c
+@@ -0,0 +1,341 @@
++/*
++ * MFC DMA hot-path check and microbenchmark (no guest data).
++ *
++ *   bench_spu_dma check   deterministic GET/PUT/list script through the real
++ *                         mfc_channel_write path; verifies every byte against a
++ *                         host-side model, checks that a PUT over a peer's
++ *                         reserved line still raises SPU_EVENT_LR, and prints
++ *                         an FNV-1a digest of guest memory + local store
++ *   bench_spu_dma bench   ns per command for GET/PUT at several sizes and for
++ *                         list DMA, single thread, then aggregate throughput
++ *                         with several threads on private contexts
++ *
++ * Build from the toolkit root (tools/test_spu_dma_hotpath.py does this):
++ *   cc -O2 -std=gnu17 -pthread -Iinclude -Iruntime/spu -Iruntime/platform \
++ *      runtime/spu/tests/bench_spu_dma.c runtime/platform/win32_compat.c -o bench_spu_dma
++ *
++ * Bench numbers carry no pass/fail threshold: compare before/after on one host.
++ * Coherency is the real spu_coherency.c with reservations armed, as in a game
++ * that runs SPURS (every GETLLAR arms it), so the PUT path pays its real scan.
++ */
++#ifndef _WIN32
++#include <pthread.h>
++#include <time.h>
++#endif
++#include <stdio.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++#include "../spu_coherency.c"
++#include "../spu_dma.h"
++
++#define MEM_SIZE (4u << 20)        /* 4 MiB of "guest" memory at EA 0 */
++static uint8_t* memory;
++uint8_t* vm_base;
++uint8_t g_vm_page_bitmap[65536 / 8];
++int g_cri_video_dma;
++uint32_t g_spu_image_src_ea, g_spu_image_ls_start, g_spu_image_span;
++uint32_t g_barrier_sync_watch;
++void (*g_spu_put_hook)(uint32_t, uint32_t);
++void* volatile g_sn_defer_ctx;
++volatile unsigned g_sn_defer;
++unsigned long long ps3_ms_now(void) { return 0; }
++unsigned spu_sn_defer_ticks(void) { return 0; }
++unsigned* spu_ls_watch_list(int* n) { *n = 0; return NULL; }
++void spu_overlay_note_get(spu_context* c, uint32_t ea, const uint8_t* p, uint32_t n)
++{ (void)c; (void)ea; (void)p; (void)n; }
++void spu_lockguard_check(spu_context* c, uint32_t ea, const uint8_t* p, uint32_t n, const char* w)
++{ (void)c; (void)ea; (void)p; (void)n; (void)w; }
++void spu_ch_wake(spu_context* c) { (void)c; }
++static int halts;
++void spu_halt(spu_context* c) { (void)c; halts++; }
++SPU_THREAD_LOCAL volatile unsigned g_wws_batch_gets;
++uint32_t g_ydkj_real_taskset_ea;
++
++static void fail(const char* what) { printf("FAIL: %s\n", what); exit(2); }
++
++/* One MFC command the way lifted code issues it: staging channels, then Cmd. */
++static void issue(mfc_engine* mfc, spu_context* ctx, uint32_t cmd, uint32_t lsa,
++                  uint32_t ea, uint32_t size, uint32_t tag)
++{
++    mfc_channel_write(mfc, ctx, MFC_LSA, lsa);
++    mfc_channel_write(mfc, ctx, MFC_EAH, 0);
++    mfc_channel_write(mfc, ctx, MFC_EAL, ea);
++    mfc_channel_write(mfc, ctx, MFC_Size, size);
++    mfc_channel_write(mfc, ctx, MFC_TagID, tag);
++    mfc_channel_write(mfc, ctx, MFC_Cmd, cmd);
++}
++
++static void wait_tag(mfc_engine* mfc, spu_context* ctx, uint32_t tag)
++{
++    mfc_channel_write(mfc, ctx, MFC_WrTagMask, 1u << tag);
++    mfc_channel_write(mfc, ctx, MFC_WrTagUpdate, MFC_TAG_UPDATE_ALL);
++    if (mfc_channel_read(mfc, ctx, MFC_RdTagStat) != (1u << tag)) fail("tag completes");
++}
++
++static uint64_t fnv(uint64_t h, const uint8_t* p, size_t n)
++{
++    for (size_t i = 0; i < n; i++) { h ^= p[i]; h *= 0x100000001B3ull; }
++    return h;
++}
++
++static uint32_t rng = 0x12345678u;
++static uint32_t next_rand(void) { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5; return rng; }
++
++static spu_context* new_ctx(unsigned id)
++{
++    spu_context* c = (spu_context*)calloc(1, sizeof(*c));
++    if (!c) fail("allocate context");
++    spu_context_init(c, id);
++    return c;
++}
++
++static void setup_memory(void)
++{
++    memory = (uint8_t*)aligned_alloc(4096, MEM_SIZE);
++    if (!memory) fail("allocate memory");
++    vm_base = memory;
++    for (uint32_t pg = 0; pg < (MEM_SIZE >> 16); pg++)
++        g_vm_page_bitmap[pg >> 3] |= (uint8_t)(1u << (pg & 7));
++}
++
++/* A peer SPU holding a reservation, as the SPURS kernel always does in a game.
++ * Arms the coherency bitmap, so every PUT pays the real reserved-line scan. */
++static spu_context* reserve_peer(uint32_t ea)
++{
++    spu_context* peer = new_ctx(7);
++    spu_lockline_lock();
++    spu_coh_reserve(peer, ea);
++    spu_lockline_unlock();
++    peer->resv_ea = ea; peer->resv_valid = 1;
++    return peer;
++}
++
++static int run_check(void)
++{
++    setup_memory();
++    for (uint32_t i = 0; i < MEM_SIZE; i++) memory[i] = (uint8_t)(i * 7u + (i >> 11));
++    spu_context* ctx = new_ctx(1);
++    for (uint32_t i = 0; i < SPU_LS_SIZE; i++) ctx->ls[i] = (uint8_t)(i * 13u + 5u);
++    mfc_engine mfc; mfc_engine_init(&mfc);
++    uint8_t* model_mem = (uint8_t*)malloc(MEM_SIZE);
++    uint8_t* model_ls = (uint8_t*)malloc(SPU_LS_SIZE);
++    if (!model_mem || !model_ls) fail("allocate model");
++    memcpy(model_mem, memory, MEM_SIZE); memcpy(model_ls, ctx->ls, SPU_LS_SIZE);
++
++    /* 1. A peer's reservation inside a PUT span is lost (LR event), one
++     *    outside it is kept, and the issuer's own reservation is untouched. */
++    spu_context* inside = reserve_peer(0x200100u);
++    spu_context* outside = reserve_peer(0x210000u);
++    issue(&mfc, ctx, MFC_PUT_CMD, 0x1000, 0x200000u, 0x400, 3);
++    memcpy(model_mem + 0x200000u, model_ls + 0x1000, 0x400);
++    wait_tag(&mfc, ctx, 3);
++    if (inside->resv_valid || !(inside->event_status & SPU_EVENT_LR)) fail("PUT over reserved line raises LR");
++    if (!outside->resv_valid || (outside->event_status & SPU_EVENT_LR)) fail("PUT elsewhere keeps reservation");
++    /* ...also when the reserved line is the LAST line of the span. */
++    spu_context* last = reserve_peer(0x200780u);
++    issue(&mfc, ctx, MFC_PUT_CMD, 0x2000, 0x200400u, 0x400, 4);
++    memcpy(model_mem + 0x200400u, model_ls + 0x2000, 0x400);
++    if (last->resv_valid) fail("PUT over last reserved line raises LR");
++
++    /* 2. A random script of single GET/PUT at every legal size class. */
++    static const uint32_t small[] = {1, 2, 4, 8};
++    for (int n = 0; n < 20000; n++) {
++        uint32_t r = next_rand();
++        uint32_t size;
++        if ((r & 7) == 0) size = small[(r >> 3) & 3];
++        else size = 16u * (1u + ((r >> 3) % 1024u));          /* 16 .. 16 KiB */
++        uint32_t ea = (next_rand() % (MEM_SIZE - 0x10000u - size)) + 0x10000u;
++        uint32_t lsa = next_rand() % (SPU_LS_SIZE - size);
++        if (size >= 16) { ea &= ~15u; lsa &= ~15u; }
++        else { ea &= ~(size - 1); lsa = (lsa & ~15u) | (ea & 15u); }
++        uint32_t tag = r >> 28;
++        if (r & 0x100) {
++            issue(&mfc, ctx, MFC_GET_CMD, lsa, ea, size, tag);
++            memcpy(model_ls + lsa, model_mem + ea, size);
++        } else {
++            issue(&mfc, ctx, MFC_PUT_CMD, lsa, ea, size, tag);
++            memcpy(model_mem + ea, model_ls + lsa, size);
++        }
++        wait_tag(&mfc, ctx, tag);
++    }
++
++    /* 3. List DMA: 8 elements with mixed sizes, GETL then PUTL. */
++    for (int dir = 0; dir < 2; dir++) {
++        uint32_t list = 0x30000u, dest = 0x20000u, eal = 0x300000u;
++        uint32_t cursor = dest;
++        for (int i = 0; i < 8; i++) {
++            uint32_t sz = (i == 3) ? 8u : 128u * (uint32_t)(i + 1);
++            uint32_t ea_i = eal + (uint32_t)i * 0x1000u + (sz < 16 ? 8u : 0u);
++            spu_ls_write32(ctx, list + (uint32_t)i * 8, sz);
++            spu_ls_write32(ctx, list + (uint32_t)i * 8 + 4, ea_i);
++            uint32_t l = (cursor & ~15u) | (ea_i & 15u);
++            if (dir == 0) memcpy(model_ls + l, model_mem + ea_i, sz);
++            else          memcpy(model_mem + ea_i, model_ls + l, sz);
++            cursor = (cursor & ~15u) + ((sz + 15u) & ~15u);
++        }
++        memcpy(model_ls + list, ctx->ls + list, 64);
++        issue(&mfc, ctx, dir == 0 ? MFC_GETL_CMD : MFC_PUTL_CMD, dest, list, 64, 9);
++        wait_tag(&mfc, ctx, 9);
++    }
++
++    /* 4. Malformed transfers are still rejected without touching memory. */
++    issue(&mfc, ctx, MFC_PUT_CMD, 0x1004, 0x200000u, 0x40, 1);   /* LSA/EA misaligned */
++    issue(&mfc, ctx, MFC_PUT_CMD, 0x1000, 0x200000u, 0x41, 1);   /* size not x16 */
++    issue(&mfc, ctx, MFC_PUT_CMD, 0x1000, 0x8000u, 0x40, 1);     /* null page */
++
++    /* 5. spu_coh_span_reserved agrees with the per-line answer for random
++     *    spans around the lines reserved above, including byte-boundary and
++     *    single-line cases. */
++    for (int n = 0; n < 200000; n++) {
++        uint32_t sz = 1u + next_rand() % 0x4000u;
++        uint32_t ea = 0x1FC000u + next_rand() % 0x18000u;
++        int want = 0;
++        for (uint32_t a = ea & ~127u; ; a += 128u) {
++            if (spu_coh_is_reserved(a)) { want = 1; break; }
++            if (a == ((ea + sz - 1u) & ~127u)) break;
++        }
++        if (spu_coh_span_reserved(ea, sz) != want) fail("span check matches per-line check");
++    }
++
++    /* 6. The wedged-job detector counts per context: a transfer repeated
++     *    256 times after its first issue halts its SPU even while another
++     *    context's transfers interleave, and 255 repeats do not. */
++    {
++        spu_context* other = new_ctx(4);
++        mfc_engine mfc2; mfc_engine_init(&mfc2);
++        halts = 0;
++        issue(&mfc, ctx, MFC_GET_CMD, 0x3F000u, 0x200000u, 16, 2);   /* start a fresh run */
++        memcpy(model_ls + 0x3F000u, model_mem + 0x200000u, 16);
++        for (int i = 0; i < 255; i++) {
++            issue(&mfc, ctx, MFC_GET_CMD, 0x3F000u, 0x200000u, 16, 2);
++            issue(&mfc2, other, MFC_GET_CMD, 0x100u + 16u * (uint32_t)(i & 7), 0x210000u, 16, 2);
++        }
++        if (halts) fail("255 repeats do not halt");
++        issue(&mfc, ctx, MFC_GET_CMD, 0x3F000u, 0x200000u, 16, 2);
++        if (halts != 1) fail("the 256th repeat halts its context");
++        free(other);
++    }
++
++    if (memcmp(memory, model_mem, MEM_SIZE) != 0) fail("guest memory matches model");
++    if (memcmp(ctx->ls, model_ls, SPU_LS_SIZE) != 0) fail("local store matches model");
++    uint64_t h = fnv(0xCBF29CE484222325ull, memory, MEM_SIZE);
++    h = fnv(h, ctx->ls, SPU_LS_SIZE);
++    printf("OK: dma hot path matches model, digest=%016llx\n", (unsigned long long)h);
++    free(model_mem); free(model_ls);
++    return 0;
++}
++
++static double now_ns(void)
++{
++    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
++    return ts.tv_sec * 1e9 + ts.tv_nsec;
++}
++
++typedef struct bench_job {
++    unsigned id, iters, size;
++    double ns;
++#ifndef _WIN32
++    pthread_t th;
++#endif
++} bench_job;
++
++/* Alternating GET and PUT of `size` bytes on a private context and region,
++ * the shape of a SPURS job streaming its working set. */
++static void* bench_thread(void* arg)
++{
++    bench_job* j = (bench_job*)arg;
++    spu_context* ctx = new_ctx(j->id);
++    mfc_engine mfc; mfc_engine_init(&mfc);
++    uint32_t base = 0x100000u + j->id * 0x40000u;
++    double t0 = now_ns();
++    for (unsigned i = 0; i < j->iters; i++) {
++        uint32_t off = (i * j->size) & 0x1FFFFu & ~15u;
++        issue(&mfc, ctx, (i & 1) ? MFC_PUT_CMD : MFC_GET_CMD, 0x4000u + (off & 0xFFFFu),
++              base + off, j->size, i & 15u);
++        wait_tag(&mfc, ctx, i & 15u);
++    }
++    j->ns = now_ns() - t0;
++    free(ctx);
++    return NULL;
++}
++
++static double best_single(uint32_t cmd, uint32_t size, unsigned iters)
++{
++    spu_context* ctx = new_ctx(2);
++    mfc_engine mfc; mfc_engine_init(&mfc);
++    double best = 1e30;
++    for (int rep = 0; rep < 7; rep++) {
++        double t0 = now_ns();
++        for (unsigned i = 0; i < iters; i++) {
++            uint32_t off = (i * size) & 0x3FFFFu & ~15u;
++            issue(&mfc, ctx, cmd, 0x8000u + (off & 0x1FFFFu), 0x100000u + off, size, i & 15u);
++            wait_tag(&mfc, ctx, i & 15u);
++        }
++        double ns = (now_ns() - t0) / iters;
++        if (ns < best) best = ns;
++    }
++    free(ctx);
++    return best;
++}
++
++static int run_bench(void)
++{
++    setup_memory();
++    memset(memory, 0x5A, MEM_SIZE);
++    reserve_peer(0x3F0000u);   /* arm coherency, far from the bench regions */
++    static const uint32_t sizes[] = {16, 128, 1024, 4096, 16384};
++    for (unsigned s = 0; s < sizeof(sizes) / sizeof(sizes[0]); s++) {
++        unsigned iters = sizes[s] >= 4096 ? 20000 : 200000;
++        printf("single GET size=%-5u ns/cmd=%8.1f\n", sizes[s], best_single(MFC_GET_CMD, sizes[s], iters));
++        printf("single PUT size=%-5u ns/cmd=%8.1f\n", sizes[s], best_single(MFC_PUT_CMD, sizes[s], iters));
++    }
++    {   /* GETL of 16 x 1 KiB elements */
++        spu_context* ctx = new_ctx(3);
++        mfc_engine mfc; mfc_engine_init(&mfc);
++        for (int i = 0; i < 16; i++) {
++            spu_ls_write32(ctx, 0x30000u + (uint32_t)i * 8, 1024);
++            spu_ls_write32(ctx, 0x30000u + (uint32_t)i * 8 + 4, 0x200000u + (uint32_t)i * 0x800u);
++        }
++        double best = 1e30;
++        for (int rep = 0; rep < 7; rep++) {
++            double t0 = now_ns();
++            for (unsigned i = 0; i < 20000; i++) {
++                issue(&mfc, ctx, (i & 1) ? MFC_PUTL_CMD : MFC_GETL_CMD, 0x10000u, 0x30000u, 128, 5);
++                wait_tag(&mfc, ctx, 5);
++            }
++            double ns = (now_ns() - t0) / 20000;
++            if (ns < best) best = ns;
++        }
++        printf("list 16x1KiB GETL/PUTL ns/cmd=%8.1f\n", best);
++        free(ctx);
++    }
++#ifndef _WIN32
++    static const unsigned threads[] = {1, 4, 8};
++    static const uint32_t tsizes[] = {128, 1024};
++    for (unsigned z = 0; z < 2; z++)
++        for (unsigned t = 0; t < 3; t++) {
++            bench_job jobs[8];
++            unsigned n = threads[t];
++            double best = 1e30;
++            for (int rep = 0; rep < 5; rep++) {
++                double t0 = now_ns();
++                for (unsigned i = 0; i < n; i++) {
++                    jobs[i].id = i; jobs[i].iters = 200000; jobs[i].size = tsizes[z];
++                    pthread_create(&jobs[i].th, NULL, bench_thread, &jobs[i]);
++                }
++                for (unsigned i = 0; i < n; i++) pthread_join(jobs[i].th, NULL);
++                double ns = (now_ns() - t0) / (200000.0 * n);   /* wall ns per cmd, aggregate */
++                if (ns < best) best = ns;
++            }
++            printf("threads=%u size=%-4u wall ns/cmd (aggregate)=%7.1f\n", n, tsizes[z], best);
++        }
++#endif
++    return 0;
++}
++
++int main(int argc, char** argv)
++{
++    if (argc > 1 && strcmp(argv[1], "bench") == 0) return run_bench();
++    return run_check();
++}
+diff --git a/runtime/spu/tests/test_mfc_resume_elements.c b/runtime/spu/tests/test_mfc_resume_elements.c
+index 2a930b5..6438362 100644
+--- a/runtime/spu/tests/test_mfc_resume_elements.c
++++ b/runtime/spu/tests/test_mfc_resume_elements.c
+@@ -25,6 +25,7 @@ unsigned* spu_ls_watch_list(int* n) { *n=0;return NULL; }
+ void spu_overlay_note_get(spu_context* c,uint32_t ea,const uint8_t* p,uint32_t n)
+ { (void)c;(void)ea;(void)p;(void)n; }
+ int spu_coh_is_reserved(uint32_t ea) { (void)ea;return 0; }
++int spu_coh_span_reserved(uint32_t ea,uint32_t n) { (void)ea;(void)n;return 0; }
+ void spu_coh_notify_write(uint32_t ea) { (void)ea; }
+ void spu_coh_notify_write_except(uint32_t ea,const void* c) { (void)ea;(void)c; }
+ void spu_lockline_lock(void) {}
+diff --git a/tools/test_spu_dma_hotpath.py b/tools/test_spu_dma_hotpath.py
+new file mode 100644
+index 0000000..914e770
+--- /dev/null
++++ b/tools/test_spu_dma_hotpath.py
+@@ -0,0 +1,53 @@
++#!/usr/bin/env python3
++"""MFC DMA hot path: the real spu_dma.h + spu_coherency.c against a byte model.
++
++Builds runtime/spu/tests/bench_spu_dma.c and runs its `check` mode: a seeded
++script of GET/PUT at every size class, GETL/PUTL lists, malformed transfers,
++reservation loss on PUT (first, last and outside lines of the span) and the
++per-context wedged-job detector. The digest pins the exact bytes, so a fast
++path that changes any result fails here. `bench` mode (not run here) prints
++ns per command for before/after comparisons.
++"""
++import os
++from pathlib import Path
++import shutil
++import subprocess
++import tempfile
++import unittest
++
++ROOT = Path(__file__).resolve().parents[1]
++DIGEST = "a1c01d73f9a48d1e"
++
++
++class SpuDmaHotPathTests(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        cc = shutil.which(os.environ.get("CC", "clang")) or shutil.which("cc")
++        if not cc:
++            raise unittest.SkipTest("C compiler required")
++        if os.name == "nt":
++            raise unittest.SkipTest("POSIX threads and clock_gettime required")
++        cls.tmp = tempfile.TemporaryDirectory()
++        cls.addClassCleanup(cls.tmp.cleanup)
++        cls.exe = Path(cls.tmp.name) / "bench-spu-dma"
++        cmd = [cc, "-pthread", "-std=gnu17", "-O2",
++               "-I", str(ROOT / "include"), "-I", str(ROOT / "runtime/spu"),
++               "-I", str(ROOT / "runtime/platform"),
++               str(ROOT / "runtime/spu/tests/bench_spu_dma.c"),
++               str(ROOT / "runtime/platform/win32_compat.c"), "-o", str(cls.exe)]
++        subprocess.run(cmd, check=True, capture_output=True, text=True)
++
++    def test_matches_model_and_digest(self):
++        env = {k: v for k, v in os.environ.items()
++               if not k.startswith(("SPU_", "YDKJ_", "LBP_"))}
++        p = subprocess.run([str(self.exe), "check"], capture_output=True,
++                           text=True, env=env, timeout=60)
++        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
++        self.assertIn("OK: dma hot path matches model, digest=" + DIGEST, p.stdout)
++        # Exactly one halt from the detector, after 256 repeats on one context.
++        self.assertEqual(p.stderr.count("identical transfers"), 1, p.stderr)
++        self.assertEqual(p.stderr.count("[mfc] REJECTED malformed transfer"), 3, p.stderr)
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.47.3
+

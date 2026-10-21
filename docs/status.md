@@ -15,7 +15,7 @@ Pi is finishing the remaining queue at the user's request after Claude exhausted
 usage. T052 now also passes 300 s with the latest shadow/profiler/port work
 (`53e852f`): 4810 zlib, 11062 flips, unresolved 0, returned main menu, no
 null-read/null-write/SIGSEGV. T056's GCM hook cache passes oracle/sanitizer tests and actual-game timing
-(~257 to ~21.6 ns); integrate it with opus-2's verified T032 DMA work next.
+(~257 to ~21.6 ns); combined with opus-2's verified T032 DMA work. Final release validation is next.
 T058, T009, T005 and interrupted T059 remain. Other agents' files stay untouched.
 
 **User priorities (2026-10-20):** performance and stability, in that order of work: done so
@@ -52,9 +52,9 @@ boot_check is PROGRESSING with 3513 flips; the main menu runs at **29.5 fps** (1
 26.3-32.3), ~130% CPU, 28 threads. Where a menu frame's ~31 ms go, and what to try next:
 subsystems.md "Menu frame rate".
 
-**Integrated patch stack:** 68 patch files (86 commits) on upstream `749182e`
+**Integrated patch stack:** 69 patch files (87 commits) on upstream `749182e`
 (v0.16.0, T043), including T052 and Claude's later audio/shadow/port work.
-Current full gate: 99 scripts, 95 passed / 4 explicit skips / 0 failures/timeouts;
+Current full gate: 100 scripts, 96 passed / 4 explicit skips / 0 failures/timeouts;
 the nested SDL/Vulkan suites are included (T048).
 The upstream lifter did not
 change, so the lifts were kept. The big fixes of the last two days: the SPURS CreateTask race that started tasks twice
@@ -151,6 +151,9 @@ merged latest main `37f8f00` (shadow crop, aniso, decompiler, profiling and opt-
 frame cap preserved) and verified another ordinary 300 s round-end/menu run:
 `analysis/boot_check/20261021-154006-1336355/`, 4810 zlib, 11062 flips, unresolved 0,
 no null-access alerts or SIGSEGV. The merge helper numbers the lifecycle patch.
+
+### 2026-10-21: SPU DMA fast paths (T032, opus-2)
+- In the arena one SPU issues all MFC DMA: the MultiStream mixer, ~168k GETs + ~65k PUTs/s. A PUT cost 853 ns (per-line reserved scans, an always-on POISON-DMA payload scan, a shared repeat-detector line); patch T032-spu-dma-put-fast-paths makes it 517 ns, mixer DMA time 84 -> 62 ms/s, bytes identical (`tools/test_spu_dma_hotpath.py`). Most of what is left is the GCM pushbuffer hook's 512-slot walk: follow-up T056. Numbers: subsystems.md "MFC DMA fast paths".
 
 ### 2026-10-21: SPU profiler works without perf (T029, opus-1)
 - `tools/spu_profile.sh` falls back to per-thread `eu-stack` samples when perf cannot record (this container), adds `--scenario/--pad/--sampler/--interval` and a mixer PUT rate restricted to the sample window. No measurable cost (56.25 vs 56.58 fps). Single Player: lifted SPU 30%, SPU runtime 46% (28% is a per-job FNV hash of the whole job image: new T055); arena: lifted SPU 53%, the audio SPU thread (MultiStream DSP overlay + `e33837bb`) at 84% of a core. Numbers: subsystems.md "SPU time by category (T029)".

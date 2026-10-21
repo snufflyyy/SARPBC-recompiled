@@ -972,6 +972,66 @@ range cleanup, reverse-order removal, and reuse of the same addresses.
   to libs/spurs/cellSpursQueue.c, and the test does not compile that file. All 9 ctest tests
   (`-DPS3RECOMP_BUILD_TESTS=ON`) and `tools/test_spu_context_registries.py` pass.
 
+### MFC DMA fast paths (T032, 2026-10-21)
+
+- **Who does DMA now.** In the arena (01.09, `boot_check --scenario arena`, window 105-125 s)
+  exactly one host thread issues MFC commands: the SPU running the MultiStream mixer (lifted
+  functions `spu_ovl_msdsp_37000_*` on top of image `e33837bb...`, found with `eu-stack -p
+  <pid>`). It is also the busiest thread of the process (~85% of a core; the RSX/frame-clock
+  thread is next at ~57%). Per second it issues ~168k GETs (287 MB/s, ~1.75 KB each), ~65k
+  PUTs (164 MB/s, ~2.6 KB) and ~600 atomics (GETLLAR/PUTLLC). No lists. Measured with a
+  throwaway rdtsc wrapper around `spu_wrch(MFC_Cmd)` (not committed); the byte rates agree with
+  `SPU_DMA_RANGE=00010000-FFFFFFFF`'s `[dma-range] ... B/s` lines.
+- **What a PUT cost** beyond its copy: two `spu_coh_is_reserved` calls per 128-byte line (the
+  reserved-line scan before and after the copy), a POISON-DMA payload scan that read every PUT
+  a second time (a print-only detector for another title: here it only ever reported 12
+  ordinary PUTs into 0x40003000-0x40005000), and the GCM pushbuffer hook (below).
+  Every DMA also wrote the repeat detector's shared statics (`SPU_DMA_REPEAT_LIMIT`), one cache
+  line all SPU threads wrote.
+- **Change** (patch `T032-spu-dma-put-fast-paths`): `spu_coh_span_reserved(ea, size)` answers the
+  scan from the bitmap a byte at a time, and the line walk runs only if a line in the span is
+  marked. POISON-DMA needs `SPU_POISON_DMA=1`. The repeat detector keeps its state per context in
+  `mfc_engine` (a thread-local version cost ~4 ns per DMA on one thread; this costs nothing). The
+  bytes moved are identical: `tools/test_spu_dma_hotpath.py` runs the real `spu_dma.h` and
+  `spu_coherency.c` against a byte model and pins a digest (`86102f76477d0bbe` for the
+  pre-existing script, the same before and after the change).
+- **Bench** (`runtime/spu/tests/bench_spu_dma.c bench`, same host, ns per command through
+  `mfc_channel_write`, coherency armed):
+
+  | | GET 128 B | PUT 128 B | PUT 1 KiB | PUT 4 KiB | PUT 16 KiB | GET 16 KiB | GETL/PUTL 16x1 KiB | 8 threads x 128 B (aggregate) |
+  |---|---|---|---|---|---|---|---|---|
+  | before | 48 | 60 | 167 | 518 | 1961 | 316 | 1427 | 35.6 |
+  | after | 47 | 50 | 55 | 116 | 335 | 320 | 546 | 9.7 |
+
+- **In the game** (mixer thread, ms per second of wall time spent in MFC commands, 14 windows
+  of 5 s each, rdtsc build):
+
+  | | GET | PUT (ns each) | atomics | all DMA | mixer thread CPU |
+  |---|---|---|---|---|---|
+  | before | 27.1 | 55.8 (853) | 0.7 | 83.7 | 85.6%, 86.9% |
+  | after | 27.5 | 33.7 (517) | 0.8 | 61.9 | 82.3%, 83.7% |
+  | after, GCM hook skipped (experiment only) | 27.6 | 14.2 (218) | 0.7 | 42.5 | 83.6% |
+
+  So about 2% of a core is saved, on the busiest thread. Arena fps (~37 in this window) and
+  whole-process CPU (~211%) do not move, because the mixer paces itself to real time. No
+  `identical transfers -- halting` line in any run before or after.
+- **Not done, and why:**
+  - **The GCM pushbuffer hook** (`gcm_note_spu_put`, libs/video/cellGcmSys.c) is now most of
+    a PUT: `gcm_ea2io_range` walks the 512 `s_io_mappings` slots on every SPU PUT until a hit,
+    ~300 ns per PUT, 19 ms/s on the mixer (guess: every mixer PUT misses, a full walk). It is
+    outside this task's files. Follow-up task T056.
+  - **Lock granularity.** `mfc_for` already skips the registry lock on its hot path (a per-context
+    cached slot checked against a generation), so T027's rwlock is off the DMA path. The
+    lock-line spinlock is taken only by atomics, ~600/s at ~1.2 us each: there is no contention
+    to split per line.
+  - **Diagnostics on the hot path.** Each DMA still tests ~25 cached `getenv` flags. A
+    no-diagnostics build would save at most ~30 ns per small DMA (~0.5% of the mixer). Not worth
+    restructuring every probe.
+  - The legacy `runtime/spu/tests/run_tests.sh` suite does not build on Linux at the pin: compile
+    errors in `runtime/platform/win32_compat.h` (no `clock_gettime`/`pthread_rwlockattr_t` without
+    POSIX feature macros), and it rewrites its tracked `out_*` files. Restore them with
+    `git checkout runtime/spu/tests/out_*` after a run.
+
 ### SPU codegen wins: not needed (T031, 2026-10-21)
 
 Measured in the arena (`boot_check --scenario arena`, 20 s of `/proc/<pid>/task/*/stat`
