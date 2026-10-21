@@ -56,7 +56,9 @@ static int rsx_backend_pump() { return 0; }
 static void rsx_backend_present() { presented.push_back(current_frame); }
 static void flip() { current_frame = ++requests; pending = true; }
 static void cellGcmTickVBlank() {
-    if (++ticks == 1 && scenario == 5) flip();  // legacy PPU-side request
+    ++ticks;
+    if (ticks == 1 && scenario == 5) flip();  // legacy PPU-side request
+    if (ticks == 1 && scenario == 6) ++requests;  // queued, not executed
 }
 static void cellGcmTickFlip() {}
 static unsigned cellGcm_flip_request_count() { return requests; }
@@ -73,6 +75,10 @@ static void cellGcm_rsx_process_fifo() {
         (scenario == 2 && drains <= 2) ||  // adjacent tick/outer markers
         (scenario == 3 && drains <= 5))    // catch-up ticks and outer drain
         flip();
+    if (scenario == 6 && drains == 12) {  // the queued marker finally executes
+        current_frame = requests;
+        pending = true;
+    }
 }
 static void sarpbc_frame_stats_tick(unsigned long long, unsigned frames) {
     stats_frames = frames;
@@ -104,7 +110,7 @@ int main(int argc, char** argv) {
 
     def test_present_once_at_each_guest_boundary(self):
         for cap in ("0", "30"):
-            for scenario in range(6):
+            for scenario in range(7):
                 with self.subTest(cap=cap, scenario=scenario):
                     env = dict(os.environ)
                     env.pop("FRAME_CLOCK_STATS", None)

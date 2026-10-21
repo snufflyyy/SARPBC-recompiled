@@ -111,12 +111,15 @@ which is why objects do not vanish); the fork's Vulkan *engine* and D3D12/Metal 
   marker and an early drain callback each have a retained red counterexample.
   Native-clock review also found a second-present bug: a marker reached by
   the outer-cadence drain was presented by its counter fallback, but its pending
-  flag survived for the next iteration. The fallback now consumes that same
-  flag. `tools/test_frame_clock.py` compiles the real clock with deterministic
-  time, FIFO and backend hooks: six scenarios, each uncapped and capped at
-  30 fps, check exact ordered presents and telemetry, catch-up ticks, legacy
-  PPU requests and pre-first-flip fallback. Six cases fail before the repair;
-  all twelve pass afterward and under ASan/UBSan. No clock rewrite or new cap.
+  flag survived for the next iteration. The fallback now requires and consumes
+  that same flag. Merely clearing it is insufficient: ordinary queued markers
+  increment the request counter before execution and must not present early.
+  `tools/test_frame_clock.py` compiles the real clock with deterministic time,
+  FIFO and backend hooks: seven scenarios, each uncapped and capped at 30 fps,
+  check exact ordered presents and telemetry, catch-up ticks, legacy PPU
+  requests, delayed queued markers and pre-first-flip fallback. Six cases fail
+  before the flag repair; two more reject clearing it without checking it.
+  All fourteen pass afterward and under ASan/UBSan. No clock rewrite or new cap.
   The first 300 s game run returned to the menu without faults; game validation
   of the second-present repair is pending.
 - **Item 7.** The clear-with-scissor op is `clear_depth_stencil_rect` (a backend op that

@@ -327,10 +327,10 @@ static DWORD WINAPI frame_clock(LPVOID)
              * drain mid-frame and flash a partial one. Before the first flip
              * present freely, so the window is not blank during boot. */
             unsigned fc = cellGcm_flip_request_count();
-            if (fc != last_flip) {
-                /* A marker reached by this drain also left the pending flag.
-                 * Claim it here, or the next iteration presents it again. */
-                (void)cellGcm_take_flip_pending();
+            /* A queued ordinary marker increments fc before it executes.
+             * Require and claim the completed-frame flag here too: otherwise
+             * we present early, or present this marker again next iteration. */
+            if (fc != last_flip && cellGcm_take_flip_pending()) {
                 if (cap_on) FC_TIMED(st_sleep, flip_cap_wait(next_flip_us));
                 FC_TIMED(st_present, present_guest_frame()); st_presents++;
                 last_flip = fc;
