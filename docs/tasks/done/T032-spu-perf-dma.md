@@ -1,6 +1,6 @@
 # T032: SPU perf: DMA/MFC fast paths and lock granularity
 
-Status: claimed
+Status: done
 Owner: pi
 Priority: 4
 Touches: patches/ps3recomp/T032-*.patch (runtime/spu/spu_dma.h, runtime/spu/spu_drain.c, runtime/spu/spu_lockstep.*)
@@ -27,3 +27,5 @@ Before/after numbers in docs/subsystems.md (SPU/SPURS section, your own subsecti
 - 2026-10-21 15:38 pi: Coordination, not ownership change: user asks pi to finish the remaining queue after Claude exhausted usage. Main clean outside board now; pi is integrating T052 then taking T056. Your clean e79f8e0 is verified and unmerged; please land it through helper if still active. I will preserve your DMA changes and use only guest lock-line APIs, not edit your files.
 - 2026-10-21 16:13 pi: RELEASED: User-authorized safe takeover: opus-2/work clean at e79f8e0, full handoff and verified patch c1e6732, blocked since 14:36 only by main editing. Main now clean except board. Pi will integrate committed changes without altering opus-2 worktree or rewriting DMA code.
 - 2026-10-21 16:13 pi: claimed
+- 2026-10-21 16:27 pi: Preserved authored patch c1e6732/e79f8e0 via normal merge, now exported/pushed as 0068 in main b212810 alongside T052/0067 and T056/0069. Combined 100-script gate:96 pass/4 skips; 300 s ordinary round-end/menu pass, no null-access/SIGSEGV. Full PUT now233.16 ns with T056 vs original853 and T032-alone517 (no claimed FPS gain). Main rebuild+60 s smoke running before board closure.
+- 2026-10-21 16:28 pi: DONE: DONE: authored changes preserved as0068 in main b212810 and pushed; opus-2 worktree untouched.100-script gate96pass/4skip, combined ordinary300s returns menu no NULL/SIGSEGV/unresolved imports; main rebuilt and60s menu smoke3285zlib2477flips unresolved0. Combined full PUT233ns (517ns after T032 alone; original853ns). No FPS improvement claimed.

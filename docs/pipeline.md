@@ -89,8 +89,11 @@ python $PS3RECOMP/tools/ppu_lifter.py game/EBOOT.elf \
 python $PS3RECOMP/tools/gen_hle_nids.py --all --out src/recomp/ppu_hle_nids.cpp   # CMake uses it when present
 ```
 
-- **Split the linker's TOC-switch stubs first** (`tools/split_toc_stubs.py`, run by
-  `relift.sh`; the lifter is fed `EBOOT.functions.split.json`). The EBOOT uses four TOCs, so
+- **Linker TOC-switch stubs get a function each** (T005: `ppu_loader.py` does it by default,
+  `--no-split-toc-stubs` turns it off; `tools/split_toc_stubs.py` remains as the fallback
+  `relift.sh` uses only for a loader without the flag; the lifter is fed
+  `EBOOT.functions.split.json`, a copy of the loader's list). Verified on 01.02: the loader's
+  51,844-function list is identical to the script's, and 01.09 has no stub runs (no-op). The EBOOT uses four TOCs, so
   the linker emits 4,242 `std r2,40(r1); addis/addi r2; b` stubs in two runs
   (`0x61B6A8..0x61CA98`, `0x1921350..0x1930880`). ppu_loader folds each run into the
   preceding function, and the lifter then emits every stub as a tail-entry wrapper

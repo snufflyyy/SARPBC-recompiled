@@ -55,9 +55,9 @@ boot_check is PROGRESSING with 3513 flips; the main menu runs at **29.5 fps** (1
 26.3-32.3), ~130% CPU, 28 threads. Where a menu frame's ~31 ms go, and what to try next:
 subsystems.md "Menu frame rate".
 
-**Integrated patch stack:** 70 patch files (88 commits) on upstream `749182e`
+**Integrated patch stack:** 72 patch files (90 commits) on upstream `749182e`
 (v0.16.0, T043), including T052 and Claude's later audio/shadow/port work.
-Current full gate: 100 scripts, 96 passed / 4 explicit skips / 0 failures/timeouts;
+Current full gate: 102 scripts, 98 passed / 4 explicit skips / 0 failures/timeouts;
 the nested SDL/Vulkan suites are included (T048).
 The upstream lifter did not
 change, so the lifts were kept. The big fixes of the last two days: the SPURS CreateTask race that started tasks twice

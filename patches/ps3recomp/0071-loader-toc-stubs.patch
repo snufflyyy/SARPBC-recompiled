@@ -1,0 +1,212 @@
+From 5586e15c354b2592f343e126b3c32be939372e89 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Wed, 21 Oct 2026 18:05:19 +0000
+Subject: [PATCH] ppu_loader: give linker TOC-switch stubs a function each
+ (--no-split-toc-stubs to keep them folded)
+
+Runs of std r2,40(r1); addis/addi r2; b stubs were folded into the preceding
+function and lifted as tail-entry wrappers running to the end of the run (27.2M vs
+7.6M lines on a 4-TOC EBOOT). Test: tools/test_ppu_loader_toc_stubs.py.
+---
+ tools/ppu_loader.py                | 85 ++++++++++++++++++++++++++++++
+ tools/test_ppu_loader_toc_stubs.py | 74 ++++++++++++++++++++++++++
+ 2 files changed, 159 insertions(+)
+ create mode 100644 tools/test_ppu_loader_toc_stubs.py
+
+diff --git a/tools/ppu_loader.py b/tools/ppu_loader.py
+index 2d18c67..11e5453 100644
+--- a/tools/ppu_loader.py
++++ b/tools/ppu_loader.py
+@@ -175,10 +175,74 @@ def parse_imports(elf):
+     return imports
+ 
+ 
++STD_R2_40_R1 = 0xF8410028     # std r2,40(r1)
++MIN_TOC_STUB_RUN = 4          # a lone std r2,40(r1) can be ordinary code; runs are stubs
++
++
++def _toc_stub_end(word, a):
++    """Address just past the linker TOC-switch stub starting at a, or None.
++
++    A stub is `std r2,40(r1); [addis r2,r2,hi]; [addi r2,r2,lo]; b target`
++    (the b has no link and is relative)."""
++    if word(a) != STD_R2_40_R1:
++        return None
++    for k in range(1, 4):
++        w = word(a + 4 * k)
++        if w >> 26 == 18 and not w & 3:          # b target
++            return a + 4 * (k + 1)
++        if w >> 16 not in (0x3C42, 0x3842):      # addis/addi r2,r2,imm
++            return None
++    return None
++
++
++def find_toc_stub_runs(word, lo, hi, min_run=MIN_TOC_STUB_RUN):
++    """Runs of at least min_run consecutive TOC-switch stubs in [lo, hi): a list of
++    [(start, end), ...] per run. word(addr) reads a big-endian u32 (0 out of range)."""
++    runs, a = [], lo
++    while a < hi:
++        stubs, b = [], a
++        while b < hi and (e := _toc_stub_end(word, b)) is not None:
++            stubs.append((b, e))
++            b = e
++        if len(stubs) >= min_run:
++            runs.append(stubs)
++            a = b
++        else:
++            a += 4
++    return runs
++
++
++def split_toc_stubs(funcs, runs):
++    """Give every stub of every run a function of its own, and end any function that
++    overlapped a run where the run starts.
++
++    The EBOOT is big enough to need several TOCs, so the linker emits runs of stubs
++    that switch r2 before branching into another TOC's code. They sit after the last
++    OPD function, whose range then swallows the whole run; every stub is a call target,
++    so the lifter emitted each one as a mid-function tail-entry wrapper running to the
++    end of the range (27.2M instead of 7.6M lifted lines for SARPBC 01.02)."""
++    h = lambda v: int(str(v), 0)
++    run_starts = sorted(r[0][0] for r in runs)
++    out = []
++    for f in funcs:
++        st, en = h(f["start"]), h(f["end"])
++        inside = [r for r in run_starts if st < r < en]
++        if inside:
++            f = dict(f, end=hex(inside[0]))
++        if not any(r[0][0] <= st < r[-1][1] for r in runs):
++            out.append(f)
++    for r in runs:
++        out.extend({"start": hex(a), "end": hex(b)} for a, b in r)
++    out.sort(key=lambda f: h(f["start"]))
++    return out
++
++
+ def main():
+     ap = argparse.ArgumentParser(description="PS3 PPU loader (image + OPD + TOC + functions)")
+     ap.add_argument("input")
+     ap.add_argument("--output", "-o", default="ppu_loader_out")
++    ap.add_argument("--no-split-toc-stubs", action="store_true",
++                    help="keep runs of linker TOC-switch stubs inside the preceding function")
+     args = ap.parse_args()
+ 
+     elf = ELFFile(args.input)
+@@ -217,6 +281,25 @@ def main():
+         funcs.append({"start": hex(start), "end": hex(end or start),
+                       "toc": hex(func_toc[start]), "opd": hex(opd_of[start])})
+ 
++    toc_stub_note = ""
++    if not args.no_split_toc_stubs:
++        segs = []
++        for i, ph in enumerate(elf.program_headers):
++            if ph.p_type == PT_LOAD and (ph.p_flags & 0x1) and ph.p_filesz:
++                segs.append((ph.p_vaddr, elf.get_segment_data(i)))
++        def word(a):
++            for base, data in segs:
++                if base <= a and a + 4 <= base + len(data):
++                    return struct.unpack_from(">I", data, a - base)[0]
++            return 0
++        runs = []
++        for base, data in segs:
++            runs += find_toc_stub_runs(word, base, base + len(data))
++        if runs:
++            funcs = split_toc_stubs(funcs, runs)
++            toc_stub_note = (f"split {sum(len(r) for r in runs)} TOC-switch stubs "
++                             f"in {len(runs)} run(s)")
++
+     image = []
+     for ph in elf.program_headers:
+         if ph.p_type == PT_LOAD and ph.p_memsz:
+@@ -253,6 +336,8 @@ def main():
+     print(f"OPD region       : {hex(opd_va) if opd_va else '?'} size {hex(opd_size) if opd_size else '?'}")
+     print(f"OPD descriptors  : {len(opd_entries)}")
+     print(f"unique functions : {len(func_addrs)}")
++    if toc_stub_note:
++        print(f"toc stubs        : {toc_stub_note}")
+     print(f"load segments    : {len(image)}")
+     for seg in image:
+         bss = int(seg['memsz'], 16) - int(seg['filesz'], 16)
+diff --git a/tools/test_ppu_loader_toc_stubs.py b/tools/test_ppu_loader_toc_stubs.py
+new file mode 100644
+index 0000000..45388ac
+--- /dev/null
++++ b/tools/test_ppu_loader_toc_stubs.py
+@@ -0,0 +1,74 @@
++#!/usr/bin/env python3
++"""Linker TOC-switch stub runs get a function boundary each (ppu_loader).
++
++The stubs `std r2,40(r1); addis/addi r2,r2,imm; b target` sit in runs after the last
++OPD function. Without a split the loader folds the whole run into that function and
++the lifter emits every stub as a tail-entry wrapper running to the end of the run.
++
++Usage:  python3 tools/test_ppu_loader_toc_stubs.py
++"""
++import os
++import struct
++import sys
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++from ppu_loader import find_toc_stub_runs, split_toc_stubs   # noqa: E402
++
++STD = 0xF8410028
++ADDIS = 0x3C420001      # addis r2,r2,1
++ADDI = 0x38420010       # addi r2,r2,16
++B = 0x48000100          # b +0x100
++BL = 0x48000101         # bl +0x100 (a call, not a stub)
++NOP = 0x60000000
++BLR = 0x4E800020
++
++fails = 0
++
++
++def check(name, cond):
++    global fails
++    print(("PASS " if cond else "FAIL ") + name)
++    fails += 0 if cond else 1
++
++
++def build(words, base=0x10000):
++    data = b"".join(struct.pack(">I", w) for w in words)
++    def word(a):
++        o = a - base
++        return struct.unpack_from(">I", data, o)[0] if 0 <= o and o + 4 <= len(data) else 0
++    return base, base + len(data), word
++
++
++# code: 2 ordinary instructions, then 5 stubs of three shapes, then a function
++stubs = [[STD, ADDIS, ADDI, B], [STD, ADDIS, B], [STD, ADDI, B], [STD, B], [STD, ADDIS, ADDI, B]]
++words = [NOP, BLR] + [w for s in stubs for w in s] + [NOP, BLR]
++lo, hi, word = build(words)
++runs = find_toc_stub_runs(word, lo, hi)
++check("one run found", len(runs) == 1)
++sizes = [e - s for s, e in runs[0]]
++check("five stubs of 16/12/12/8/16 bytes", sizes == [16, 12, 12, 8, 16])
++check("run starts after the two ordinary instructions", runs[0][0][0] == lo + 8)
++
++short = [NOP] + [w for s in stubs[:3] for w in s] + [BLR]
++check("a run shorter than 4 is ordinary code", find_toc_stub_runs(*(lambda l, h, w: (w, l, h))(*build(short))) == [])
++call = [STD, ADDIS, ADDI, BL] * 5
++check("bl is a call, not a stub", find_toc_stub_runs(*(lambda l, h, w: (w, l, h))(*build(call))) == [])
++check("a stub missing its branch is not a stub",
++      find_toc_stub_runs(*(lambda l, h, w: (w, l, h))(*build([STD, ADDIS, ADDI, NOP] * 5))) == [])
++
++# a function that swallowed the run, one after it, one inside it
++run_start, run_end = runs[0][0][0], runs[0][-1][1]
++funcs = [{"start": hex(lo), "end": hex(hi), "toc": "0x1", "opd": "0x2"},
++         {"start": hex(run_start + 16), "end": hex(hi), "toc": "0x1", "opd": "0x3"},
++         {"start": hex(run_end), "end": hex(hi), "toc": "0x1", "opd": "0x4"}]
++out = split_toc_stubs(funcs, runs)
++starts = [int(f["start"], 16) for f in out]
++check("sorted and unique", starts == sorted(set(starts)))
++check("the swallowing function now ends where the run starts",
++      out[0]["start"] == hex(lo) and out[0]["end"] == hex(run_start) and out[0]["toc"] == "0x1")
++check("every stub is a function", [(int(f["start"], 16), int(f["end"], 16)) for f in out[1:6]] == runs[0])
++check("a function that began inside the run is replaced by the stub", all(f.get("opd") != "0x3" for f in out))
++check("the function after the run is untouched", out[-1] == funcs[2])
++check("no function overlaps the next", all(int(a["end"], 16) <= int(b["start"], 16) for a, b in zip(out, out[1:])))
++
++sys.exit(1 if fails else 0)
+-- 
+2.47.3
+

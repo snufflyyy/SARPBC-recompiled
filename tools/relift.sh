@@ -42,9 +42,15 @@ mkdir -p "$ANALYSIS"
 "$PY" "$PS3RECOMP/tools/ppu_loader.py" "$ELF" -o "$ANALYSIS/"
 "$PY" "$PS3RECOMP/tools/gen_imports.py" "$ELF" -o "$ANALYSIS/imports_named.json"
 # One function per linker TOC-switch stub; otherwise each stub lifts as a wrapper
-# running to the end of the run (see the script's docstring).
-"$PY" "$ROOT/tools/split_toc_stubs.py" "$ELF" "$ANALYSIS/EBOOT.functions.json" \
-    -o "$ANALYSIS/EBOOT.functions.split.json"
+# running to the end of the run (tools/split_toc_stubs.py docstring). The patched
+# ppu_loader.py does this itself (patch T005); the script stays as the fallback for a
+# loader without --no-split-toc-stubs, and is idempotent on an already split list.
+if "$PY" "$PS3RECOMP/tools/ppu_loader.py" --help 2>&1 | grep -q -- --no-split-toc-stubs; then
+    cp "$ANALYSIS/EBOOT.functions.json" "$ANALYSIS/EBOOT.functions.split.json"
+else
+    "$PY" "$ROOT/tools/split_toc_stubs.py" "$ELF" "$ANALYSIS/EBOOT.functions.json" \
+        -o "$ANALYSIS/EBOOT.functions.split.json"
+fi
 
 # --hle-stubs rewrites each import trampoline as ps3_hle_call(nid); without it
 # the first firmware call runs the raw stub and dies at 0x39800000.
