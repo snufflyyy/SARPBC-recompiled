@@ -184,9 +184,11 @@ Example summary (01.02, 2026-10-18):
   `timeout` as parent (so PID reuse can't hit another agent's game). Verified by running two
   boot_checks and a separately started game at once (2026-10-18): each stopped only its
   own game.
-- **The runtime ignores SIGTERM, not just SIGINT:** the log keeps growing for the whole
-  grace period after a TERM. boot_check therefore sends SIGKILL after 3 s and measures the
-  final window up to the TERM, not the KILL.
+- **SIGTERM / SIGINT exit cleanly (T018, `src/overrides/clean_exit.cpp`):** the handler arms a 3 s
+  alarm, a watcher thread flushes stdio and calls `quick_exit(128+sig)` (the `[edgezlib]` totals
+  print through `at_quick_exit`; static destructors are skipped on purpose, they crashed against
+  live guest threads). A second signal leaves at once. `SARPBC_NO_CLEAN_EXIT=1` turns it off.
+  boot_check still sends SIGKILL after 3 s as a backstop.
 - **Run-to-run variance:** the first-open order of the `COOKEDPS3/*.XXX` packages changes
   between runs (CORE is always first; ENGINE was 2nd in one run, 10th in another), and the
   timings stretch about 2x when two games run at once. Compare the set and the stall, not

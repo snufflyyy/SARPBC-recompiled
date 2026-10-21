@@ -157,7 +157,7 @@ void lfqueue_push_body(ppu_context* ctx)
         reject(ctx, kSpursTaskErrorStat, "unsupported non-Edge-zlib queue");
         return;
     }
-    static bool s_atexit = (atexit(report), true);
+    static bool s_atexit = (atexit(report), at_quick_exit(report), true);   // quick_exit: SIGTERM path, clean_exit.cpp
     (void)s_atexit;
 
     uint32_t w[8];

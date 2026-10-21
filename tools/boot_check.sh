@@ -144,8 +144,8 @@ ours() {
 stop_game() {
     ours || return 0
     kill -TERM "$GPID" 2>/dev/null || true
-    # The runtime ignores SIGTERM as well as SIGINT (2026-10-18: the log keeps
-    # growing after it), so the grace period before SIGKILL is short.
+    # src/overrides/clean_exit.cpp turns SIGTERM into a flushed quick_exit within
+    # ~0.1 s (T018); the grace period before SIGKILL covers a stuck exit.
     for _ in $(seq 30); do ours || return 0; sleep 0.1; done
     kill -KILL "$GPID" 2>/dev/null || true
 }
