@@ -963,6 +963,15 @@ range cleanup, reverse-order removal, and reuse of the same addresses.
   to libs/spurs/cellSpursQueue.c, and the test does not compile that file. All 9 ctest tests
   (`-DPS3RECOMP_BUILD_TESTS=ON`) and `tools/test_spu_context_registries.py` pass.
 
+### SPU codegen wins: not needed (T031, 2026-10-21)
+
+Measured in the arena (`boot_check --scenario arena`, 20 s of `/proc/<pid>/task/*/stat`
+at 100-120 s, guest ~35 fps): the whole game uses ~82% of one core; the busiest
+threads are 46% and 31%, the rest under 4%. Nothing SPU-shaped is near 100%, so
+lifter codegen changes (always_inline `spu_shufb`, direct calls, constant folding)
+would buy nothing measurable and risk bit-exactness. Revisit when an SPU-heavy
+scene (a real match with physics and audio, phase 8) puts an SPU thread near 100%.
+
 ## Video (Bink)
 
 - BinkPS3 is statically linked game code; the three `BINKPS3_*.BIN` files are its RSX
