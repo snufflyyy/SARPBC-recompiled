@@ -988,7 +988,7 @@ range cleanup, reverse-order removal, and reuse of the same addresses.
   ordinary PUTs into 0x40003000-0x40005000), and the GCM pushbuffer hook (below).
   Every DMA also wrote the repeat detector's shared statics (`SPU_DMA_REPEAT_LIMIT`), one cache
   line all SPU threads wrote.
-- **Change** (patch `T032-spu-dma-put-fast-paths`): `spu_coh_span_reserved(ea, size)` answers the
+- **Change** (patch `0068-spu-dma-put-fast-paths`): `spu_coh_span_reserved(ea, size)` answers the
   scan from the bitmap a byte at a time, and the line walk runs only if a line in the span is
   marked. POISON-DMA needs `SPU_POISON_DMA=1`. The repeat detector keeps its state per context in
   `mfc_engine` (a thread-local version cost ~4 ns per DMA on one thread; this costs nothing). The

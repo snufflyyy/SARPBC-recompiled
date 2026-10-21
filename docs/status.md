@@ -169,7 +169,7 @@ frame cap preserved) and verified another ordinary 300 s round-end/menu run:
 no null-access alerts or SIGSEGV. The merge helper numbers the lifecycle patch.
 
 ### 2026-10-21: SPU DMA fast paths (T032, opus-2)
-- In the arena one SPU issues all MFC DMA: the MultiStream mixer, ~168k GETs + ~65k PUTs/s. A PUT cost 853 ns (per-line reserved scans, an always-on POISON-DMA payload scan, a shared repeat-detector line); patch T032-spu-dma-put-fast-paths makes it 517 ns, mixer DMA time 84 -> 62 ms/s, bytes identical (`tools/test_spu_dma_hotpath.py`). Most of what is left is the GCM pushbuffer hook's 512-slot walk: follow-up T056. Numbers: subsystems.md "MFC DMA fast paths".
+- In the arena one SPU issues all MFC DMA: the MultiStream mixer, ~168k GETs + ~65k PUTs/s. A PUT cost 853 ns (per-line reserved scans, an always-on POISON-DMA payload scan, a shared repeat-detector line); patch 0068-spu-dma-put-fast-paths makes it 517 ns, mixer DMA time 84 -> 62 ms/s, bytes identical (`tools/test_spu_dma_hotpath.py`). Most of what is left is the GCM pushbuffer hook's 512-slot walk: follow-up T056. Numbers: subsystems.md "MFC DMA fast paths".
 
 ### 2026-10-21: SPU profiler works without perf (T029, opus-1)
 - `tools/spu_profile.sh` falls back to per-thread `eu-stack` samples when perf cannot record (this container), adds `--scenario/--pad/--sampler/--interval` and a mixer PUT rate restricted to the sample window. No measurable cost (56.25 vs 56.58 fps). Single Player: lifted SPU 30%, SPU runtime 46% (28% is a per-job FNV hash of the whole job image: new T055); arena: lifted SPU 53%, the audio SPU thread (MultiStream DSP overlay + `e33837bb`) at 84% of a core. Numbers: subsystems.md "SPU time by category (T029)".
