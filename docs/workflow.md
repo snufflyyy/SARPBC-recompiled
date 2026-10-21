@@ -54,6 +54,8 @@ agent picks its own task from the board, works in its own worktree, and merges i
    check that `tools/apply_patches.sh` applies the whole stack. The merge gives them numbers.
    Working on `main` (no task branch), `tools/export_patch.sh <slug> "<what and why>"` does the
    export, numbering and README row in one step.
+   Before merging, `tools/verify.sh` (build, `lint.py --tests`, a scripted boot; `--no-boot`,
+   `--scenario arena`) is the one command that answers "is my change good".
 9. Commit on your branch, ending messages with your harness's attribution line, if it has
    one. Don't push by hand: your branch stays local, and `merge_to_main.sh` pushes `main`.
 

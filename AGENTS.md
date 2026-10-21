@@ -80,7 +80,7 @@ patches/ps3recomp/           our patches against the pinned upstream (+ README: 
 patches/experimental/        diffs kept for reference, never applied
 external/ps3recomp/          git submodule, pinned; tools/apply_patches.sh puts the patches on it
 tools/                       pipeline: extract.sh decrypt.sh relift.sh split_toc_stubs.py lift_prx_jobs.py
-                             make_spu_overlays.py apply_patches.sh export_patch.sh
+                             make_spu_overlays.py apply_patches.sh export_patch.sh verify.sh
                              run and measure: run.sh boot_check.sh boot_report.py spu_profile.{sh,py}
                              ppm2png.py hle_coverage.py
                              agents: task.sh agent_setup.sh merge_to_main.sh lint.py; tests: test_*.py
@@ -110,6 +110,7 @@ cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang
 cmake --build build   # Release + Vulkan are the defaults on Linux -> build/sarpbc
 tools/run.sh          # build/sarpbc game/EBOOT.elf vfs (main.cpp maps /dev_hdd0 itself)
 tools/boot_check.sh 60 [--gdb] [--version 0109]   # headless boot report; stops only its own game
+tools/verify.sh           # build + lint --tests + scripted menu boot: the one pre-merge check
 tools/lint.py [--tests]   # repo hygiene (docs, patches, board, scripts, no game data); before every commit
 ```
 Details and every flag: [docs/pipeline.md](docs/pipeline.md).
