@@ -129,7 +129,10 @@ which is why objects do not vanish); the fork's Vulkan *engine* and D3D12/Metal 
   The unfixed run accumulated 3218 excess native presents over acknowledgements
   in seconds 60.6–298.9. Fixed seconds 60.1–299.0: 10620 presents / 10621 acks,
   within one in-flight frame at the log boundary, not accumulating duplicates.
-  This repairs presentation/counting; no FPS improvement is claimed.
+  This repairs presentation/counting; no FPS improvement is claimed. Rebuilt
+  main `9844b8e` also passes the 60 s Single Player menu smoke: 3285 zlib,
+  2500 acknowledged flips, unresolved 0, no NULL/SIGSEGV; root
+  `analysis/boot_check/20261021-200728-2049532/`.
 - **Item 7.** The clear-with-scissor op is `clear_depth_stencil_rect` (a backend op that
   writes the clear value inside the scissor); `RSX_CLEAR_NO_SCISSOR=1` restores the old clear.
   Whether SARPBC clears shadow atlas regions with scissors is a guess from UE3 (v860);

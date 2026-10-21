@@ -5,8 +5,8 @@ work session. Newest log entry first. Use absolute dates.
 
 ## Resume here (updated 2026-10-21)
 
-**Current work (user, 2026-10-21):** T058 is verified; pi is integrating it,
-then stopping at the user's request. Prepared flips execute at their FIFO
+**Current work (user, 2026-10-21):** T058 is merged and verified; pi stopped
+at the user's request. Prepared flips execute at their FIFO
 position; the native clock claims each completed-frame flag once, rather than
 count queued requests or present a pending marker twice. Both callback modes,
 fourteen native-clock cases and ASan/UBSan pass. Final 300 s: results then main
@@ -57,10 +57,12 @@ clean textures, a working HUD, the car drives on throttle, its shadow is right (
 direction, and T054: the shadow map snapshot is cropped to the 512x512 texture, patch 0064). T045 is done; the 85% black border is the game's own safe-area setting (menus have it too). Real MP3 audio
 plays (T007) without crackle (T053, 2026-10-21). `boot_check --pad` scripts the presses (T036). There's no Bink in 01.09.
 
-**Last verified on `main` (fc9cdf4, 2026-10-20, `PS3_VERBOSE=0`, under the boot lock):** a 120 s
-boot_check is PROGRESSING with 3513 flips; the main menu runs at **29.5 fps** (1 s windows
-26.3-32.3), ~130% CPU, 28 threads. Where a menu frame's ~31 ms go, and what to try next:
-subsystems.md "Menu frame rate".
+**Last verified on `main` (9844b8e, 2026-10-21, under the boot lock):** rebuilt
+01.09 Linux/Vulkan, 60 s menu smoke: 3285 zlib, 2500 acknowledged flips,
+unresolved 0, no null-access alerts/SIGSEGV. The final capture is the Single
+Player menu. Root `analysis/boot_check/20261021-200728-2049532/`. The preceding
+300 s arena/results/return-menu verification is logged below. Frame-time
+breakdowns and historical measurements: subsystems.md "Menu frame rate".
 
 **Integrated patch stack:** 72 patch files (90 commits) on upstream `749182e`
 (v0.16.0, T043), including T052 and Claude's later audio/shadow/port work.
@@ -85,9 +87,8 @@ X11 override; `SDL_VIDEODRIVER=wayland ./run.sh` explicitly selects Wayland. A
 45-second window test presented 3,581 guest frames without a headless fallback;
 this is not a main-menu FPS measurement. See build-linux.md "Desktop launch".
 
-**Queue:** use the live board (`tools/task.sh next`). T058 is ready to close;
-T059 has a measured non-port assessment in subsystems.md, with a handoff before
-pi stops. T005 is done and T009 closed without a port. T015 (multiplayer) remains
+**Queue:** use the live board (`tools/task.sh next`). T058 is done. T059 was
+released with a HANDOFF and has a measured non-port assessment in subsystems.md. T005 is done and T009 closed without a port. T015 (multiplayer) remains
 **blocked** until the user has permission. Phase 8 still needs a real exhibition
 match with input over time, arena audio and frame-rate measurement.
 
@@ -152,6 +153,12 @@ are intact. The unfixed clock accumulated thousands of duplicate presents;
 the final steady span has 10620 presents / 10621 acks (one in flight), not an
 accumulating excess. No FPS gain claimed. Latest-main diagnostic/loader work
 and the T009 measured non-port decision were merged normally, not overwritten.
+
+Integrated/pushed as `9844b8e` with numbered patch
+`0072-flip-at-fifo-position.patch`; main was rebuilt and passed the 60 s Single
+Player menu smoke (3285 zlib, 2500 flips, unresolved 0, no NULL/SIGSEGV), root
+`analysis/boot_check/20261021-200728-2049532/`. T059 released with a handoff to
+preserve its existing diagnostic and measured assessment. Pi stops here as asked.
 
 ### 2026-10-21: DMA/GCM optimizations combined and verified (T032/T056, pi)
 
