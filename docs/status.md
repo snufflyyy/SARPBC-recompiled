@@ -136,7 +136,7 @@ match with input over time, arena audio and frame-rate measurement.
 ### 2026-10-21: FIFO prepared flips and exactly-once presents (T058, pi)
 
 Adapted MIT fork `6eb35c0` / `6cba82c`, preserving authorship, as
-`T058-flip-at-fifo-position.patch`. Marker/cursor execution records the flip;
+`0072-flip-at-fifo-position.patch`. Marker/cursor execution records the flip;
 Immediate acknowledges once and retains the optional PPU-side park callback.
 No guest callbacks from the locked drain, no new backend policy or frame cap.
 The native clock also requires and consumes its completed-frame flag after a

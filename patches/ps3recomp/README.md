@@ -174,7 +174,7 @@ numbers:
 | `0069-gcm-spu-put-lookup.patch` | T056: conservative atomic EA-region occupancy and allocation high-water mark reject unmapped SPU PUTs without scanning 512 IO slots; preserves sparse mappings and pushbuffer coalescing. 50k randomized oracle comparisons, boundary/full-table tests and ASan/UBSan; actual hook ~257 to ~21.6 ns in arena | generic, offer upstream |
 | `0070-pipe-times.patch` | T059: RSX_ENGINE_PIPE_TIMES per-pipeline build time diagnostic | generic diagnostic |
 | `0071-loader-toc-stubs.patch` | T005: ppu_loader splits linker TOC-switch stub runs into one function each (+ test) | generic, offer upstream |
-| `T058-flip-at-fifo-position.patch` | T058: prepare-flip markers execute at their FIFO point, with a non-overwriting cursor fallback near ring end; per-buffer atomic acknowledgements do not flip twice. Preserve legacy PPU callback policy, never enter guests from the drain, and cancel skipped position events. Two callback modes, FIFO/fence/ack/position/resync tests, ASan/UBSan | adapted from soyjxck MIT fork 6eb35c0 / 6cba82c; offer upstream |
+| `0072-flip-at-fifo-position.patch` | T058: prepare-flip markers execute at their FIFO point, with a non-overwriting cursor fallback near ring end; per-buffer atomic acknowledgements do not flip twice. Preserve legacy PPU callback policy, never enter guests from the drain, and cancel skipped position events. Two callback modes, FIFO/fence/ack/position/resync tests, ASan/UBSan | adapted from soyjxck MIT fork 6eb35c0 / 6cba82c; offer upstream |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `tools/export_patch.sh <slug> "<description>" ["<upstream status>"]` (next free number, the README row,

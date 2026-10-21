@@ -93,7 +93,7 @@ which is why objects do not vanish); the fork's Vulkan *engine* and D3D12/Metal 
   (`0xDC390`), vblank handler, SetFlipImmediate (patch `gcm-prepare-flip-returns-id`).
 
   **T058 implementation (pi, 2026-10-21).** Adapted the prepared-flip portions
-  into `T058-flip-at-fifo-position.patch`, keeping the fork author. It reuses
+  into `0072-flip-at-fifo-position.patch`, keeping the fork author. It reuses
   the existing marker writer and present-before-next-drain gate, not the fork's
   separate backend presentation policy. Near ring end, one atomic {id, IO
   cursor} event fires even at `get==put`; a second pending event fails rather
