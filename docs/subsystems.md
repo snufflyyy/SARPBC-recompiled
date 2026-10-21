@@ -938,6 +938,43 @@ range cleanup, reverse-order removal, and reuse of the same addresses.
   to libs/spurs/cellSpursQueue.c, and the test does not compile that file. All 9 ctest tests
   (`-DPS3RECOMP_BUILD_TESTS=ON`) and `tools/test_spu_context_registries.py` pass.
 
+### SPU time by category (T029, 2026-10-21)
+
+`tools/spu_profile.sh` with the per-thread `eu-stack` sampler (perf is denied here; method in
+debugging.md "Profiling"). 01.09 at `c9d339d`, the main checkout's `versions/0109/build`, boot
+lock held, 27 s windows. The sampler costs nothing measurable: Single Player screen 56.25 FPS
+sampled vs 56.58 unsampled (`--sampler none`), 317% host CPU in both.
+
+| Category (share of on-CPU stacks) | Before T033 (perf, 2026-10-19, intro) | Single Player screen (`--scenario menu --warmup 75`) | Arena, driving (`--scenario arena --warmup 100`) |
+|---|---:|---:|---:|
+| samples | 375k | 190 | 127 |
+| lifted SPU code | 0.8% | 29.5% | 52.8% |
+| SPU runtime helpers | 6.6% | 46.3% | 9.4% |
+| locks / spin / yield | 90.1% | 0.0% | 0.0% |
+| PPU lifted | 0.2% | 4.2% | 3.1% |
+| GCM / Vulkan | 0.2% | 7.4% | 20.5% |
+| other | ~2% | 12.6% | 14.2% |
+| host CPU | 1331% | 317% | 243% |
+| guest FPS | | 56.3 | 35.4 |
+| mixer PUT in window | | 1620 KB/s (105.5% of 8 ch x 48 kHz x f32) | 1620 KB/s (105.5%) |
+
+- **The SPU thread that matters is the audio one.** One host thread runs the MultiStream DSP
+  overlay (`spu_ovl_msdsp_37000`) and image `e33837bb` (it calls the overlay): 80% of a core on
+  the Single Player screen, 84% in the arena, the busiest thread of the process in both. In the
+  arena these two images are 63% of all on-CPU stacks (32% and 31%, inclusive). It keeps the mixer
+  at real time, so it is not yet a limit, but at ~84% it is the first SPU thread that would
+  become one (claude's T032 note asked to revisit at "near 100%"). Top functions: msdsp
+  `0x37614`, `0x39A18`, `0x37B20`, `0x37198`; e33837bb `0x4DB0`, `0x53B8`. Candidates for T031
+  (codegen).
+- **Per-job image hash (new T055).** On the Single Player screen `spu_workload_dispatch_job` is
+  the leaf of 28% of all on-CPU stacks (54 of 190), each on a short-lived `jc_thread`: the inlined
+  `spu_workload_fingerprint` runs a byte-wise FNV-1a over the whole job image on every dispatch.
+  Not seen in the arena run.
+- The other busy threads are the RSX/FIFO thread (`frame_clock` -> `cellGcm_rsx_process_fifo`,
+  53-54%: `rsx_vertex_remap_build`, `rsx_vertex_fetch_all`) and PPU threads (21-47%).
+- Reports: `analysis/spu_profile_20261021-{135900,140513,141126}.txt` in the opus-1 worktree.
+  Shares within ~5 points are sampling noise at these counts.
+
 ## Video (Bink)
 
 - BinkPS3 is statically linked game code; the three `BINKPS3_*.BIN` files are its RSX
