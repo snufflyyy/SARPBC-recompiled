@@ -61,3 +61,17 @@ finding it would need a pattern search of the lift, not done.
 4. Re-measure `FRAME_CLOCK_SLEEP_MS` against a real window (the numbers above are headless).
 
 Proposed follow-ups are items 1-3; none is started.
+
+## Frame cap: opt-in, off by default (2026-10-21)
+
+Is the original capped at 30 fps? Not established. The game's own `COALESCED.INI` asks for UE3
+smoothing between 22 and 60 fps with `UseVsync=true` (no 30 cap), and a web search (GameSpot
+review, Wikipedia, RPCS3 forum threads) found no frame-rate figure for the PS3 game, only a
+2008 remark that split screen struggles. The earlier "30 fps cap" came from the user's memory
+(2026-10-20); the user then asked for the game to be as close to the original as possible
+(2026-10-21), so the default is **no cap**.
+
+`SARPBC_FPS_CAP=<n>` (src/main.cpp `flip_cap_wait`) holds each guest flip's present back to a
+deadline of whole 1/n s intervals, on the drain thread (completing flips on the vblank tick does
+NOT slow the guest: it is bound by the drain, not by vsync). Arena, cap 30: 27.6 guest fps
+(under the cap: the deadline wait stalls the drain, so work does not overlap); no cap: 34.1.
