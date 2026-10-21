@@ -20,3 +20,4 @@ Patches are exported, the measurements are in the task log and docs/reference-po
 and a boot with the new lift reaches at least the same point as before.
 
 ## Log
+- 2026-10-21 01:47 claude: 2026-10-21 reviewed fork commits (e635033, 8dde556, afa9c69, d2c054a = ~900 lifter lines + 1730-line ppu_nv_dirty.py; ee004d6/1cbca03 = page-table loads). Our runtime already does plain vm_base+addr loads (no per-access page test), so the page-table piece is a store-gate for SPU/RSX coherency, not a speedup here. The fork's own commit message says its hot code was 'float/vector and memory, not r14-r31' (game thread 9.4-10.0 ms unchanged). Not ported: large, risky lifter change with unproven gain on this game. Revisit only if a guest-side profile shows spills of r14-r31 dominating.

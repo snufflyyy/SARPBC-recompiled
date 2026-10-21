@@ -1,6 +1,6 @@
 # T051: Replace shader-length viewport heuristic with semantic orientation handling
 
-Status: claimed
+Status: done
 Owner: pi
 Priority: 1
 Touches: patches/ps3recomp/T051-*.patch, patches/ps3recomp/README.md, docs/subsystems.md (Graphics orientation), docs/t038-review.md (resolution), docs/status.md (verification note), docs/debugging.md (orientation note), AGENTS.md (state count/index)
@@ -25,3 +25,4 @@ Commit source-only regressions proving identical shader semantics retain orienta
 - 2026-10-20 20:43 pi: Implementation merged and pushed: fcdc4cb; patch renumber commit 2453ab7; board bbd48e1. New patches are 0051-pngdec-output-mode and 0052-shader-independent-viewports. Rebuilding the main checkout executable so the next run does not use the old workaround. Private corrected executable already passed arena and staged visual verification.
 - 2026-10-20 20:46 pi: boot_check 2026-10-20 20:45 v01.09 bbd48e1+dirty 20s: PROGRESSING | last open TEXTURES.TFC@7.1s | pkgs 13 (GUIDCACHE last) | zlib 3279 | dumps 13 lit 13 distinct 9 | flips 442 | threads 13/9 alive | unresolved 0
 - 2026-10-20 20:46 pi: HANDOFF: done=PNG row-order root fix (0051), full removal of shader-length workaround + regressions (0052), corrected docs; implementation fcdc4cb and renumber 2453ab7 merged/pushed. All 88 scripts + 3 nested suites pass; PNG/render fixtures pass ASan+UBSan; 120 s arena and 55 s staged intro/menu captures upright. Main checkout ./build.sh succeeds and rebuilt executable passes fresh 20 s smoke (3279 zlib, 442 flips, unresolved 0). No source changes pending, no subagents, no game data committed. Historical 0050 is fully undone; offer codec fix independently. Next audit tasks T048/T049 remain open.
+- 2026-10-21 01:32 pi: DONE: Already merged and verified before pause (fcdc4cb, 2453ab7): correct PNG output row order; shader heuristic removed; synthetic and sanitizer regressions pass; 120 s arena, staged menus and rebuilt-main smoke verified. Closing lingering claim only; preserving Claude changes.

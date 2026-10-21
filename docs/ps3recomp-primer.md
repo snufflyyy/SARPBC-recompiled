@@ -71,11 +71,10 @@ pair has its own stack:
 - Log: the first 32 slot assignments print
   `[ppu] guest_call: tid 0x.. depth N -> stack 0x..-0x.. for code 0x.. (inside 0x..)`.
   A depth > 0 line is a nested callback; `inside` is the callback it runs in.
-- Locking caveat: the table lock that `sys_ppu_thread_create` holds around
-  `vm_stack_allocate` is static in `runtime/syscalls/sys_ppu_thread.c`, outside T026's
-  scope. A carve stores `region_end` as one aligned 32-bit word that only moves down, and
-  the headroom keeps a thread stack allocated at the same moment far below it. A
-  `ppu_stack_carve()` exported from sys_ppu_thread.c under its lock would be cleaner.
+- Locking (T034, patch 0057): a carve goes through `ppu_stack_carve()` in
+  `runtime/syscalls/sys_ppu_thread.c`, under the table lock `sys_ppu_thread_create`'s
+  allocator holds, so the two cannot take the same bytes; the 16 MB headroom stays as a
+  margin.
 - Effect on the 01.09 boot (`GCM_INTR_THREAD=1`, 60 s, 2026-10-19): **no visible change
   yet.** Old code 3 runs: flips 53/56/66, ESRB screen in 2 of 3 (the miss loaded slowly:
   TEXTURES.TFC opened at 26.6 s instead of ~6 s). New code 3 runs: flips 30/66/57, ESRB in
@@ -83,9 +82,9 @@ pair has its own stack:
   15.8 s). Every run stops presenting within ~8 s of the ESRB
   screen (the rwlock stall, T027). The nested frames were being overwritten all along;
   removing that is a correctness fix that this stage of the boot does not show.
-- Not changed: the callback still gets `r13 = PPU_TLS_TP` (the shared TLS block), not the
-  calling guest thread's r13. On the console, sysutil callbacks run on the calling thread
-  with its TLS. That is a separate fix if it ever matters.
+- TLS (T034, patch 0057): the callback runs with the calling guest thread's r13 (its own
+  TLS block, as sysutil callbacks do on the console); a host thread with no guest context
+  (the frame clock) still gets the shared `PPU_TLS_TP`.
 
 Test: `external/ps3recomp/tools/test_ppu_guest_call_stacks.py` builds the real
 `ppu_loader.cpp` with `runtime/ppu/tests/test_ppu_guest_call_stacks.cpp`: two host
