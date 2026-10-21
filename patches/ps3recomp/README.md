@@ -165,6 +165,8 @@ numbers:
 | `0060-spu-x86-qbyte-fast-float-lean-ls.patch` | T053: x86 pshufb quadword byte shifts/rotates (lqd+rotqby was a ~100-instruction byte loop), opt-in SPU_FAST_FLOAT (native SSE fa/fm/fma) and SPU_LEAN_LS (no LS probes) per translation unit; tests test_spu_qbyte.c, test_spu_fast_float.c | generic, offer upstream |
 | `0061-usleep-scale-by-thread-name.patch` | T053: PS3_USLEEP_SCALE=<thread name>:<percent> shortens the sleeps of a named PPU thread (a guest loop napping a hardware-sized interval around work that is several times slower on the host) | generic, offer upstream |
 | `0062-audio-gaps-diagnostics.patch` | T053: AUDIO_GAPS ring-map log when a block is empty at read time; PS3_FTRACE kind 15 (silent block instants) | generic, offer upstream |
+| `0063-pass-dump-alpha.patch` | T054: RSX_ENGINE_PASS_DUMP_ALPHA dumps FP16 target alpha (screen-space shadow depth) | generic diagnostic, offer upstream |
+| `0064-depth-snapshot-crop.patch` | T054: depth snapshot cropped to the sampling texture; a 512x512 shadow map in the 1280x720 zeta was sampled whole, so the car shadow landed in the wrong place and swam | generic, offer upstream (dod3 'cropped depth copies for shadows') |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `tools/export_patch.sh <slug> "<description>" ["<upstream status>"]` (next free number, the README row,

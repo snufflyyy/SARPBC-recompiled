@@ -289,6 +289,31 @@ switch: the square goes, nothing else changes). Patch
 `0047-shadow-compare-direction`. If another title's shadows invert after this,
 suspect this patch first.
 
+### Car shadow: where it landed (T054, 2026-10-21)
+
+After 0047 the dark square was gone but the shadow was a hard-edged patch beside
+the car that moved around when driving (user, 2026-10-21: "wrong place, swims,
+looks like a matrix problem"). Not a matrix: the constants were right (the
+shadow draw's `fp10`, the car origin, equals the map pass's `vp4` every frame,
+so nothing lags). Cause: **the depth snapshot of the shadow map was the whole
+zeta.** `eng_zdepth_get` makes every zeta canvas-sized (1280x720), the game's
+shadow map is a 512x512 texture in its top-left corner, and the snapshot copy
+was 1280x720. The shader samples with normalised coordinates, so every lookup
+was scaled by 512/1280 and 512/720 and landed elsewhere in the zeta, moving
+with the car. Patch `0064-depth-snapshot-crop` crops the snapshot to the
+sampling texture (cache keyed on size); the shadow now sits under/behind the car.
+
+How it was found (reusable): the shadow is a **screen-space multiply** (pass
+draw 3: pipe with fp `0c7d45f5d23f4dc7`, 34 constants, blend DST_COLOR x ZERO) that
+reads scene depth from the **alpha of the FP16 HDR target** (`0x0A130000`) and
+projects it through the light matrix into the map; 4 bilinear taps 0.7 texel
+apart, squared, distance fade. The light has the camera's orientation, so the
+real shadow is mostly hidden behind the car. `RSX_ENGINE_SKIP_FP=0c7d45f5d23f4dc7`
+removes it. A numpy re-run of that shader on dumped alpha, map and constants
+disagreed with the GPU image, which pointed at the texture, not the math.
+`RSX_ENGINE_PASS_DUMP_ALPHA=1` (patch 0063) writes the alpha of FP16 targets
+(`.a.pgm`, raw `.a.f32`) and the raw depth floats (`_z.pgm.f32`).
+
 ### Loading / splash screen orientation (T038/T050/T051, 2026-10-20)
 
 The root cause was **PNG scanline order, not shader projection**. A fresh 01.09 boot

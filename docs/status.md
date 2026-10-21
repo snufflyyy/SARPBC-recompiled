@@ -31,7 +31,7 @@ intro is Loading, ESRB with the car, Powered by Unreal, the Psyonix logo, the sa
 `boot_check --pad`). New Game now loads MP_SOCCARARENA + PYRAMID_COLLECTBOOST and keeps presenting (T037, T044),
 and **the arena renders and plays** (T045: reversed-Z depth clear, then NV0039 texture copies):
 clean textures, a working HUD, the car drives on throttle, its shadow is right (depth-compare
-direction). T045 is done; the 85% black border is the game's own safe-area setting (menus have it too). Real MP3 audio
+direction, and T054: the shadow map snapshot is cropped to the 512x512 texture, patch 0064). T045 is done; the 85% black border is the game's own safe-area setting (menus have it too). Real MP3 audio
 plays (T007) without crackle (T053, 2026-10-21). `boot_check --pad` scripts the presses (T036). There's no Bink in 01.09.
 
 **Last verified on `main` (fc9cdf4, 2026-10-20, `PS3_VERBOSE=0`, under the boot lock):** a 120 s
