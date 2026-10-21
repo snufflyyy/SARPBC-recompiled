@@ -133,6 +133,7 @@ Details and every flag: [docs/pipeline.md](docs/pipeline.md).
 | [docs/t038-review.md](docs/t038-review.md) | Loading-screen review and resolution (T050/T051): PNG row-order root cause, regression tests and verified captures |
 | [docs/build-windows.md](docs/build-windows.md) | A future Windows build: needs, the POSIX-guard audit of `src/`, what is verified |
 | [docs/frame-pacing.md](docs/frame-pacing.md) | Frame clock, fps limits, what the game's own frame-rate settings are, ranked pacing changes |
+| [docs/upstream.md](docs/upstream.md) | Offering our ps3recomp patches upstream: grouped PR drafts (nothing filed; ask the user first) |
 | [docs/workflow.md](docs/workflow.md) | Before any work: task board, claiming, worktrees, locks, merging, **pausing and resuming** |
 | [docs/hle-coverage.md](docs/hle-coverage.md) | Which firmware imports have HLE handlers (stub/impl), named NIDs, ranked gaps (`tools/hle_coverage.py`) |
 

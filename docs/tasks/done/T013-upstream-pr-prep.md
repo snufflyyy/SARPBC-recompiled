@@ -1,7 +1,7 @@
 # T013: Prepare upstream contributions (local branches + PR texts, no pushing)
 
-Status: open
-Owner: -
+Status: done
+Owner: claude
 Priority: 24
 Touches: docs/upstream.md (new)
 Reads: patches/ps3recomp/*, patches/ps3recomp/README.md, src/main.cpp (VM fix), tools/split_toc_stubs.py, src/overrides/edgezlib.cpp
@@ -20,3 +20,6 @@ docs/upstream.md lists each contribution with status, a ready-to-file descriptio
 local branch or patch that implements it, rebased on current upstream master.
 
 ## Log
+- 2026-10-21 02:01 claude: claimed
+- 2026-10-21 02:01 claude: docs/upstream.md: all 58 patches grouped into 10 PR drafts (motivation, evidence, patch table). Upstream master == our pin (749182e) so no rebase needed. NOT filed: awaiting the user's approval.
+- 2026-10-21 02:01 claude: DONE: 
