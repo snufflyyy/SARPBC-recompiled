@@ -168,6 +168,7 @@ numbers:
 | `0063-pass-dump-alpha.patch` | T054: RSX_ENGINE_PASS_DUMP_ALPHA dumps FP16 target alpha (screen-space shadow depth) | generic diagnostic, offer upstream |
 | `0064-depth-snapshot-crop.patch` | T054: depth snapshot cropped to the sampling texture; a 512x512 shadow map in the 1280x720 zeta was sampled whole, so the car shadow landed in the wrong place and swam | generic, offer upstream (dod3 'cropped depth copies for shadows') |
 | `0065-fp-ddx-ddy-nrm.patch` | T021 (Port next 8): fp decompiler DDX/DDY and NRM zero vector, from fork c42065f+93dbfdd | generic, ported from soyjxck fork (MIT), offer upstream |
+| `0066-vulkan-anisotropic.patch` | T021 (Port next 10b): anisotropic filtering of mipmapped guest textures, RSX_ANISO (idea: fork 66fd0a9) | generic Vulkan, offer upstream |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `tools/export_patch.sh <slug> "<description>" ["<upstream status>"]` (next free number, the README row,

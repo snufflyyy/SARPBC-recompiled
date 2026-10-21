@@ -314,6 +314,15 @@ disagreed with the GPU image, which pointed at the texture, not the math.
 `RSX_ENGINE_PASS_DUMP_ALPHA=1` (patch 0063) writes the alpha of FP16 targets
 (`.a.pgm`, raw `.a.f32`) and the raw depth floats (`_z.pgm.f32`).
 
+### Anisotropic filtering (T021 Port next 10, 2026-10-21)
+
+Patch `0066-vulkan-anisotropic`: a sampler gets anisotropy (default 16x, `RSX_ANISO=<n>`,
+`1` = off, clamped to the device limit) only when the bound object is a guest texture with
+more than one mip level, not a cube, and the title asked for linear min/mag/mip filtering.
+Render targets, their views and depth/colour snapshots keep the title's filter: the Drakengard
+fork found 16x over those (shadow maps, packed depth, post inputs) puts speckle on floors.
+Arena run: floors visibly sharper at a glancing angle, no artefacts, guest fps 36.9 vs ~35.
+
 ### Loading / splash screen orientation (T038/T050/T051, 2026-10-20)
 
 The root cause was **PNG scanline order, not shader projection**. A fresh 01.09 boot
