@@ -20,9 +20,17 @@ work. Update the **Status** line of a section when you change it.
   library rather than as its own import.
 - `..\` relative paths and backslashes are resolved by the game against its own base
   dir; watch the first opens to see what reaches cellFs.
-- Save data: the EBOOT imports **no** cellSaveData or cellGame — saves likely go through
-  raw `sys_fs` into a path the engine builds (verify with `PS3_FSLOG`). Save icons ship in
-  `SARB/BINARIES/PS3/SAVE/`. Status: not started.
+- Save data (01.09; 01.02 imports no cellSaveData/cellGame): the title boots through cellGame
+  (`BootCheck`, `GetParamString(100)`, `ContentPermit`, `DataCheck`, `GetSizeKB`; type 2 from
+  PARAM.SFO CATEGORY `HG`), then a "SaveData" guest thread calls `cellSaveDataAutoLoad2` and
+  `AutoSave2` for the one directory `NPUB30035-PROFILE`. Round trip verified 2026-10-21
+  (T017): with the directory removed, boot 1 shows `LOAD (new=1)`, funcStat result 1, then
+  `SAVE (new=1)` writing ICON0 (207830 B), PIC1 (562000 B) and `PAYLOAD` (3335 B); boot 2
+  shows `LOAD (new=0)` reading the same 3335-byte PAYLOAD (byte-identical to the older
+  save). It lands in `gamedata/dev_hdd0/home/00000001/savedata/NPUB30035-PROFILE/` with
+  PARAM.SFO (2736 B), ICON0.PNG, PIC1.PNG, PAYLOAD and an 8-byte PARAM.PFD. Not exercised:
+  `FixedSave2`/`ListLoad2` (the imports exist; no boot path reached them, they belong to
+  user-triggered saves) and a second save after game progress.
 
 ## Graphics (RSX → Vulkan)
 
