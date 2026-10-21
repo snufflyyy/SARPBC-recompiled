@@ -134,6 +134,13 @@ match with input over time, arena audio and frame-rate measurement.
 
 ## Log
 
+### 2026-10-21: shadow fix, ports, queue emptied (T054/T021/T005/T009/T031/T055/T057/T059, claude)
+
+- Car shadow fixed (0064): the shadow-map depth snapshot is cropped to the 512x512 texture instead of the canvas-sized zeta. Ported fp DDX/DDY/NRM (0065), Vulkan anisotropic filtering (0066), `ppu_loader` TOC-stub split (0071, relift.sh uses it), diagnostics 0063 (pass-dump alpha) and 0070 (pipeline build times).
+- No frame cap by default (no source confirms 30 fps; COALESCED.INI says smoothing 22-60 with vsync): `SARPBC_FPS_CAP=<n>` opts in (docs/frame-pacing.md).
+- Closed on measurements, no code: T009 (PPU lifted code ~6% of stacks), T031, T055 (hash memo gave no fps), T057 (already in the pin), T059 (pipelines 1.8 s total).
+- Main (7e79f3c+) verified after merging pi's T052/T056/T058 and opus's T029/T032: arena 130 s, 35.4 fps, car and HUD fine. The board has only T015 (blocked: multiplayer needs the user's permission). Next ideas: a real match (phase 8), the audio mixer thread at ~85% of a core in the arena (T029 finding), safe-area black border.
+
 ### 2026-10-21: FIFO prepared flips and exactly-once presents (T058, pi)
 
 Adapted MIT fork `6eb35c0` / `6cba82c`, preserving authorship, as
