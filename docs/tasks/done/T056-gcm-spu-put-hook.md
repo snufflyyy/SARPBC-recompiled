@@ -1,6 +1,6 @@
 # T056: SPU perf: the GCM pushbuffer hook walks 512 IO mappings on every SPU PUT
 
-Status: claimed
+Status: done
 Owner: pi
 Priority: 7
 Touches: patches/ps3recomp/T056-*.patch (libs/video/cellGcmSys.c: gcm_note_spu_put / gcm_ea2io_range and the IO-mapping add/remove sites only), docs/subsystems.md (SPU/SPURS, T032's subsection)
@@ -32,3 +32,5 @@ numbers in docs/subsystems.md, patch applies in the stack.
 - 2026-10-21 15:40 pi: claimed
 - 2026-10-21 15:51 pi: Root cause confirmed: gcm_ea2io_range scans 512 slots on every miss although the mixer never maps most of them. Implemented atomic allocation high-water mark, never active-count shortcut: grows before find_free_mapping returns; unmaps/reuse cannot shrink it; only real table-clear paths reset; direct Init slot 0 publishes one. Oracle test covers 50k random lookups, holes/count reset, full table, wrapping ends, SPU block coalescing/rejection. Baseline 2 efficiency assertions fail; optimized all pass including ASan/UBSan. Synthetic miss 8 slots: 188.91 -> 7.31 ns/call. Benchmarking actual hook delivery next; no DMA/coherency edits.
 - 2026-10-21 16:06 pi: Actual sampled hook latency in two 130 s arena runs: baseline ~257 ns; high-water alone ~33.5 ns. Added an 8-byte monotonic 64 MiB-region EA bitmap for constant-time rejection of unmapped mixer regions; published at every map-add path and reset only with the whole table. Unmaps conservatively retain bits (no false negatives or generation/slot-count assumptions). New oracle includes region boundaries, whole-address ranges and overflow; sanitizer clean. Region-cache actual-game benchmark running.
+- 2026-10-21 16:27 pi: Merged/pushed as0069 in main b212810. Actual full spu_wrch(MFC_Cmd) PUT timing at105-125s:233.16ns,10864 samples/26822176 bytes, ~7% above older hook-skipped218ns reference (not remeasured). 300s normal release returns menu;100-script gate96pass/4skip. Main rebuild+60s smoke before closure.
+- 2026-10-21 16:29 pi: DONE: DONE: generic two-word metadata cache as0069 main b212810 pushed; holes/reuse/count-reset/512slots/range-overflow+50k oracle tests,ASan/UBSan,100-script gate96pass4skip. Actual hook257->21.6ns; full PUT at105-125s233.16ns/10864 samples, ~7% above older skipped218ns reference. No hooks disabled/generated edits. Ordinary300s round-end+rebuilt-main60s smoke pass (unresolved0,noNULL/SIGSEGV).

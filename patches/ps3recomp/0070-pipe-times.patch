@@ -1,0 +1,43 @@
+From 2eefa09c503dce8878126f3e44bb5a19837cbac6 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Wed, 21 Oct 2026 18:03:36 +0000
+Subject: [PATCH] rsx engine: RSX_ENGINE_PIPE_TIMES logs what each new pipeline
+ costs on the walker
+
+---
+ libs/video/rsx_draw_engine.c | 17 ++++++++++++++++-
+ 1 file changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 1490688..c002af7 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -1799,9 +1799,24 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+                                              rs->alpha_func) < 0)
+             fi = -1;
+     }
+-    if (vi > 0 && fi > 0)
++    if (vi > 0 && fi > 0) {
++        /* RSX_ENGINE_PIPE_TIMES=1: what each new pipeline costs on the walker
++         * (the backend's translate + compile), and a running total. */
++        static int times = -1;
++        if (times < 0) times = getenv("RSX_ENGINE_PIPE_TIMES") != NULL;
++        struct timespec t0, t1;
++        if (times) clock_gettime(CLOCK_MONOTONIC, &t0);
+         handle = g.be->pipeline_create(g.be->user, s_vs_hlsl, s_ps_hlsl, rs,
+                                        layout, layout->stride, rt_fmt, rt_count);
++        if (times) {
++            static double total_ms; static unsigned n;
++            clock_gettime(CLOCK_MONOTONIC, &t1);
++            const double ms = (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
++            total_ms += ms; n++;
++            fprintf(stderr, "[pipe-time] frame %u pipe %u %.1f ms (total %.0f ms over %u)\n",
++                    g.frames, handle, ms, total_ms, n);
++        }
++    }
+     const u64 fp_hash = fixed ? 0 : eng_fp_debug_hash(fp_uc, fp_size);
+     /* RSX_ENGINE_SHADER_DUMP=<existing dir>: each new pipeline's two programs
+      * as <dir>/pipe<handle>.vs.hlsl and .ps.hlsl, the handle being the one
+-- 
+2.47.3
+

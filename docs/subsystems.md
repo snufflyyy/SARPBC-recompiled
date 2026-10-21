@@ -1133,6 +1133,15 @@ T032 alone. No generated code was edited and no hooks were disabled for the
 new measurement. Evidence: `analysis/t056-dma-boot.log`,
 `analysis/boot_check/20261021-162115-1654613/run.log` in the pi worktree.
 
+### Pipeline build cost: async builds not worth it (T059, 2026-10-21)
+
+`RSX_ENGINE_PIPE_TIMES=1` (patch `pipe-times`) logs each new pipeline's translate + compile time on
+the walker. Arena run (130 s, 189 pipelines): **1.8 s in total**, 10 ms on average, 65 ms at most;
+the slow ones come in bursts at the loads (frames ~381 and ~2652: 30-65 ms each, the load screens
+hide them) and one 25 ms build during play. Drakengard 3's off-walker builds fixed 200-450 ms
+Metal compiles; Vulkan here is 10x cheaper, so the fork's async build and `VkPipelineCache` are not
+taken. Revisit if a later scene shows a hitch in `[pipe-time]`.
+
 ## Video (Bink)
 
 - BinkPS3 is statically linked game code; the three `BINKPS3_*.BIN` files are its RSX
