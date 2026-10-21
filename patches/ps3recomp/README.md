@@ -173,6 +173,7 @@ numbers:
 | `0068-spu-dma-put-fast-paths.patch` | T032: DMA PUT asks the reserved-line bitmap about its whole span at once (`spu_coh_span_reserved`), the POISON-DMA payload scan is opt-in (`SPU_POISON_DMA=1`), and the wedged-job repeat detector keeps its state per context in `mfc_engine` instead of shared statics. Bench (`bench_spu_dma.c`): PUT 1 KiB 167 -> 55 ns, 16 KiB 1961 -> 335 ns, lists 2.6x, 8-thread aggregate 3.7x; arena mixer thread DMA 84 -> 62 ms/s. Test: `tools/test_spu_dma_hotpath.py` (byte model + digest) | generic, offer upstream |
 | `0069-gcm-spu-put-lookup.patch` | T056: conservative atomic EA-region occupancy and allocation high-water mark reject unmapped SPU PUTs without scanning 512 IO slots; preserves sparse mappings and pushbuffer coalescing. 50k randomized oracle comparisons, boundary/full-table tests and ASan/UBSan; actual hook ~257 to ~21.6 ns in arena | generic, offer upstream |
 | `0070-pipe-times.patch` | T059: RSX_ENGINE_PIPE_TIMES per-pipeline build time diagnostic | generic diagnostic |
+| `0071-loader-toc-stubs.patch` | T005: ppu_loader splits linker TOC-switch stub runs into one function each (+ test) | generic, offer upstream |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `tools/export_patch.sh <slug> "<description>" ["<upstream status>"]` (next free number, the README row,
