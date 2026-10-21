@@ -1,7 +1,7 @@
 # T056: SPU perf: the GCM pushbuffer hook walks 512 IO mappings on every SPU PUT
 
-Status: open
-Owner: -
+Status: claimed
+Owner: pi
 Priority: 7
 Touches: patches/ps3recomp/T056-*.patch (libs/video/cellGcmSys.c: gcm_note_spu_put / gcm_ea2io_range and the IO-mapping add/remove sites only), docs/subsystems.md (SPU/SPURS, T032's subsection)
 Reads: docs/subsystems.md "MFC DMA fast paths (T032)", docs/tasks/*/T032*
@@ -29,3 +29,4 @@ PUT cost in the arena within ~10% of the hook-skipped figure (~218 ns), GCM test
 numbers in docs/subsystems.md, patch applies in the stack.
 
 ## Log
+- 2026-10-21 15:40 pi: claimed
