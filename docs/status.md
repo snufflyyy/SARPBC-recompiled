@@ -3,7 +3,16 @@
 Living document. Update "Resume here", the phase table and the log at the end of each
 work session. Newest log entry first. Use absolute dates.
 
-## Resume here (updated 2026-10-20)
+## Resume here (updated 2026-10-21)
+
+**Current assignments (user, 2026-10-21):** pi owns T052, the mini-game round-end
+crash. Its SPURS task-bit lifecycle fix (0060) passes both guarded and ordinary
+uninstrumented 300 s runs through results and back to the main menu. It is ready
+on `pi/work`; integration waits for Claude's uncommitted main-checkout
+`CMakeLists.txt` edit to be committed. Do not stash or overwrite that work.
+Claude owns the new audio (T053) and car-shadow
+(T054) reports and may work independently. Older audio/shadow verification below
+is historical, not evidence that those new reports are resolved.
 
 **User priorities (2026-10-20):** performance and stability, in that order of work: done so
 far, the pin bump (T043), the visual fixes (T051 and earlier), a steady 30+ fps (T040: Single
@@ -108,6 +117,25 @@ T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena
   POSIX boot scaffold gets this UE3 title to the menus on Linux.
 
 ## Log
+
+### 2026-10-21: round-end crash fix verified, integration pending (T052, pi)
+
+Patch 0060 makes both SPURS task-exit bitsets and PPU bitset read/modify/write
+coherent. Old shared bits could resurrect completed island tasks, creating extra
+queue completions; the PPU then consumed an older range count while a newer job
+rewrote its table. The malformed negative range caused the later NULL reads and
+MultiStream assert. Baseline: 11942 task creations but 11944 dispatches; ordinary
+fixed release: exactly 23405 creations/dispatches/returns. No title-specific
+scheduler policy or audio/NULL workaround was added.
+
+The ordinary Linux/Vulkan 01.09 build passes 300 s through Scavenger Failed and
+back to the main menu: pi `analysis/boot_check/20261021-025732-3095073/`, 4811
+zlib, 10939 flips, unresolved 0, no null-read/null-write/SIGSEGV, including exit.
+The guarded build independently passes another 300 s. Synthetic regression:
+419 checks, also ASan/UBSan; full gate: 97 scripts, 93 passed, 4 explicitly report
+skips, no failures/timeouts. See debugging.md for the failed exit-only experiment
+and the two-race proof. Source and docs are ready in `pi/work`; main integration
+is blocked by Claude's unrelated uncommitted `CMakeLists.txt` work.
 
 ### 2026-10-20: attribute-major vertex fetch (0056, claude)
 - `rsx_vertex_fetch_all` replaces the per-vertex `fetch_one` loop in the draw engine; byte-identical on 6000 random plans (test_vertex_fetch_plan). Arena 36-39 -> ~38 (small: the arena's next costs are texture hashing and the remap build). Optimization series total (01.09, this machine, 2026-10-20): Single Player 19.5 -> ~54 fps, arena ~30 -> ~38.

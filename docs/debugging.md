@@ -104,6 +104,75 @@ SIGABRT) now prints `[crash] ...`, the crashing thread's guest call chain and a 
 unchanged. `SARPBC_NO_CRASH_HANDLER=1` turns it off (use it under gdb if you want the raw
 signal). First user: T052, the round-end crash (`lr` pointed at the game's own assert path).
 
+### Round-end failure: stale SPURS completions (T052)
+
+A debugger stop at entry to `0x00B05D18` on 2026-10-21 found start index 15
+and count -15. Its caller `0x00B16C28` received range count 2 with boundary
+halfwords `[0x8000, 15, 0]` (mask bit 15 before comparing indices). Thus the
+second range runs backwards. This is not just a NULL object in a valid range.
+The helper reserves `count + 1` records of 112 bytes plus 20 bytes of overhead:
+`112 * -14 + 20 = -1548`, matching `r5=0xFFFFF9F4` in the original fault log.
+
+Before that call, the TOC slot at `0x01234828` still contains `0x01334680`,
+and OPD `0x012025A8` still contains code `0x000DC2DC`. Their later zero values
+and the MultiStream not-initialised assert are downstream evidence, not proof
+of an audio shutdown race. A conditional breakpoint on a negative `r5`, or
+native wrappers around producer `0x00B15B58` and consumer `0x00B05D18`, stop before
+invalid processing. Disable core dumps and terminate there; do not continue into
+corruption. Local evidence: pi worktree `analysis/t052-safe-gdb.log` and
+`analysis/boot_check/20261021-022632-2774499/run.log` (intentional exit 86).
+
+The native probe returned range count 2 with valid boundaries, then stopped at
+163.6 s when the table had become `[0x8000, 15, 0]`. Descriptor `0x01345180`
+reported one range. The log also contains unsolicited scheduler starts of an
+already-completed island task: lines 11044 and 58275 (`start task 1 ... after
+task 2 exited`). An extra queue completion lets the PPU consume an older count
+while the current SPU job still owns the output buffer. Counting actual island
+ELF submissions (`0x011E3300`) against async dispatches confirms the duplicate:
+
+| Private probe | PPU CreateTask calls | Async dispatches | Result |
+|---|---:|---:|---|
+| Baseline (`20261021-022632-2774499`) | 11942 | 11944 | safe stop before invalid range |
+| Exit fix only (`20261021-023658-2887820`) | 11939 | 11941 | same safe stop |
+| Both boundaries (`20261021-024629-2973417`) | 23300 | 23300 | guarded results and main menu, 300 s |
+| Ordinary release (`20261021-025732-3095073`) | 23405 | 23405 | uninstrumented results and main menu, 300 s |
+
+Two independent shared-bitset boundaries allowed this:
+
+- `spu_taskset_task_exited` clears guest ready/pending/enabled bytes without the
+  SPU lock-line lock or reservation invalidation. A peer's pre-exit GETLLAR can
+  PUTLLC those old bits back after the host running bit has been cleared.
+- `spurs_bitset_set/clear` use a separate `vm_read32` and `vm_write32`. Making
+  the store coherent does not serialize that read/modify/write: a concurrent
+  publisher can restore a completed peer's bit from its earlier read.
+
+**Do not keep only the exit fix.** It passes the reservation regression
+(159/159), but the guarded game still stops at 163.4 s with the same malformed
+range (`analysis/boot_check/20261021-023658-2887820/`). A deterministic publication
+interleaving test fails for all 128 task bits, both set and clear (256 failures).
+Patch `0060-spurs-coherent-taskset-lifecycle.patch` locks both boundaries,
+invalidates SPU reservations, preserves BE layout/write-watch/PPU-reservation
+hooks, and dispatches only after releasing the guest lock. No job-order or
+max-contention policy, NULL guard, or audio workaround is added. All 419 synthetic
+checks pass, also under ASan/UBSan. The full gate reports 93 passed, 4 explicit
+skips, no failures (97 scripts, including the nested SDL/Vulkan suites).
+
+The guarded 300 s Linux/Vulkan run reaches **Scavenger Failed**, then returns
+to the main menu: `analysis/boot_check/20261021-024629-2973417/`, 4811 zlib
+requests, 10350 flips, unresolved 0. No scheduler resurrection or diagnostic
+stop occurs. `STALLED ... (frames still presented)` near the end is the
+resource/log-shape heuristic, not a frozen menu. Results and menu captures are
+`analysis/t052-fixed2-at-results.png` and `analysis/t052-fixed2-after-navigation.png`.
+
+The ordinary `./build.sh` release also passes an **uninstrumented 300 s run**:
+`analysis/boot_check/20261021-025732-3095073/`, 4811 zlib requests, 10939 flips,
+unresolved 0, no null-read/null-write alerts or SIGSEGV, including teardown.
+Island tasks match exactly (23405 created/dispatched/returned), as does the
+second PhysX image (30508 each). There are no unsolicited scheduler starts.
+`analysis/t052-release-{arena,results,menu}.png` capture the arena, the game-over
+confirmation, and the returned main menu. These are Linux/Vulkan 01.09 checks,
+not Windows/macOS, 01.02, audio-quality, or frame-rate improvement claims.
+
 **Count what a log line hides.** Several runtime messages print only their first few
 occurrences: `[edgezlib] #n` shows requests 0–3 only (the total is in the atexit
 `[edgezlib] N requests` line, which a TERM kill skips), and `[null-read]` stops after a
