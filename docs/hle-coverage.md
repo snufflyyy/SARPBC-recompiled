@@ -39,10 +39,11 @@ build regenerates the table). `--format json` gives the same data as JSON.
    `cell*/sce*/sys*` function defined in `libs/**/*.c`, NID computed from its C name.
    The adapter passes r3..r10 raw, so a function only matches an import if the C name
    **is** the SDK name.
-4. **missing** — nothing registered: the dispatcher prints `[hle] unresolved NID 0x...`
-   (only the first 40 distinct ones) and returns r3 = 0, leaving out-params untouched.
-   Note `ps3_hle_unresolved()` with `PS3_HLE_UNRESOLVED=fail` exists in that file but is
-   **never called** (dead code), so the variable documented in debugging.md does nothing.
+4. **missing** — nothing registered: the dispatcher calls `ps3_hle_unresolved()` (T020, patch
+   0058): it prints `[hle] UNRESOLVED NID 0x... -> faking CELL_OK (... first call from lr=0x..,
+   tid=N)` once per distinct NID (thread-safe, no cap below 512 distinct) and returns r3 = 0,
+   leaving out-params untouched. `PS3_HLE_UNRESOLVED=fail` returns CELL_ERROR_ERROR
+   (0x8001003F) instead, to find which unresolved import the title depends on.
 
 `online` (with `--online`): sys_net handlers that only exist with `PS3_NET_ONLINE` set
 (`libs/network/sysNet.c`, registered before the offline model, so they win).

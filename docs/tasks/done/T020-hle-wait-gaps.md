@@ -1,7 +1,7 @@
 # T020: HLE gaps that can cause infinite waits (dialogs, music, voice, unresolved reporting)
 
-Status: open
-Owner: -
+Status: done
+Owner: claude
 Priority: 15
 Touches: patches/ps3recomp/T020-*.patch (libs/system/cellMsgDialog*, libs/misc/cellMusic*, libs/audio/cellVoice*, runtime/ppu/ppu_hle.cpp unresolved reporting, libs/misc/cellVideoExport*/cellVideoUpload*/cellGameRecording* names), docs/hle-coverage.md
 Reads: docs/hle-coverage.md (T004's ranked gaps), analysis/imports_named.json (both versions)
@@ -28,3 +28,6 @@ All five done or precisely documented; patches exported; docs/hle-coverage.md up
 - 2026-10-19 00:03 agent-hlegaps: cellVoice verified on 01.09 (own build-0109 + scratch vfs copy, boot_check 60s): InitEx(eventMask=0x0, version=100, appType=0x20000000), CreateNotifyEventQueue -> id=6 key=0x8000564F00000001, SetNotifyEventQueue(source=0x3039), StartEx() all resolved at 4.1s; unresolved now only 0x91066667 cellSpursQueuePopBody (T019); the stall is SPURS EventFlagWait + flashMP3.pic (T019/T007), not voice. Patch T020-2 exported (commit on branch).
 - 2026-10-19 00:06 agent-hlegaps: HANDOFF: done=items 1,2,3,5 as patches T020-1 (cellMsgDialogOpenErrorCode), T020-2 (cellVoice InitEx/StartEx/Create+Set+RemoveNotifyEventQueue, real lv2 queue, SERVICE_ATTACHED 8/DETACHED 0x10, GetPortInfo fix), T020-3 (new libs/misc/cellMusic.c: all 13 01.09+01.02 cellMusicUtility imports, results via sysutil callback), T020-4 (cellRec/cellVideoExport/cellVideoUpload SDK names in cellGameRecording.c/cellVideoExport.c/cellVideoUpload.c); 6 unit tests pass on Linux (incl. 3 new + 1 new voice); all 12 patches apply from the pin. Verified voice on 01.09 boot (own build-0109, scratch vfs): InitEx/Create/Set/StartEx resolved at 4.1s, unresolved only cellSpursQueuePopBody. state=item 4 (ppu_hle.cpp unresolved reporting) NOT started; docs/hle-coverage.md NOT updated; music/rec/export not boot-verified (user-triggered paths). Dod3 fork has nothing to port for these. next=(1) ppu_hle.cpp: replace the 'logged<40' print with ps3_hle_unresolved(nid, ctx) (it sets r3; drop the final ctx->gpr[3]=0; add lr to the first report; make its seen-table thread-safe), commit, export T020-5; (2) regen docs/hle-coverage.md with tools/hle_coverage.py --set 01.09 ... regen (36 missing should drop by 20: msgdialog 1, voice 4, music 7, rec 5, export 3, upload 1); (3) coordinator: debugging.md PS3_HLE_UNRESOLVED note, upstream docs (MODULES_REFERENCE/MODULE_STATUS) still name cellGameRecording*. branch=worktree-agent-a9a32fe5a64dad8ef
 - 2026-10-19 00:06 agent-hlegaps: RELEASED: paused for usage; see HANDOFF note
+- 2026-10-21 01:53 claude: claimed
+- 2026-10-21 01:53 claude: item 4 done as patch 0058 (ps3_hle_unresolved is the real path: one report per NID with lr/tid, thread-safe, PS3_HLE_UNRESOLVED=fail works, tools/boot_report.py regex accepts the UPPERCASE report; test tools/test_hle_unresolved.py). Items 1,2,3,5 were done earlier by agent-hlegaps. docs/hle-coverage.md prose updated; the generated tables are NOT regenerated (its inputs analysis/milestone_*.txt and versions/0109/src/recomp/ppu_hle_nids.cpp no longer exist locally; regenerate when a boot can produce them).
+- 2026-10-21 01:53 claude: DONE: 

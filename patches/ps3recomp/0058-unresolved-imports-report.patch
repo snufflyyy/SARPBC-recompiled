@@ -1,0 +1,200 @@
+From 989a759391f745d312062b36c053ea537920c1b3 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Wed, 21 Oct 2026 01:52:54 +0000
+Subject: [PATCH] hle: unresolved imports go through ps3_hle_unresolved (once
+ per NID, with lr; PS3_HLE_UNRESOLVED=fail works)
+
+The dispatcher printed the first 40 unresolved NIDs and returned r3 = 0, and the
+reporting function with the PS3_HLE_UNRESOLVED=fail mode was never called. It is now
+the path every unresolved import takes: one report per NID (any count, up to 512
+distinct), with the first caller's lr and thread, a thread-safe seen table, and fail
+mode returning CELL_ERROR_ERROR. test_hle_unresolved: 8 threads, 3 NIDs, both modes.
+---
+ runtime/ppu/ppu_hle.cpp                   | 25 +++++-----
+ runtime/ppu/tests/test_hle_unresolved.cpp | 57 +++++++++++++++++++++++
+ tools/test_hle_unresolved.py              | 49 +++++++++++++++++++
+ 3 files changed, 120 insertions(+), 11 deletions(-)
+ create mode 100644 runtime/ppu/tests/test_hle_unresolved.cpp
+ create mode 100755 tools/test_hle_unresolved.py
+
+diff --git a/runtime/ppu/ppu_hle.cpp b/runtime/ppu/ppu_hle.cpp
+index d9ce0c3..f92aa79 100644
+--- a/runtime/ppu/ppu_hle.cpp
++++ b/runtime/ppu/ppu_hle.cpp
+@@ -21,6 +21,7 @@
+ #include "ps3emu/nid.h"   /* ps3_nid_table, ps3_nid_entry */
+ #include "ps3emu/milestone.h" /* ps3_msf -- boot milestone log */
+ #include <stdlib.h>       /* getenv */
++#include <mutex>
+ #include <stdint.h>
+ #include <stdio.h>
+ #include <stdlib.h>       /* getenv, atoi (boot trace) */
+@@ -163,17 +164,21 @@ static void ps3_hle_unresolved(uint32_t nid, ppu_context* ctx)
+     static uint32_t seen[512];
+     static uint32_t hits[512];
+     static uint32_t n_seen = 0;
+-    uint32_t i = 0;
+-    for (; i < n_seen; i++) if (seen[i] == nid) break;
+-    if (i == n_seen && n_seen < 512) { seen[n_seen] = nid; hits[n_seen] = 0; n_seen++; }
+-    uint32_t count = (i < 512) ? ++hits[i] : 0;
+-    (void)count;
++    static std::mutex mu;   /* guest threads reach here concurrently */
++    uint32_t count = 0;
++    {
++        std::lock_guard<std::mutex> lk(mu);
++        uint32_t i = 0;
++        for (; i < n_seen; i++) if (seen[i] == nid) break;
++        if (i == n_seen && n_seen < 512) { seen[n_seen] = nid; hits[n_seen] = 0; n_seen++; }
++        count = (i < n_seen) ? ++hits[i] : 0;   /* table full: not counted, never reported */
++    }
+     if (count == 1)
+         fprintf(stderr, "[hle] UNRESOLVED NID 0x%08X -> faking %s "
+-                        "(unregistered import%s)\n",
++                        "(unregistered import%s; first call from lr=0x%08X, tid=%llu)\n",
+                 nid, s_fake ? "CELL_OK" : "CELL_ERROR_ERROR",
+-                s_fake ? "; PS3_HLE_UNRESOLVED=fail to find load-bearing ones"
+-                       : "");
++                s_fake ? "; PS3_HLE_UNRESOLVED=fail to find load-bearing ones" : "",
++                (unsigned)ctx->lr, (unsigned long long)ctx->thread_id);
+ 
+     ctx->gpr[3] = s_fake ? 0u : (uint64_t)(uint32_t)CELL_ERROR_ERROR;
+ }
+@@ -659,8 +664,6 @@ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
+                 fprintf(stderr, "[TUNERFIX] sysPrxForUser 0xE0998DBF -> 0x8001112E (profiler not loaded)\n");
+             return;
+         }
+-        static int logged = 0;
+-        if (logged < 40) { fprintf(stderr, "[hle] unresolved NID 0x%08X\n", nid); logged++; }
+         /* cellSaveData call-shape capture: dump r3-r10 + resolve r7/r8 as OPD
+          * callbacks (statCallback/fileCallback) to learn the cellSaveDataAutoLoad2
+          * protocol so it can be implemented. */
+@@ -707,7 +710,7 @@ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
+               ctx->gpr[3] = 0x80010002u; /* generic failure (net unavailable) */
+               return;
+           } } }
+-        ctx->gpr[3] = 0;   /* CELL_OK-ish so the game keeps going */
++        ps3_hle_unresolved(nid, ctx);   /* reports each NID once; r3 = CELL_OK, or an error with PS3_HLE_UNRESOLVED=fail */
+         return;
+     }
+     g_last_hle_name = e->name;
+diff --git a/runtime/ppu/tests/test_hle_unresolved.cpp b/runtime/ppu/tests/test_hle_unresolved.cpp
+new file mode 100644
+index 0000000..52fa634
+--- /dev/null
++++ b/runtime/ppu/tests/test_hle_unresolved.cpp
+@@ -0,0 +1,57 @@
++/*
++ * An import nothing handles: ps3_hle_call fakes r3 and reports each NID once.
++ *
++ * Run by tools/test_hle_unresolved.py, which builds this with runtime/ppu/ppu_hle.cpp and runs
++ * it twice: default (r3 = CELL_OK) and PS3_HLE_UNRESOLVED=fail (r3 = CELL_ERROR_ERROR). Argument
++ * 1 is the r3 the run must see. 8 threads hit 3 distinct NIDs 200 times each; stderr must hold
++ * exactly one "[hle] UNRESOLVED NID 0x........ " line per NID, with the caller's lr.
++ */
++#include "ppu_recomp.h"
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <thread>
++#include <vector>
++
++extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx);
++// Called on the unresolved path before the fake; the rest of the dispatcher's externs are
++// never reached here and stay unresolved (see the Python wrapper's link flags).
++extern "C" void ps3_msf(const char*, ...) {}
++extern "C" void ppu_prof_stamp(void*, unsigned) {}
++extern "C" uint32_t ppu_prof_resolve_host(void*) { return 0; }
++// The dispatcher spills r2 to [r1+0x28] before looking for a handler: a small real arena.
++extern "C" uint8_t* vm_base;
++extern "C" int vm_inline_ok;
++extern "C" uint32_t ppu_vm_size;
++uint8_t* vm_base = (uint8_t*)calloc(1, 0x100000);
++int vm_inline_ok = 1;
++uint32_t ppu_vm_size = 0;
++extern "C" void vm_write64(uint64_t, uint64_t) {}   // the r2 spill
++extern "C" uint32_t prx_resolve_export(uint32_t) { return 0; }   // no loaded PRX exports anything
++
++int main(int argc, char** argv)
++{
++    const uint64_t want = argc > 1 ? strtoull(argv[1], nullptr, 0) : 0;
++    std::vector<std::thread> ts;
++    std::vector<int> bad(8, 0);
++    for (int t = 0; t < 8; t++)
++        ts.emplace_back([&, t] {
++            for (int i = 0; i < 200; i++) {
++                ppu_context ctx;
++                memset(&ctx, 0, sizeof ctx);
++                ctx.gpr[3] = 999;
++                ctx.gpr[1] = 0x20000;
++                ctx.lr = 0x00123450u + (uint32_t)t;
++                ctx.thread_id = (uint64_t)t + 1;
++                ps3_hle_call(0xDEAD0000u + (uint32_t)(i % 3), &ctx);
++                if (ctx.gpr[3] != want) bad[t]++;
++            }
++        });
++    for (auto& t : ts) t.join();
++    int fails = 0;
++    for (int b : bad) fails += b;
++    printf("%s: %d call(s) returned the wrong r3 (wanted 0x%llX)\n", fails ? "FAIL" : "PASS", fails,
++           (unsigned long long)want);
++    return fails ? 1 : 0;
++}
+diff --git a/tools/test_hle_unresolved.py b/tools/test_hle_unresolved.py
+new file mode 100755
+index 0000000..44bfd40
+--- /dev/null
++++ b/tools/test_hle_unresolved.py
+@@ -0,0 +1,49 @@
++#!/usr/bin/env python3
++"""Unresolved HLE imports: fake r3 (or fail with PS3_HLE_UNRESOLVED=fail), one report per NID.
++
++Builds runtime/ppu/ppu_hle.cpp with runtime/ppu/tests/test_hle_unresolved.cpp (every symbol the
++dispatcher needs for real handlers is left unresolved: this path never reaches them) and runs it in
++both modes with 8 threads hitting 3 unknown NIDs.
++"""
++import os
++import re
++import subprocess
++import sys
++import tempfile
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++from check_ppu_scaffold import stub_header  # noqa: E402
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++def main():
++    if os.name == 'nt' or sys.platform == 'darwin':
++        print('SKIP: standalone fixture uses the Linux linker')
++        return
++    with tempfile.TemporaryDirectory(prefix='hle-unresolved-') as tmp:
++        tmp = Path(tmp)
++        (tmp / 'ppu_recomp.h').write_text(stub_header())
++        binary = tmp / 'test'
++        subprocess.run([os.environ.get('CXX', 'c++'), '-std=c++17', '-O1', '-w',
++                        '-I' + str(tmp), '-I' + str(ROOT / 'include'), '-I' + str(ROOT / 'runtime/platform'),
++                        str(ROOT / 'runtime/ppu/ppu_hle.cpp'),
++                        str(ROOT / 'runtime/ppu/tests/test_hle_unresolved.cpp'),
++                        '-no-pie', '-Wl,--unresolved-symbols=ignore-all', '-pthread', '-ldl', '-o', str(binary)], check=True)
++        base = {k: v for k, v in os.environ.items() if not k.startswith(('PPU_', 'PS3_', 'PS3RECOMP_', 'SPU_'))}
++        for mode, env_extra, want in (('ok', {}, '0'), ('fail', {'PS3_HLE_UNRESOLVED': 'fail'}, '0x8001003F')):
++            r = subprocess.run([str(binary), want], env={**base, **env_extra}, capture_output=True, text=True, timeout=60)
++            print(f'[{mode}]', r.stdout.strip())
++            if r.returncode != 0:
++                print(r.stderr[-2000:])
++                sys.exit(f'FAIL: {mode} mode')
++            lines = re.findall(r'^\[hle\] UNRESOLVED NID (0x[0-9A-F]{8}) .*lr=0x[0-9A-F]{8}', r.stderr, re.M)
++            if sorted(lines) != ['0xDEAD0000', '0xDEAD0001', '0xDEAD0002']:
++                print(r.stderr[-2000:])
++                sys.exit(f'FAIL: {mode} mode reported {lines}, wanted each NID once')
++    print('PASS: unresolved imports fake or fail r3 and report each NID once')
++
++
++if __name__ == '__main__':
++    main()
+-- 
+2.47.3
+
