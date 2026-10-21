@@ -1,7 +1,7 @@
 # T011: Keep the port compile-clean for the future Windows (D3D12) build
 
-Status: open
-Owner: -
+Status: done
+Owner: claude
 Priority: 23
 Touches: src/main.cpp (#ifdef _WIN32 regions only), CMakeLists.txt (WIN32 branches only), docs/build-windows.md (new)
 Reads: external/ps3recomp/tools/check_ppu_scaffold.py, external/ps3recomp/docs/BUILDING.md
@@ -20,3 +20,6 @@ A documented compile check (or a precise reason one cannot run here) and no Linu
 code outside #ifdef in our sources.
 
 ## Log
+- 2026-10-21 02:01 claude: claimed
+- 2026-10-21 02:01 claude: docs/build-windows.md: reading audit of src/ for POSIX use outside #ifdef (none found), needs list, verified/untested split. No compile possible here (no Windows SDK headers or mingw sysroot; not installing one unasked).
+- 2026-10-21 02:01 claude: DONE: 
