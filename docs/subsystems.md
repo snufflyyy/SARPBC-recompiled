@@ -98,6 +98,12 @@ work. Update the **Status** line of a section when you change it.
   another flip. The legacy optional early callback stays on that successful PPU ack for
   park release, never on the locked GPU drain. `GCM_PREPARE_FLIPS_NOW` is removed; the
   current implementation and validation are in docs/dod3-reuse.md, item 5.
+  The native clock's post-drain counter fallback must also require and consume
+  the existing pending-frame flag: leaving it set presents again next iteration;
+  ignoring a failed claim presents ordinary queued markers before execution.
+  `tools/test_frame_clock.py` compiles the real loop with deterministic hooks:
+  fourteen uncapped/capped cases cover exact presentation counts, queued markers,
+  catch-up ticks and the pre-first-flip fallback. No new backend policy or cap.
 - **Flip handler `func_000DC144` (01.09).** Bumps a counter at `0x01295428`; if the pending
   count at `0x01295460` is non-zero it decrements it, takes the park slot from a 2-entry table
   at `0x01295430` (index `0x01295458`, toggled each time; it waits for the slot with

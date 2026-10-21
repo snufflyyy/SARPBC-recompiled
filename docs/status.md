@@ -5,21 +5,28 @@ work session. Newest log entry first. Use absolute dates.
 
 ## Resume here (updated 2026-10-21)
 
-**Current work (user, 2026-10-21):** pi has merged Claude's GitHub audio fixes
-(`c9d339d`, T053) into `pi/work` with the T052 round-end fix. The combined build
-passes 300 s through results and back to the menu; two steady 40 s audio captures
-have no silent blocks, gaps or block-edge clicks. The user confirms the audio
-sounds good. Audio patches remain 0060–0062; the lifecycle repair is provisional
-`0067-coherent-taskset-lifecycle.patch`, numbered by the merge helper.
-Pi is finishing the remaining queue at the user's request after Claude exhausted
-usage. T052 now also passes 300 s with the latest shadow/profiler/port work
-(`53e852f`): 4810 zlib, 11062 flips, unresolved 0, returned main menu, no
-null-read/null-write/SIGSEGV. T032/T056 are now combined and verified: 100-script gate, ordinary 300 s through
-round end/results/menu, and full DMA PUT cost 233 ns (~7% above the earlier
-hook-skipped 218 ns reference). Pi preserved opus-2's authored patch and clean
-worktree. T058 prepared-flip ordering is implemented and synthetic/sanitizer
-tests pass in both callback modes; game verification is running. Then T009/T005
-lifter work and T059 pipeline caching (claim safely transferred from Claude).
+**Current work (user, 2026-10-21):** T058 is verified; pi is integrating it,
+then stopping at the user's request. Prepared flips execute at their FIFO
+position; the native clock claims each completed-frame flag once, rather than
+count queued requests or present a pending marker twice. Both callback modes,
+fourteen native-clock cases and ASan/UBSan pass. Final 300 s: results then main
+menu, 4811 zlib, 12935 acknowledged flips, unresolved 0, no null-access alerts
+or SIGSEGV; sampled menu/arena/results captures are intact.
+
+T052 round-end repair and Claude's T053 audio work are integrated and verified
+through results and back to the menu; the user confirms the audio sounds good.
+Audio patches remain 0060–0062, lifecycle repair 0067. T032/T056 are also done:
+ordinary 300 s through results/menu, full DMA PUT cost 233 ns (~7% above the
+historical hook-skipped 218 ns reference). Opus-2's authored patch and clean
+worktree were preserved.
+
+Claude completed T005's loader fix (`0071-loader-toc-stubs.patch`), matching the
+01.02 workaround exactly and leaving 01.09 unchanged. T009 is closed without a
+lifter port: PPU code was ~6% of sampled CPU stacks, and the fork's inline-store
+gate raises coherence concerns. T059 has a measured diagnostic, not a cache port:
+`0070-pipe-times.patch`, 189 arena pipelines / 1.8 s total / 65 ms maximum, mostly
+hidden by load screens. See subsystems.md "Pipeline build cost" before adding
+async builds or `VkPipelineCache`.
 
 **User priorities (2026-10-20):** performance and stability, in that order of work: done so
 far, the pin bump (T043), the visual fixes (T051 and earlier), a steady 30+ fps (T040: Single
@@ -78,11 +85,11 @@ X11 override; `SDL_VIDEODRIVER=wayland ./run.sh` explicitly selects Wayland. A
 45-second window test presented 3,581 guest frames without a headless fallback;
 this is not a main-menu FPS measurement. See build-linux.md "Desktop launch".
 
-**Queue:** the board's `Priority:` lines (`tools/task.sh next`): **T032/T055 (SPU
-DMA, job hash), T034 (callback stacks), then T020, T017, T021, T012, T009,
-T018, T005, T010, T011, T013, T014. T015 (multiplayer) is **blocked** until the user has permission.
-T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena: a real match
-(phase 8: an exhibition with input over time, audio in the arena, frame rate there).
+**Queue:** use the live board (`tools/task.sh next`). T058 is ready to close;
+T059 has a measured non-port assessment in subsystems.md, with a handoff before
+pi stops. T005 is done and T009 closed without a port. T015 (multiplayer) remains
+**blocked** until the user has permission. Phase 8 still needs a real exhibition
+match with input over time, arena audio and frame-rate measurement.
 
 ## Phases
 
@@ -125,6 +132,26 @@ T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena
   POSIX boot scaffold gets this UE3 title to the menus on Linux.
 
 ## Log
+
+### 2026-10-21: FIFO prepared flips and exactly-once presents (T058, pi)
+
+Adapted MIT fork `6eb35c0` / `6cba82c`, preserving authorship, as
+`T058-flip-at-fifo-position.patch`. Marker/cursor execution records the flip;
+Immediate acknowledges once and retains the optional PPU-side park callback.
+No guest callbacks from the locked drain, no new backend policy or frame cap.
+The native clock also requires and consumes its completed-frame flag after a
+drain: request counts alone can present early, and leaving the flag set presents
+again. Fourteen deterministic native-clock cases plus FIFO/ack/position/resync
+checks pass, including both callback modes and ASan/UBSan. Full gate: 102 scripts,
+98 passed / 4 explicit skips / 0 failures/timeouts.
+
+Final source `f693403`, pi `analysis/boot_check/20261021-195941-1970586/`, 300 s:
+results then main menu at 205.2 s, 4811 zlib, 12935 acknowledged flips, unresolved
+0, no null-read/null-write/SIGSEGV. Sampled logos/menu/arena/HUD/shadow/results
+are intact. The unfixed clock accumulated thousands of duplicate presents;
+the final steady span has 10620 presents / 10621 acks (one in flight), not an
+accumulating excess. No FPS gain claimed. Latest-main diagnostic/loader work
+and the T009 measured non-port decision were merged normally, not overwritten.
 
 ### 2026-10-21: DMA/GCM optimizations combined and verified (T032/T056, pi)
 
