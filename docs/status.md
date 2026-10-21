@@ -14,9 +14,11 @@ sounds good. Audio patches remain 0060–0062; the lifecycle repair is provision
 Pi is finishing the remaining queue at the user's request after Claude exhausted
 usage. T052 now also passes 300 s with the latest shadow/profiler/port work
 (`53e852f`): 4810 zlib, 11062 flips, unresolved 0, returned main menu, no
-null-read/null-write/SIGSEGV. T056's GCM hook cache passes oracle/sanitizer tests and actual-game timing
-(~257 to ~21.6 ns); combined with opus-2's verified T032 DMA work. Final release validation is next.
-T058, T009, T005 and interrupted T059 remain. Other agents' files stay untouched.
+null-read/null-write/SIGSEGV. T032/T056 are now combined and verified: 100-script gate, ordinary 300 s through
+round end/results/menu, and full DMA PUT cost 233 ns (~7% above the earlier
+hook-skipped 218 ns reference). Pi preserved opus-2's authored patch and clean
+worktree. Next: T058 prepared-flip ordering, T009/T005 lifter work, then T059
+pipeline caching (interrupted claim safely transferred from Claude).
 
 **User priorities (2026-10-20):** performance and stability, in that order of work: done so
 far, the pin bump (T043), the visual fixes (T051 and earlier), a steady 30+ fps (T040: Single
@@ -122,6 +124,20 @@ T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena
   POSIX boot scaffold gets this UE3 title to the menus on Linux.
 
 ## Log
+
+### 2026-10-21: DMA/GCM optimizations combined and verified (T032/T056, pi)
+
+Merged opus-2's clean, verified `e79f8e0` normally; no changes to that worktree or
+its DMA implementation. Added a conservative GCM EA-region mask and mapping
+allocation high-water mark. All 100 scripts: 96 passed, 4 explicit skips. The
+ordinary `f66a315` release completed 300 s through round end/results/menu (4810
+zlib, 10904 flips, unresolved 0, no null-access alerts/SIGSEGV).
+
+Actual sampled GCM hook: ~257 to ~21.6 ns. Separate full-DMA native-boundary
+probe, arena seconds 105–125: **233.16 ns/PUT**, 10,864 samples, versus T032's
+517 ns before T056. This is ~7% above the earlier hook-disabled 218 ns
+reference, not a new reference measurement. No FPS improvement claimed.
+See docs/subsystems.md "Unmapped SPU PUT lookup" for method and evidence.
 
 ### 2026-10-21: round-end repair integrated with latest main (T052, pi)
 

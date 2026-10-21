@@ -1122,7 +1122,16 @@ migrated CPUs or exceeded 50,000 cycles were excluded; empty clock overhead was
 subtracted. At T032's ~65k PUT/s this saves about 15 ms of CPU per second, not a
 measured FPS gain. Evidence: pi worktree `analysis/t056-*-boot2.log` and
 `analysis/t056-regions-boot.log`; the latter reached the arena, 3721 zlib, 4488
-flips, unresolved 0. All 99 discovered tests: 95 pass / 4 explicit skips.
+flips, unresolved 0. With T032 also integrated, an ordinary 300 s run returned
+from round end to the main menu (4810 zlib, 10904 flips, unresolved 0), without
+null-read/null-write/SIGSEGV. The full gate is 100 scripts: 96 pass / 4 explicit
+skips. A separate native `spu_wrch(MFC_Cmd)` timing wrapper, sampled during arena
+seconds 105–125, measured **233.16 ns/PUT** (10,864 samples, 26,822,176 sampled
+bytes). This is about 7% above T032's earlier hook-skipped reference of 218 ns;
+that reference was not remeasured. Current hook-enabled cost was 517 ns after
+T032 alone. No generated code was edited and no hooks were disabled for the
+new measurement. Evidence: `analysis/t056-dma-boot.log`,
+`analysis/boot_check/20261021-162115-1654613/run.log` in the pi worktree.
 
 ## Video (Bink)
 
