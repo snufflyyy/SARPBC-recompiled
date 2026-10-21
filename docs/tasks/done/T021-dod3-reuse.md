@@ -1,6 +1,6 @@
 # T021: Reuse Drakengard 3's port — inventory, then port the generic pieces
 
-Status: claimed
+Status: done
 Owner: claude
 Priority: 17
 Touches: docs/dod3-reuse.md (new), docs/reference-ports.md, patches/ps3recomp/T021-*.patch (runtime/** and libs/** pieces NOT owned by an active task: see "Exclusions"), src/overrides/dod3_*.cpp (new)
@@ -46,3 +46,4 @@ follow-up tasks are proposed.
 - 2026-10-21 14:03 claude: Ported Port-next #8 (DDX/DDY, NRM zero vector) as patch 0065 (author soyjxck kept, +3 checks in test_fp_decompiler: 77 pass); arena boot 130 s fine. #7: the cropped-depth half is already fixed by T054's 0064 (snapshot cropped to the sampling texture); scissored clears not needed (whole-target clear to 1.0 is a superset for the shadow map).
 - 2026-10-21 14:16 claude: Port-next #10 (aniso half) done: patch vulkan-anisotropic (idea from fork 66fd0a9, own Vulkan implementation). Arena capture sharper floors, fps 36.9, no speckle. Remaining open: #3 FIFO wake on usleep, #4 per-attribute vertex fetch, #5 prepared flips at FIFO position, #6 present pace, pipeline cache.
 - 2026-10-21 14:29 claude: Frame cap: SARPBC_FPS_CAP opt-in limiter added (drain-thread wait at guest flip), default OFF after user asked for fidelity and no source confirms a 30 fps cap (COALESCED.INI: smoothing 22-60, vsync). Cap 30 measured 27.6 fps in arena, uncapped 34.1. docs/frame-pacing.md.
+- 2026-10-21 14:30 claude: DONE: Inventory (docs/dod3-reuse.md) complete; ported: alpha-ref float (0048), zero vertex stride (0049), fp DDX/DDY/NRM (0065), Vulkan aniso (0066), depth snapshot crop (0064, own). Follow-ups filed: T057 vertex fetch, T058 flips at FIFO position, T059 pipeline cache; present pace covered by frame-pacing.md (cap opt-in).
