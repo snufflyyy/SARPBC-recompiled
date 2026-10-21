@@ -1,0 +1,79 @@
+From ea8f75082ca7e32cd44365b7f369ac5f99c385ec Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Wed, 21 Oct 2026 03:35:56 +0000
+Subject: [PATCH] sys_timer_usleep: PS3_USLEEP_SCALE=<thread name>:<percent>
+ shortens a named PPU thread's sleeps
+
+A guest loop that naps a hardware-sized interval between rounds of work that now runs
+several times slower on the host spends most of its time napping. Off unless set.
+---
+ runtime/syscalls/sys_ppu_thread.c | 10 ++++++++++
+ runtime/syscalls/sys_timer.c      | 31 +++++++++++++++++++++++++++++++
+ 2 files changed, 41 insertions(+)
+
+diff --git a/runtime/syscalls/sys_ppu_thread.c b/runtime/syscalls/sys_ppu_thread.c
+index 6efa2d2..b3f2c40 100644
+--- a/runtime/syscalls/sys_ppu_thread.c
++++ b/runtime/syscalls/sys_ppu_thread.c
+@@ -413,6 +413,16 @@ int ppu_prof_snapshot(int idx, unsigned* tid, unsigned* cia, const char** name)
+     return 1;
+ }
+ 
++/* The name a PPU thread was created (or renamed) with, NULL for an unknown id.
++ * sys_timer_usleep reads it for PS3_USLEEP_SCALE. */
++const char* ppu_thread_name_for_id(uint64_t thread_id)
++{
++    if (thread_id == 1) return "main";
++    if (thread_id == 0 || thread_id > PPU_THREAD_MAX) return NULL;
++    const ppu_thread_info* t = &g_ppu_threads[thread_id - 1];
++    return t->state == PPU_THREAD_STATE_FREE ? NULL : t->name;
++}
++
+ /* Called from the lv2/HLE dispatchers with the guest ctx (== &info->ctx). */
+ void ppu_prof_stamp(void* vctx, unsigned lr)
+ {
+diff --git a/runtime/syscalls/sys_timer.c b/runtime/syscalls/sys_timer.c
+index 78b3e38..ce91a8a 100644
+--- a/runtime/syscalls/sys_timer.c
++++ b/runtime/syscalls/sys_timer.c
+@@ -216,6 +216,37 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+         extern void ppu_log_host_chain(const char*);
+         ppu_log_host_chain("usleep1ms"); } }
+ 
++    /* PS3_USLEEP_SCALE=<thread name>:<percent>[,<thread name>:<percent>...]
++     *
++     * Shorten (or stretch) the sleeps of the PPU threads with these names. A guest loop that
++     * pads each round with a sleep sized for hardware (a 5 ms nap between two audio blocks,
++     * where the SPU job takes 0.3 ms) falls behind its deadline once the work runs 10x slower
++     * on the host: the nap becomes the larger part of the round. 0 keeps only the yield. */
++    { static int s_n = -1; static char s_name[8][32]; static unsigned s_pct[8];
++      if (s_n < 0) {
++          s_n = 0;
++          const char* e = getenv("PS3_USLEEP_SCALE");
++          while (e && *e && s_n < 8) {
++              const char* colon = strchr(e, ':');
++              if (!colon) break;
++              const char* end = strchr(colon, ',');
++              size_t nl = (size_t)(colon - e);
++              if (nl && nl < sizeof s_name[0]) {
++                  memcpy(s_name[s_n], e, nl); s_name[s_n][nl] = 0;
++                  s_pct[s_n] = (unsigned)strtoul(colon + 1, 0, 10);
++                  s_n++;
++              }
++              if (!end) break;
++              e = end + 1;
++          }
++      }
++      if (s_n > 0) {
++          extern const char* ppu_thread_name_for_id(uint64_t thread_id);
++          const char* nm = ppu_thread_name_for_id(ctx->thread_id);
++          for (int i = 0; nm && i < s_n; i++)
++              if (!strcmp(nm, s_name[i])) { usec = usec * s_pct[i] / 100u; break; }
++      } }
++
+ #ifdef _WIN32
+     /* Use high-resolution sleep via waitable timer for better precision */
+     if (usec >= 1000) {
+-- 
+2.47.3
+

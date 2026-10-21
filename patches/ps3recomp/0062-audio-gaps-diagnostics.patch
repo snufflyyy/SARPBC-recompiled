@@ -1,0 +1,93 @@
+From cd22637644a70d9f87054b24d0cb43d698d8ec8e Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Wed, 21 Oct 2026 03:35:56 +0000
+Subject: [PATCH] cellAudio: AUDIO_GAPS ring-map log and PS3_FTRACE
+ silent-block instants
+
+AUDIO_GAPS=1 prints the port's ring (which blocks hold data, which one is being read) when a
+block is empty at read time. PS3_FTRACE records kind 15 for every silent block so audio gaps
+line up with the guest threads in the same timeline.
+---
+ include/ps3emu/ps3_ftrace.h |  1 +
+ libs/audio/cellAudio.c      | 32 ++++++++++++++++++++++++++++++++
+ 2 files changed, 33 insertions(+)
+
+diff --git a/include/ps3emu/ps3_ftrace.h b/include/ps3emu/ps3_ftrace.h
+index bfa9c6d..6a52f3d 100644
+--- a/include/ps3emu/ps3_ftrace.h
++++ b/include/ps3emu/ps3_ftrace.h
+@@ -54,6 +54,7 @@ enum ps3_ft_kind {
+     PS3_FT_GPU_ENCODE  = 11, /* Metal: CPU encode of the recorded draws, a = 1 present / 0 flush, b = records */
+     PS3_FT_GPU_WAIT    = 12, /* Metal: CPU waits for the GPU, a = 1 present / 0 flush / 2 in-flight bound, b = flush reason */
+     PS3_FT_READBACK    = 13, /* Metal: render target read back to the CPU, a = w, b = h */
++    PS3_FT_AUDIO_BLOCK = 15, /* instant: cellAudio mixed a silent block (who = 0, a = 1)   */
+     PS3_FT_GPU_EXEC    = 14, /* Metal: a command buffer's own GPU time, ending when the CPU saw it
+                               * complete; who = render passes, a = depth resolves | colour copies << 16,
+                               * b = 1 present / 0 flush */
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+index cff65e8..74f1d7e 100644
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -15,6 +15,7 @@
+ #include "../../runtime/memory/vm.h"   /* vm_commit */
+ #include "cellAudio.h"
+ #include "../../runtime/ppu/ppu_memory.h"   /* vm_base, vm_read64, vm_write32 */
++#include "../../include/ps3emu/ps3_ftrace.h"   /* PS3_FTRACE: silent-block instants */
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdlib.h>
+@@ -427,6 +428,7 @@ static inline float ld_be_f32(const float* p)
+ }
+ 
+ /* Mix one block from all active ports into s_mix_buffer (stereo float) */
++static u64 audio_now_us(void);
+ static void audio_mix_one_block(void)
+ {
+     memset(s_mix_buffer, 0, sizeof(s_mix_buffer));
+@@ -511,6 +513,29 @@ static void audio_mix_one_block(void)
+             s_mix_buffer[s * 2 + 1] += right;
+         }
+ 
++        /* AUDIO_GAPS=1: a port's block that is empty when the reader arrives, with the ring map
++         * (which blocks hold data; '>' marks the one being read). A guest mixer that is late
++         * leaves '.' here, and its write then lands behind the read cursor. */
++        { static int s_g = -1; if (s_g < 0) s_g = getenv("AUDIO_GAPS") ? 1 : 0;
++          if (s_g && nblock <= 32) {
++              int empty = 1;
++              for (u32 k = 0; k < CELL_AUDIO_BLOCK_SAMPLES * nch; k += 8) if (src[k] != 0.0f) { empty = 0; break; }
++              static int prev_empty[CELL_AUDIO_PORT_MAX];
++              if (empty && !prev_empty[p]) {
++                  char map[36]; u32 b;
++                  for (b = 0; b < nblock; b++) {
++                      const float* bp = port->buffer + b * CELL_AUDIO_BLOCK_SAMPLES * nch;
++                      int nz = 0;
++                      for (u32 k = 0; k < CELL_AUDIO_BLOCK_SAMPLES * nch; k += 8) if (bp[k] != 0.0f) { nz = 1; break; }
++                      map[b] = b == block_idx ? '>' : (nz ? '#' : '.');
++                  }
++                  map[b] = 0;
++                  fprintf(stderr, "[audio-gap] t=%llums port %d ridx=%llu ring=[%s]\n",
++                          (unsigned long long)(audio_now_us() / 1000ULL), p,
++                          (unsigned long long)port->read_index, map);
++              }
++              prev_empty[p] = empty;
++          } }
+         /* Firmware clears a ring-buffer block after consuming it. Besides
+          * preventing stale PCM from replaying when a producer stalls, the
+          * cleared block is an observable consumption signal for producers. */
+@@ -584,6 +609,13 @@ static void audio_sleep_1ms(void)
+  *                     underruns (the device ran dry before the next block). */
+ static void audio_after_block(void)
+ {
++    /* PS3_FTRACE: one instant per silent block (kind 15, a = 1), to line audio gaps up with
++     * the guest's mixer threads in the same timeline. */
++    if (PS3_FT_ON()) {
++        int nz = 0;
++        for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) if (s_mix_buffer[i] != 0.0f) { nz = 1; break; }
++        if (!nz) { const uint64_t t = ps3_ft_now(); ps3_ft_span(PS3_FT_AUDIO_BLOCK, 0, 1, 0, t, t); }
++    }
+     { static int _ap = -1; if (_ap < 0) _ap = getenv("AUDIO_PEAK") ? 1 : 0;
+       if (_ap) { static unsigned _n = 0; float pk = 0.0f;
+         for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) {
+-- 
+2.47.3
+

@@ -63,7 +63,7 @@ cleanup() { git -C "$SUB" worktree remove --force "$scratch" 2>/dev/null || rm -
 trap cleanup EXIT
 git -C "$SUB" worktree add -q --detach "$scratch" "$PIN"
 if [ ${#patches[@]} -gt 0 ]; then
-    if ! git -C "$scratch" -c user.name=sarpbc -c user.email=sarpbc@localhost am -q --committer-date-is-author-date "${patches[@]}"; then
+    if ! git -C "$scratch" -c user.name=sarpbc -c user.email=sarpbc@localhost am -q --keep-cr --committer-date-is-author-date "${patches[@]}"; then
         echo "patch stack does not apply on ${PIN:0:7}; external/ps3recomp was not touched" >&2
         exit 1
     fi

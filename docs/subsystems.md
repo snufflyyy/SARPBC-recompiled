@@ -349,20 +349,9 @@ are not visually verified.
   the `spu_ovl_msdsp_37000_*` functions running. **01.02:** its plugins are different builds
   (i3dl2 0x2800, para_eq 0x680 bytes), so the tool lays para_eq at +0x2800 there too, but
   that layout is a guess (no 01.02 dump yet; check with `SPU_DUMP_OVL`).
-- **Open: the mixer is too slow for real time.** One mixer cycle = one wait on `0x01372000`;
-  each full cycle PUTs one 8 KB block (8 ch x 256 x float) into the cellAudio port
-  (`SPU_DMA_RANGE=58000000-58200000`, PUT from SPU pc 0x095D0). Real time is 187.5 blocks/s
-  = 1.536 MB/s. Measured (01.09, Ryzen 7 5700X, `SPURS_EF_STATS=1`): **75 cycles/s, 410 KB/s
-  (27% of real time)**; built with `-DCMAKE_C_FLAGS=-msse4.1`: 120 cycles/s, 660 KB/s (43%).
-  `perf` (default build): 37% of all samples in the out-of-line `spu_shufb` byte loop (the
-  pshufb path needs `__SSE4_1__`, which our default x86-64 build does not define), ~17% in
-  the scalar SPU float helpers (`spu_fa`/`spu_fs`/`spu__fma_any`; upstream vectorises them
-  for NEON only), 28% in the lifted i3dl2/para_eq code (0x37614, 0x37198, 0x39A18, 0x37B20),
-  16% in the mixer itself. The i3dl2 hot loop (0x37478-0x37974) is optimised SPU code (comb/
-  allpass delay taps), not dod3's -O0 biquads, so dod3's `msdsp_hooks.c` addresses do not
-  apply. Cheapest wins, both generic: build the SPU sources with SSE4.1 (or
-  `-march=x86-64-v2`), and an SSE2/AVX version of the NEON float fast path in
-  `runtime/spu/spu_helpers.h`. Until then real audio would stutter.
+- **Fixed (T053, 2026-10-21): the mixer was too slow for real time, which is the crackle.** See
+  "Audio crackle" below; the numbers that were here (75 cycles/s, 27% of real time) are the
+  starting point of that section.
 - **Blocker 2: `flashMP3.pic` (FIXED; stream path verified 2026-10-20).** The PPU (01.09 `func_0082E690`)
   reads `/dev_flash/sys/external/flashMP3.pic` into a buffer and `func_00835588` parses its
   SPU ELF section table into a descriptor {+0 file EA, +4 body EA, +8 lowest sh_addr,
@@ -392,9 +381,8 @@ are not visually verified.
 - `cellMic` (15 imports) for voice chat — stub "no mic attached" first.
 - Status (2026-10-20, T007): both DSP banks are lifted; real MP3 streams decode and
   non-silent audio reaches PulseAudio/PipeWire. A 149.685 s f32 stereo capture has
-  2,547,400 nonzero samples, peak 0.955703 and no nonfinite values. Output quality is
-  not yet verified at real time: observed silent blocks and underruns need a quiet
-  gameplay measurement. The older speed measurements above predate later SPURS fixes.
+  2,547,400 nonzero samples, peak 0.955703 and no nonfinite values. Output quality at real
+  time: see "Audio crackle" below (T053). The older speed measurements above predate it.
 
 ### Sound after the menu became reachable (T007, 2026-10-20)
 
@@ -441,6 +429,65 @@ prefix at LS end passed the frame-header check, then read its size field
 outside local store (SIGSEGV, exit -11). The native override now checks that
 the ten-byte ID3v2 header fits and returns the existing decode-error result
 when it does not.
+
+### Audio crackle (T053, 2026-10-21)
+
+**Symptom:** the music crackled. `AUDIO_WAV` captured on the 01.09 menu showed no device
+trouble (`underruns 0`, 187.5 blocks/s consumed) but **66% of the blocks were all zero** and 860
+block-edge discontinuities in 42 s: a block of sound, then 8 silent ones, over and over.
+
+**Cause.** The guest's "MultiStream Update Thread" (tid 8, entry OPD `0x01225628`, loop
+`func_0077CEB0` in 01.09) runs one update round, then `Sleep(obj+0x1EC)` (a float, 5 ms), then
+polls the port's read index inside `func_0082EA64` (two `usleep`s of ~0.86 ms at `0x0077CEF0`).
+A round writes **one** 256-sample block at `read index + lead`. On the PS3 the SPU mixer takes
+~0.3 ms per block, so a round is ~5.3 ms: one block per block time. Here the same SPU code cost
+3.4 ms (after the fixes below; 7+ ms before), so nap + work = 8-15 ms = two or three block
+times, and the game wrote only every 2nd or 3rd ring slot. `AUDIO_GAPS=1` shows it:
+`ridx=1478 ring=[#.#.#.>.]`. The reader plays the empty slots as silence. (It is not the host
+device, the MP3 decoder - 75 us per frame - or the cellAudio pacing.)
+
+**What was measured, in the order it was found** (01.09 menu, `SPURS_EF_STATS=1`, flag
+`0x01372000` waits/s = mixer cycles; the mixer thread was ~70% busy and ~30% parked in
+`spu_taskset_wait_signal` while the PPU thread slept):
+
+| Step | Cycles/s | Silent blocks | Block-edge clicks |
+|---|---|---|---|
+| start | 106 | 66% | 860 / 42 s |
+| `SPU_FAST_FLOAT` on the audio images | 166 | 44% | |
+| + `SPU_LEAN_LS` | 180 | 39% | 608 |
+| + x86 `rotqby` family | 209 | 30% | 673 |
+| + no nap (`PS3_USLEEP_SCALE`) | ~300 | **0.0%** | **0-1 / 42 s** |
+
+**Fixes** (all generic except the last, which is a title setting):
+1. `SPU_FAST_FLOAT` (patch 0060): the SPU float helpers reproduce truncation, extended range and
+   no-NaN bit for bit at ~40 instructions per op. The MultiStream mixer and DSP banks use native
+   SSE singles instead (denormals flushed as on the SPU, round to nearest instead of toward
+   zero, `runtime/spu/tests/test_spu_fast_float.c`). `CMakeLists.txt` defines it only for the mixer image
+   (`spu_e33837bb*`) and the overlays (`spu_ovl_ms*`); option `SARPBC_SPU_FAST_AUDIO_FLOAT`.
+2. `SPU_LEAN_LS` (patch 0060): `spu_ls_read128/write128` carry a probe, a watchpoint and an
+   SMC-watch check (a load and a branch each, not hoistable); ~70 per DSP loop pass. The same
+   audio sources drop them.
+3. `rotqby`, `rotqbyi`, `shlqby`, `shlqbyi`, `shlqbybi`, `rotqbybi`, `rotqmby`, `rotqmbybi`,
+   `rotqmbyi` (patch 0060): only NEON had a vector form; on x86 each was a 16-iteration byte loop
+   (~100 instructions), and `lqd` + `rotqby` is how SPU code loads an unaligned scalar - the
+   hottest DSP function's first screen of assembly was all of them. SSSE3 `pshufb` forms,
+   checked against the byte loops for every shift amount (`runtime/spu/tests/test_spu_qbyte.c`). Helps every
+   title on x86.
+4. `PS3_USLEEP_SCALE` (patch 0061) + `src/overrides/audio_pacing.cpp`: the update thread's nap
+   is scaled to 0. The loop still waits for the read index to move, so it starts a round as soon
+   as a block is free. With the nap kept, even the faster mixer leaves 30% silent blocks.
+
+**Verified** (no audio device in this container; `AUDIO_WAV` + `tools/audio_wav_report.py`):
+85 s of menu: 3.1% silent, all of it one 2.7 s pause at an intro screen change (also in the
+baseline, the game is silent there), 1 gap, 1 click. 65 s of arena (New Game, driving): 0 silent
+blocks, 0 gaps, 1 click. `underruns 0`. Mixer ~2.8 ms per cycle (max ~14 ms, a hiccup the 8-block
+ring absorbs). Menu frame rate unchanged (~38 fps in the arena run).
+
+**Not done / ideas:** the mixer still costs ~2.8 ms per 5.33 ms block (one core ~50% busy); the
+i3dl2 reverb (`0x37198`, `0x37614`, ~50% of it) and `ctx->gpr[]` memory traffic are the rest.
+A native i3dl2 loop or a register-promoting lifter would give margin for slow hosts. The
+mixer's exactness is gone by design (float rounding); nothing audible was found. Real playback
+through an audio device has not been listened to by an agent: the user should confirm by ear.
 
 ## Input
 

@@ -30,6 +30,9 @@ of runtime env vars is generated upstream in `external/ps3recomp/docs/DIAGNOSTIC
 | `PS3_EVQSTAT`, `PS3_LWMUTEX_TRACE` | Event-queue and lwmutex state |
 | `SPU_DUMP_MISS=<dir>` | Dump SPU images that have no lifted match |
 | `PS3_NO_AUDIO`, `SDL_AUDIODRIVER=dummy` | Remove audio from the equation |
+| `AUDIO_WAV=<f>`, `AUDIO_RATE=1`, `AUDIO_PEAK=1`, `AUDIO_GAPS=1` | Capture the final mix (raw f32le stereo 48 kHz), every 5 s blocks/s + silent share + underruns, the mix peak, and a ring map when a block is empty at read time (`[audio-gap] ... ring=[#.#.>...]`: `#` holds data, `>` is the block being read). Judge a capture with `tools/audio_wav_report.py` (silent blocks, gaps, block-edge clicks). `PS3_FTRACE` also records every silent block (kind 15). A WAV with sound in it is not good audio: see subsystems.md "Audio crackle" |
+| `PS3_USLEEP_SCALE=<thread name>:<percent>[,...]` | Shorten (or stretch) the `sys_timer_usleep` of the PPU threads with that name (patch 0061). `src/overrides/audio_pacing.cpp` sets `MultiStream Update Thread:0` unless the variable is set; an empty `PS3_USLEEP_SCALE=` restores the game's own timing |
+| `SARPBC_MP3_TIME=1`, `SARPBC_MP3_TRACE=<n>`, `SARPBC_MP3_NATIVE=0` | Native MP3 decoder: every 5 s calls and mean/max host time per frame (~75 us), log the first n calls, switch it off |
 | `PAD_SCRIPT="frame:mask,..."` | Scripted input for unattended runs |
 | `PS3RECOMP_VK_DUMP=<path>` + `_EVERY` | Save presented frames to check rendering headlessly |
 | `PS3_LWCOND_POLL_MS`, `PS3_LWCOND_SLEEP` | lwcond wait tuning (patch 0017; waits now wake on signal) |
@@ -150,7 +153,7 @@ Two independent shared-bitset boundaries allowed this:
 (159/159), but the guarded game still stops at 163.4 s with the same malformed
 range (`analysis/boot_check/20261021-023658-2887820/`). A deterministic publication
 interleaving test fails for all 128 task bits, both set and clear (256 failures).
-Patch `0060-spurs-coherent-taskset-lifecycle.patch` locks both boundaries,
+Patch `T052-coherent-taskset-lifecycle.patch` (numbered by the merge helper) locks both boundaries,
 invalidates SPU reservations, preserves BE layout/write-watch/PPU-reservation
 hooks, and dispatches only after releasing the guest lock. No job-order or
 max-contention policy, NULL guard, or audio workaround is added. All 419 synthetic
@@ -172,6 +175,22 @@ second PhysX image (30508 each). There are no unsolicited scheduler starts.
 `analysis/t052-release-{arena,results,menu}.png` capture the arena, the game-over
 confirmation, and the returned main menu. These are Linux/Vulkan 01.09 checks,
 not Windows/macOS, 01.02, audio-quality, or frame-rate improvement claims.
+
+**Combined with T053 audio (`c9d339d`, 2026-10-21):** the ordinary build also
+passes 300 s in `analysis/boot_check/20261021-035615-3491134/`: results and return
+to the main menu, 4811 zlib requests, 11033 flips, unresolved 0, no null-read,
+null-write or SIGSEGV. Island tasks match at 23579 creations/dispatches/returns;
+the other PhysX image matches at 30714 each, with no unsolicited starts.
+`analysis/t052-combined-audio.f32` has two steady 40 s windows (capture seconds
+90–130 and 230–270) with **0 silent blocks / 0 gaps / 0 block-edge clicks**, as
+measured by `tools/audio_wav_report.py`. This is capture analysis, not an agent
+listening test; the user independently confirmed Claude's audio fix sounds good.
+The combined full gate reports 94 passed / 4 explicit skips (98 scripts), and
+the 419 lifecycle assertions pass under ASan/UBSan. Claude's quadword-byte SIMD
+and fast-float tests also pass (2000 vectors × 340 shifts × 9 operations, and
+100000 random cases × 6 operations respectively). Audio files/patches remain
+unchanged from `c9d339d`; only the T052 patch filename is provisional to avoid
+colliding with Claude's active shadow-diagnostic patch numbering.
 
 **Count what a log line hides.** Several runtime messages print only their first few
 occurrences: `[edgezlib] #n` shows requests 0–3 only (the total is in the atexit

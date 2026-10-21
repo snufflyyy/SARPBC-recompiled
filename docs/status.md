@@ -5,14 +5,14 @@ work session. Newest log entry first. Use absolute dates.
 
 ## Resume here (updated 2026-10-21)
 
-**Current assignments (user, 2026-10-21):** pi owns T052, the mini-game round-end
-crash. Its SPURS task-bit lifecycle fix (0060) passes both guarded and ordinary
-uninstrumented 300 s runs through results and back to the main menu. It is ready
-on `pi/work`; integration waits for Claude's uncommitted main-checkout
-`CMakeLists.txt` edit to be committed. Do not stash or overwrite that work.
-Claude owns the new audio (T053) and car-shadow
-(T054) reports and may work independently. Older audio/shadow verification below
-is historical, not evidence that those new reports are resolved.
+**Current work (user, 2026-10-21):** pi has merged Claude's GitHub audio fixes
+(`c9d339d`, T053) into `pi/work` with the T052 round-end fix. The combined build
+passes 300 s through results and back to the menu; two steady 40 s audio captures
+have no silent blocks, gaps or block-edge clicks. The user confirms the audio
+sounds good. Audio patches remain 0060–0062; the lifecycle repair is provisional
+`T052-coherent-taskset-lifecycle.patch`, numbered by the merge helper.
+**Claude will do the final merge** (user): do not disturb his active main-checkout
+shadow work. T054 remains separate and unresolved.
 
 **User priorities (2026-10-20):** performance and stability, in that order of work: done so
 far, the pin bump (T043), the visual fixes (T051 and earlier), a steady 30+ fps (T040: Single
@@ -41,7 +41,7 @@ intro is Loading, ESRB with the car, Powered by Unreal, the Psyonix logo, the sa
 and **the arena renders and plays** (T045: reversed-Z depth clear, then NV0039 texture copies):
 clean textures, a working HUD, the car drives on throttle, its shadow is right (depth-compare
 direction). T045 is done; the 85% black border is the game's own safe-area setting (menus have it too). Real MP3 audio
-plays (T007). `boot_check --pad` scripts the presses (T036). There's no Bink in 01.09.
+plays (T007) without crackle (T053, 2026-10-21). `boot_check --pad` scripts the presses (T036). There's no Bink in 01.09.
 
 **Last verified on `main` (fc9cdf4, 2026-10-20, `PS3_VERBOSE=0`, under the boot lock):** a 120 s
 boot_check is PROGRESSING with 3513 flips; the main menu runs at **29.5 fps** (1 s windows
@@ -118,9 +118,9 @@ T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena
 
 ## Log
 
-### 2026-10-21: round-end crash fix verified, integration pending (T052, pi)
+### 2026-10-21: combined audio/round-end build verified, handed off for merge (T052, pi)
 
-Patch 0060 makes both SPURS task-exit bitsets and PPU bitset read/modify/write
+Patch `T052-coherent-taskset-lifecycle.patch` makes both SPURS task-exit bitsets and PPU bitset read/modify/write
 coherent. Old shared bits could resurrect completed island tasks, creating extra
 queue completions; the PPU then consumed an older range count while a newer job
 rewrote its table. The malformed negative range caused the later NULL reads and
@@ -134,8 +134,19 @@ zlib, 10939 flips, unresolved 0, no null-read/null-write/SIGSEGV, including exit
 The guarded build independently passes another 300 s. Synthetic regression:
 419 checks, also ASan/UBSan; full gate: 97 scripts, 93 passed, 4 explicitly report
 skips, no failures/timeouts. See debugging.md for the failed exit-only experiment
-and the two-race proof. Source and docs are ready in `pi/work`; main integration
-is blocked by Claude's unrelated uncommitted `CMakeLists.txt` work.
+and the two-race proof. GitHub audio commit `c9d339d` is now merged into
+`pi/work`, with audio code and patches unchanged. The combined ordinary build
+also passes 300 s (`analysis/boot_check/20261021-035615-3491134/`): 4811 zlib,
+11033 flips, unresolved 0, no null-read/null-write/SIGSEGV, exact task counts.
+Two steady 40 s AUDIO_WAV windows have zero silent blocks, gaps and block-edge
+clicks. Combined gate: 98 scripts, 94 passed, 4 explicit skips; 419 lifecycle
+checks under sanitizers plus Claude's qbyte/fast-float regressions pass.
+The user confirms the audio works well and will ask Claude to merge `pi/work`.
+The T052 patch name stays provisional to avoid colliding with Claude's active
+shadow diagnostic numbered 0063; do not stash, commit or overwrite his work.
+
+### 2026-10-21: audio crackle fixed (T053, claude)
+- The crackle was 66% silent blocks (the game wrote every 2nd-3rd ring slot because its mixer round ran 8-15 ms instead of 5.3 ms). Fixed by a faster audio SPU path (native float, lean LS, x86 `rotqby` family: patch 0060), the update thread's 5 ms nap scaled to 0 (patch 0061 + `src/overrides/audio_pacing.cpp`): 0.0% silent blocks and 0-1 block-edge clicks over 42-65 s menu/arena windows, was 860 clicks. Menu 55 fps, arena 38 fps. Details, numbers and `tools/audio_wav_report.py`: subsystems.md "Audio crackle". Not heard by an agent (no sound device here): the user should confirm by ear.
 
 ### 2026-10-20: attribute-major vertex fetch (0056, claude)
 - `rsx_vertex_fetch_all` replaces the per-vertex `fetch_one` loop in the draw engine; byte-identical on 6000 random plans (test_vertex_fetch_plan). Arena 36-39 -> ~38 (small: the arena's next costs are texture hashing and the remap build). Optimization series total (01.09, this machine, 2026-10-20): Single Player 19.5 -> ~54 fps, arena ~30 -> ~38.

@@ -291,6 +291,19 @@ if(SPU_SOURCES)
         endif()
         set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "${SPU_COMPILE_OPTIONS}")
     endif()
+    # MultiStream's mixer and DSP banks use native SSE float instead of the bit-exact SPU
+    # float helpers (SPU_FAST_FLOAT, patch 0060): the exact helpers cost ~40 instructions per
+    # op and left the mixer at 1/3 of real time, heard as crackling (docs/subsystems.md,
+    # "Audio crackle"). Round-to-nearest instead of toward zero is inaudible in audio.
+    option(SARPBC_SPU_FAST_AUDIO_FLOAT "Native float in the MultiStream mixer/DSP SPU code" ON)
+    if(SARPBC_SPU_FAST_AUDIO_FLOAT)
+        foreach(_src IN LISTS SPU_SOURCES)
+            if(_src MATCHES "/spu_e33837bb[0-9a-f]*/spu_recomp\\.c$" OR
+               _src MATCHES "/spu_ovl_ms[a-z0-9_]*/spu_recomp\\.c$")
+                set_property(SOURCE "${_src}" APPEND PROPERTY COMPILE_DEFINITIONS SPU_FAST_FLOAT SPU_LEAN_LS)
+            endif()
+        endforeach()
+    endif()
 endif()
 
 # app.rc carries the icon, the version block and the manifest, and needs a

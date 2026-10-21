@@ -60,12 +60,14 @@
  *                        PS3_DEV_FLASH / the runtime default then decide).
  *   SARPBC_MP3_LSA=<hex> override kBodyLsa (another MultiStream build).
  *   SARPBC_MP3_TRACE=<n> log the first n decodeFrame calls.
+ *   SARPBC_MP3_TIME=1    every 5 s: decodeFrame calls, mean and max host time (us).
  */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <atomic>
+#include <chrono>
 #include <string>
 #include <vector>
 #include <sys/stat.h>
@@ -432,7 +434,24 @@ void standin_entry(spu_context* ctx)
     static thread_local dod3_mp3 d;
     static thread_local result_t r;
     state_load(ls, &a, nch, &d);
+    static const bool timing = getenv("SARPBC_MP3_TIME") != nullptr;
+    const auto t0 = timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
     decode_frame(ls, &a, &d, &r);
+    if (timing) {
+        static std::atomic<unsigned long long> t_n, t_sum, t_max, t_start;
+        const unsigned long long us = (unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        t_n++; t_sum += us;
+        if (us > t_max) t_max = us;
+        const unsigned long long now = (unsigned long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (!t_start) t_start = now;
+        if (now - t_start >= 5000) {
+            fprintf(stderr, "[mp3-time] %llu calls in %.1fs, mean %llu us, max %llu us\n", t_n.load(),
+                    (now - t_start) / 1000.0, t_n ? t_sum.load() / t_n.load() : 0ull, t_max.load());
+            t_n = 0; t_sum = 0; t_max = 0; t_start = now;
+        }
+    }
     if (r.samples) state_save(ls, &a, r.nch, &d);
     write_result(ls, &a, &r);
     if (r.samples) s_frames++;
