@@ -1,0 +1,325 @@
+From 2432e85bb00d984e0870bcc5c47885176ecf48d7 Mon Sep 17 00:00:00 2001
+From: pi <pi@localhost>
+Date: Wed, 21 Oct 2026 16:10:54 +0000
+Subject: [PATCH] perf(gcm): reject unmapped SPU PUTs without scanning empty IO
+ slots
+
+---
+ libs/video/cellGcmSys.c          |  40 ++++++++-
+ tools/test_gcm_io_mappings.py    |   6 +-
+ tools/test_gcm_spu_put_lookup.py | 150 +++++++++++++++++++++++++++++++
+ 3 files changed, 193 insertions(+), 3 deletions(-)
+ create mode 100755 tools/test_gcm_spu_put_lookup.py
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index b1d0557..01fcb5c 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -26,6 +26,7 @@ static u32 s_gcm_context_ea = 0;
+ #include <string.h>
+ #include <stdlib.h>
+ #include <stdint.h>
++#include <stdatomic.h>
+ 
+ #ifdef _WIN32
+ #include <windows.h>
+@@ -209,6 +210,22 @@ typedef struct IoMapping {
+ 
+ static IoMapping s_io_mappings[CELL_GCM_MAX_IO_MAPPINGS];
+ static int s_io_mapping_count = 0;
++/* Highest slot ever allocated since the table was cleared, not the active
++ * count: unmaps leave holes and reuse must not hide later live slots. Atomic
++ * publication lets mixer SPUs reject misses without reading 512 empty slots. */
++static _Atomic(u32) s_io_mapping_highwater;
++/* Conservative 64 MiB EA regions occupied since the last table clear. Unmaps
++ * may leave false positives, never false negatives; most audio PUTs miss in
++ * one atomic load without inspecting the mapping array at all. */
++static _Atomic(u64) s_io_mapping_regions;
++static void gcm_note_mapping_range(u32 ea, u32 size)
++{
++    if (!size) return;
++    u64 last = ((u64)ea + size - 1) >> 26;
++    if (last > 63) last = 63;  /* A wrapping range remains conservative. */
++    const u64 bits = (~0ull << (ea >> 26)) & (~0ull >> (63 - last));
++    atomic_fetch_or_explicit(&s_io_mapping_regions, bits, memory_order_release);
++}
+ 
+ /* Callback handlers — these are GUEST OPD addresses passed by the
+  * recompiled game, not host function pointers. Stored as uint32_t and
+@@ -478,8 +495,14 @@ static IoMapping* find_mapping_by_io(u32 io)
+ static IoMapping* find_free_mapping(void)
+ {
+     for (int i = 0; i < CELL_GCM_MAX_IO_MAPPINGS; i++) {
+-        if (!s_io_mappings[i].active)
++        if (!s_io_mappings[i].active) {
++            u32 limit = atomic_load_explicit(&s_io_mapping_highwater, memory_order_relaxed);
++            const u32 needed = (u32)i + 1;
++            while (limit < needed &&
++                   !atomic_compare_exchange_weak_explicit(&s_io_mapping_highwater,
++                       &limit, needed, memory_order_release, memory_order_relaxed)) {}
+             return &s_io_mappings[i];
++        }
+     }
+     return NULL;
+ }
+@@ -535,6 +558,8 @@ s32 cellGcmInit(u32 cmdSize, u32 ioSize, u32 ioAddress)
+ 
+     s_local_mem_allocated = 0;
+     s_io_mapping_count = 0;
++    atomic_store_explicit(&s_io_mapping_highwater, 0, memory_order_release);
++    atomic_store_explicit(&s_io_mapping_regions, 0, memory_order_release);
+     /* Unmapped = 0xFFFF. The tables are static (zero-initialized), so without
+      * this every unmapped EA page silently aliased io page 0 (and vice versa),
+      * producing plausible-but-wrong offsets instead of a translation failure. */
+@@ -568,6 +593,8 @@ s32 cellGcmInit(u32 cmdSize, u32 ioSize, u32 ioAddress)
+         s_io_mappings[0].size   = ioSize;
+         s_io_mappings[0].active = 1;
+         s_io_mapping_count = 1;
++        atomic_store_explicit(&s_io_mapping_highwater, 1, memory_order_release);
++        gcm_note_mapping_range(ioAddress, ioSize);
+     }
+ 
+     /* Zero the guest-visible control register (put/get/ref). */
+@@ -1697,7 +1724,10 @@ static int s_spu_blk_w = 0;
+ /* EA -> IO through the mapping list (range lookup; the by-ea helper is exact). */
+ static u32 gcm_ea2io_range(u32 ea, u32* room)
+ {
+-    for (int i = 0; i < CELL_GCM_MAX_IO_MAPPINGS; i++) {
++    const u64 regions = atomic_load_explicit(&s_io_mapping_regions, memory_order_acquire);
++    if (!(regions & (1ull << (ea >> 26)))) return 0xFFFFFFFFu;
++    const u32 limit = atomic_load_explicit(&s_io_mapping_highwater, memory_order_acquire);
++    for (u32 i = 0; i < limit; i++) {
+         IoMapping* m = &s_io_mappings[i];
+         if (!m->active || !m->size) continue;
+         if (ea >= m->ea && ea < m->ea + m->size) {
+@@ -3251,6 +3281,7 @@ s32 cellGcmAddressToOffset(u32 address, u32* offset)
+         IoMapping* m = find_free_mapping();
+         if (m) {
+             m->ea = ea_page; m->io = io; m->size = 0x100000u; m->active = 1;
++            gcm_note_mapping_range(m->ea, m->size);
+             s_io_mapping_count++;
+         } else {
+             printf("[cellGcmSys] WARNING: auto-map has no free IO mapping slot; "
+@@ -3329,6 +3360,7 @@ s32 cellGcmMapMainMemory(u32 ea, u32 size, u32* offset)
+     mapping->io     = io_offset;
+     mapping->size   = size;
+     mapping->active = 1;
++    gcm_note_mapping_range(ea, size);
+     s_io_mapping_count++;
+ 
+     populate_offset_table(ea, io_offset, size);
+@@ -3368,6 +3400,7 @@ s32 cellGcmMapEaIoAddress(u32 ea, u32 io, u32 size)
+     mapping->io     = io;
+     mapping->size   = size;
+     mapping->active = 1;
++    gcm_note_mapping_range(ea, size);
+     s_io_mapping_count++;
+ 
+     populate_offset_table(ea, io, size);
+@@ -3876,6 +3909,8 @@ void cellGcmTerminate(void)
+     s_queue_handler    = NULL;
+     s_local_mem_allocated = 0;
+     s_io_mapping_count = 0;
++    atomic_store_explicit(&s_io_mapping_highwater, 0, memory_order_release);
++    atomic_store_explicit(&s_io_mapping_regions, 0, memory_order_release);
+     /* Unmapped = 0xFFFF. The tables are static (zero-initialized), so without
+      * this every unmapped EA page silently aliased io page 0 (and vice versa),
+      * producing plausible-but-wrong offsets instead of a translation failure. */
+@@ -4209,6 +4244,7 @@ void cellGcm_syscall_iomap(u32 ea, u32 io, u32 size)
+     IoMapping* m = find_free_mapping();
+     if (m) {
+         m->ea = ea; m->io = io; m->size = size; m->active = 1;
++        gcm_note_mapping_range(ea, size);
+         s_io_mapping_count++;
+     }
+     if (!s_config.ioSize) { s_config.ioAddress = ea; s_config.ioSize = size; }
+diff --git a/tools/test_gcm_io_mappings.py b/tools/test_gcm_io_mappings.py
+index fb2a31f..23a90a7 100644
+--- a/tools/test_gcm_io_mappings.py
++++ b/tools/test_gcm_io_mappings.py
+@@ -39,7 +39,8 @@ def function(signature):
+ 
+ 
+ slots = re.search(r'^#define CELL_GCM_MAX_IO_MAPPINGS\s+(\d+)', hdr, re.M).group(1)
+-parts = [function(r'static IoMapping\* find_free_mapping\(void\)'),
++parts = [function(r'static void gcm_note_mapping_range\(u32 ea, u32 size\)'),
++         function(r'static IoMapping\* find_free_mapping\(void\)'),
+          function(r'static u32 gcm_io_alloc\(u32 size\)\n\{'),
+          function(r's32 cellGcmMapMainMemory\(u32 ea, u32 size, u32\* offset\)'),
+          function(r'void cellGcm_syscall_iomap\(u32 ea, u32 io, u32 size\)')]
+@@ -49,6 +50,7 @@ HARNESS = r'''
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <stdatomic.h>
+ #include <ps3emu/ps3types.h>
+ #include <ps3emu/error_codes.h>
+ #ifndef CELL_OK
+@@ -62,6 +64,8 @@ static CellGcmConfig s_config = { 0x100000u, 0x200000u };
+ typedef struct IoMapping { u32 ea; u32 io; u32 size; int active; } IoMapping;
+ static IoMapping s_io_mappings[CELL_GCM_MAX_IO_MAPPINGS];
+ static int s_io_mapping_count = 0;
++static _Atomic(u32) s_io_mapping_highwater;
++static _Atomic(u64) s_io_mapping_regions;
+ static unsigned char mem[0x1000];
+ static void vm_write32(u32 a, u32 v) { for (int i = 0; i < 4; i++) mem[a + i] = (unsigned char)(v >> (24 - 8 * i)); }
+ static u32 rd32(u32 a) { return (u32)mem[a] << 24 | mem[a + 1] << 16 | mem[a + 2] << 8 | mem[a + 3]; }
+diff --git a/tools/test_gcm_spu_put_lookup.py b/tools/test_gcm_spu_put_lookup.py
+new file mode 100755
+index 0000000..7ff400c
+--- /dev/null
++++ b/tools/test_gcm_spu_put_lookup.py
+@@ -0,0 +1,150 @@
++#!/usr/bin/env python3
++"""Real GCM range lookup/SPU blocks vs a full-table oracle; optional miss benchmark."""
++import argparse
++import os
++import re
++import subprocess
++import tempfile
++from pathlib import Path
++
++if os.name == 'nt':
++    print('SKIP: fixture currently requires a POSIX C compiler')
++    raise SystemExit(0)
++root = Path(__file__).resolve().parents[1]
++parser = argparse.ArgumentParser(description=__doc__)
++parser.add_argument('--benchmark', action='store_true')
++parser.add_argument('--source', type=Path, default=root / 'libs/video/cellGcmSys.c')
++args = parser.parse_args()
++src = args.source.read_text()
++
++def function(name):
++    m = re.search(r'^.*\b' + name + r'\([^;\n]*\)\s*\{', src, re.M)
++    assert m, name
++    end = src.index('{', m.start()) + 1
++    depth = 1
++    while depth:
++        depth += (src[end] == '{') - (src[end] == '}')
++        end += 1
++    result = src[m.start():end]
++    if name == 'gcm_ea2io_range' and not args.benchmark:
++        result = result.replace('IoMapping* m = &s_io_mappings[i];',
++                                'probes++; IoMapping* m = &s_io_mappings[i];')
++    return result
++
++state = src[src.index('/* IO memory mapping table */'):src.index('/* Callback handlers')]
++blocks = src[src.index('#define GCM_SPU_BLK_N'):src.index('/* EA -> IO through the mapping list')]
++functions = '\n'.join(function(n) for n in ['find_free_mapping', 'gcm_ea2io_range',
++    'gcm_forget_spu_blocks', 'gcm_note_spu_put', 'gcm_spu_block_for_put'])
++reset = ('atomic_store(&s_io_mapping_highwater, 0);'
++         if 's_io_mapping_highwater' in state else '')
++if 's_io_mapping_regions' in state:
++    reset += 'atomic_store(&s_io_mapping_regions, 0);'
++publish = ('gcm_note_mapping_range(m->ea,m->size);'
++           if 'gcm_note_mapping_range' in state else '')
++fixture = r'''
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <stdatomic.h>
++#include <time.h>
++typedef uint32_t u32;
++typedef uint64_t u64;
++#define CELL_GCM_MAX_IO_MAPPINGS 512
++static unsigned probes, failed;
++#define CHECK(x) do { if (!(x)) { fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#x); failed++; } } while(0)
++/* STATE */
++/* BLOCKS */
++/* FUNCTIONS */
++static void reset(void)
++{
++    memset(s_io_mappings,0,sizeof(s_io_mappings)); s_io_mapping_count=0;
++    /* RESET */
++    gcm_forget_spu_blocks();
++}
++static void seed(unsigned n)
++{
++    reset();
++    for(unsigned i=0;i<n;i++) {
++        IoMapping* m=find_free_mapping();
++        if (!m) abort();
++        *m=(IoMapping){0x10000000u+i*0x100000u,0x1000u+i*0x100000u,0x100000u,1};
++        /* PUBLISH */
++        s_io_mapping_count++;
++    }
++}
++static u32 reference(u32 ea,u32* room)
++{
++    for(unsigned i=0;i<512;i++) {
++        IoMapping* m=&s_io_mappings[i];
++        if(m->active && m->size && ea>=m->ea && ea<m->ea+m->size) {
++            *room=m->ea+m->size-ea; return m->io+(ea-m->ea);
++        }
++    }
++    return ~0u;
++}
++static void compare(u32 ea)
++{
++    u32 a=0xabcddcba,b=a;
++    CHECK(gcm_ea2io_range(ea,&a)==reference(ea,&b)); CHECK(a==b);
++}
++static uint64_t ns(void)
++{
++    struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
++    return (uint64_t)t.tv_sec*1000000000u+t.tv_nsec;
++}
++__attribute__((noinline)) static u32 lookup(u32 ea) { return gcm_ea2io_range(ea,NULL); }
++int main(int argc,char** argv)
++{
++    (void)argv;
++    if(argc>1) {
++        seed(8); volatile u32 sink=0; unsigned n=2000000;
++        uint64_t start=ns();
++        for(unsigned i=0;i<n;i++) sink^=lookup(0x58000000u+(i&4095));
++        printf("GCM unmapped lookup, 8 slots: %.2f ns/call (sink %u)\n",(double)(ns()-start)/n,sink);
++        return 0;
++    }
++    seed(8); probes=0; CHECK(gcm_ea2io_range(0x58000000u,NULL)==~0u);
++    CHECK(probes==0); /* A non-occupied EA region never inspects the table. */
++    probes=0; CHECK(gcm_ea2io_range(0x13f00000u,NULL)==~0u); CHECK(probes<=8);
++    gcm_note_spu_put(0x10000000u,64); gcm_note_spu_put(0x10000040u,128);
++    CHECK(gcm_spu_block_for_put(0x10c4)==0x1000u);
++    int w=s_spu_blk_w;
++    gcm_note_spu_put(0x58000000u,128); gcm_note_spu_put(0x10000000u,0x40001);
++    gcm_note_spu_put(0x100ffff0u,32); CHECK(s_spu_blk_w==w);
++    for(unsigned i=0;i<8;i++) { compare(0x10000000u+i*0x100000u); compare(0x10100000u+i*0x100000u-1); }
++    seed(50); s_io_mapping_count=0; s_io_mappings[0].active=0;
++    compare(0x13100000u); CHECK(gcm_ea2io_range(0x13100000u,NULL)!=~0u);
++    IoMapping* hole=find_free_mapping(); CHECK(hole==&s_io_mappings[0]);
++    *hole=(IoMapping){0x50000000u,0x2000,0x1000,1};
++    { IoMapping* m=hole; /* PUBLISH */ }
++    compare(0x50000001u); compare(0x13100001u);
++    seed(512); CHECK(find_free_mapping()==NULL); compare(0x2ff00000u);
++    /* Overlaps, holes, zero sizes and wrapping ends retain the original first-match semantics. */
++    srand(71);
++    for(unsigned i=0;i<512;i++) {
++        s_io_mappings[i]=(IoMapping){(u32)rand()*2u,(u32)rand(),(u32)rand(),i%3!=0};
++        IoMapping* m=&s_io_mappings[i]; /* PUBLISH */
++    }
++    for(unsigned i=0;i<50000;i++) compare((u32)rand()*2u);
++    s_io_mappings[1]=(IoMapping){0xfffffff0u,0,32,1};
++    { IoMapping* m=&s_io_mappings[1]; /* PUBLISH */ }
++    compare(0xfffffff1u);
++    seed(1); IoMapping* m=&s_io_mappings[0];
++    *m=(IoMapping){0x03ffffff,0x2000,2,1}; /* PUBLISH */
++    compare(0x03fffffe); compare(0x03ffffff); compare(0x04000000); compare(0x04000001);
++    *m=(IoMapping){0,0,0xffffffffu,1}; /* PUBLISH */
++    compare(0); compare(0xfffffffeu); compare(0xffffffffu);
++    reset(); probes=0; compare(0); CHECK(probes==0);
++    printf("GCM bounded lookup / oracle / SPU block checks: %u failed\n",failed);
++    return failed?1:0;
++}
++'''
++fixture = fixture.replace('/* STATE */',state).replace('/* BLOCKS */',blocks)
++fixture = fixture.replace('/* FUNCTIONS */',functions).replace('/* RESET */',reset)
++fixture = fixture.replace('/* PUBLISH */',publish)
++with tempfile.TemporaryDirectory(prefix='gcm-spu-put-') as tmp:
++    c, exe = Path(tmp)/'test.c', Path(tmp)/'test'
++    c.write_text(fixture)
++    subprocess.run([os.environ.get('CC','cc'),'-std=gnu17','-O2','-UNDEBUG',str(c),'-o',str(exe)],check=True)
++    subprocess.run([str(exe)]+(['bench'] if args.benchmark else []),check=True,timeout=15)
+-- 
+2.47.3
+

@@ -14,8 +14,9 @@ sounds good. Audio patches remain 0060–0062; the lifecycle repair is provision
 Pi is finishing the remaining queue at the user's request after Claude exhausted
 usage. T052 now also passes 300 s with the latest shadow/profiler/port work
 (`53e852f`): 4810 zlib, 11062 flips, unresolved 0, returned main menu, no
-null-read/null-write/SIGSEGV. T056, T058, T009, T005 and interrupted T059 remain.
-T032 is verified on opus-2/work; coordinate integration rather than overwrite it.
+null-read/null-write/SIGSEGV. T056's GCM hook cache passes oracle/sanitizer tests and actual-game timing
+(~257 to ~21.6 ns); integrate it with opus-2's verified T032 DMA work next.
+T058, T009, T005 and interrupted T059 remain. Other agents' files stay untouched.
 
 **User priorities (2026-10-20):** performance and stability, in that order of work: done so
 far, the pin bump (T043), the visual fixes (T051 and earlier), a steady 30+ fps (T040: Single
@@ -51,9 +52,9 @@ boot_check is PROGRESSING with 3513 flips; the main menu runs at **29.5 fps** (1
 26.3-32.3), ~130% CPU, 28 threads. Where a menu frame's ~31 ms go, and what to try next:
 subsystems.md "Menu frame rate".
 
-**Integrated patch stack:** 67 patch files (85 commits) on upstream `749182e`
+**Integrated patch stack:** 68 patch files (86 commits) on upstream `749182e`
 (v0.16.0, T043), including T052 and Claude's later audio/shadow/port work.
-Current full gate: 98 scripts, 94 passed / 4 explicit skips / 0 failures/timeouts;
+Current full gate: 99 scripts, 95 passed / 4 explicit skips / 0 failures/timeouts;
 the nested SDL/Vulkan suites are included (T048).
 The upstream lifter did not
 change, so the lifts were kept. The big fixes of the last two days: the SPURS CreateTask race that started tasks twice

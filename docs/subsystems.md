@@ -1035,6 +1035,35 @@ hash cost is spent on short-lived job threads that are not on the critical path;
 frame rate is bound by the drain/render side (GCM/VK 18%, RSX thread 63%). Patch dropped, not
 merged. Lesson: a share of on-CPU stacks is not a share of the frame time.
 
+### Unmapped SPU PUT lookup (T056, 2026-10-21)
+
+`gcm_note_spu_put` must remain enabled: it discovers SPU-built RSX command blocks.
+Previously every unmapped mixer write scanned all 512 IO mapping slots. The fix
+uses two small atomic summaries, not an active-count shortcut:
+
+- An allocation high-water mark bounds the fallback scan. It grows before a
+  free slot is returned, never shrinks on unmap, and resets only when the whole
+  mapping table is cleared. Init's directly assigned slot zero is included.
+- A 64-bit mask covers occupied 64 MiB EA regions. Every mapping-add path
+  publishes its range; unmaps may leave conservative false positives. A clear
+  bit proves a miss, including for unaligned ranges and overlaps. Overflowing
+  ranges keep the existing full-scan semantics, rather than gaining new matches.
+
+The real lookup and block tracker pass 50,000 randomized comparisons against a
+full-table oracle, sparse/reused/full-table cases, region edges, wide ranges and
+ASan/UBSan. Both efficiency assertions fail before the fix. The source-extraction
+benchmark (`external/ps3recomp/tools/test_gcm_spu_put_lookup.py --benchmark`) gave
+209.6 to 2.08 ns for an eight-slot unmapped lookup on this host.
+
+Private relinks changed only a runtime C object, not generated code. Sampled
+serial-clock probes in 130 s arena runs gave hook cost ~257 ns baseline, ~33.5 ns
+with the high-water mark alone, and ~21.6 ns with both summaries. Samples that
+migrated CPUs or exceeded 50,000 cycles were excluded; empty clock overhead was
+subtracted. At T032's ~65k PUT/s this saves about 15 ms of CPU per second, not a
+measured FPS gain. Evidence: pi worktree `analysis/t056-*-boot2.log` and
+`analysis/t056-regions-boot.log`; the latter reached the arena, 3721 zlib, 4488
+flips, unresolved 0. All 99 discovered tests: 95 pass / 4 explicit skips.
+
 ## Video (Bink)
 
 - BinkPS3 is statically linked game code; the three `BINKPS3_*.BIN` files are its RSX

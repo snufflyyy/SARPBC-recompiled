@@ -170,6 +170,7 @@ numbers:
 | `0065-fp-ddx-ddy-nrm.patch` | T021 (Port next 8): fp decompiler DDX/DDY and NRM zero vector, from fork c42065f+93dbfdd | generic, ported from soyjxck fork (MIT), offer upstream |
 | `0066-vulkan-anisotropic.patch` | T021 (Port next 10b): anisotropic filtering of mipmapped guest textures, RSX_ANISO (idea: fork 66fd0a9) | generic Vulkan, offer upstream |
 | `0067-coherent-taskset-lifecycle.patch` | T052: serialize guest task-exit bitsets and PPU bitset read/modify/write with the SPU lock-line lock; invalidate stale reservations and dispatch after unlocking. Prevents completed tasks being resurrected and producing stale extra queue results. 419 synthetic checks cover tagged ELFs, reservation loss, all 128 task bits and store hooks; ASan/UBSan clean. Both boundaries are required; see docs/debugging.md | generic, offer upstream |
+| `T056-gcm-spu-put-lookup.patch` | T056: conservative atomic EA-region occupancy and allocation high-water mark reject unmapped SPU PUTs without scanning 512 IO slots; preserves sparse mappings and pushbuffer coalescing. 50k randomized oracle comparisons, boundary/full-table tests and ASan/UBSan; actual hook ~257 to ~21.6 ns in arena | generic, offer upstream |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `tools/export_patch.sh <slug> "<description>" ["<upstream status>"]` (next free number, the README row,
