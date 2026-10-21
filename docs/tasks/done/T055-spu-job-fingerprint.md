@@ -1,7 +1,7 @@
 # T055: SPU perf: hashing the whole job image on every SPURS job dispatch
 
-Status: open
-Owner: -
+Status: done
+Owner: claude
 Priority: 6
 Touches: patches/ps3recomp/T055-*.patch (runtime/spu/spu_workload.c: spu_workload_dispatch_job and its fingerprint lookup only), docs/subsystems.md (SPU/SPURS, own subsection)
 Reads: docs/debugging.md "Profiling", docs/subsystems.md "SPU time by category (T029)", docs/tasks/*/T029*
@@ -28,3 +28,6 @@ fresh thread (one `(gone)` tid per sample), which may be the next cost.
 before/after numbers in docs/subsystems.md, SPU tests green, the patch applies in the stack.
 
 ## Log
+- 2026-10-21 14:30 claude: claimed
+- 2026-10-21 14:52 claude: Memo implemented and verified to remove the hash from the profile, but 6 A/B menu runs show no fps gain (on 48-49, off 48-56); patch dropped. Documented in subsystems.md.
+- 2026-10-21 14:52 claude: DONE: Closed without a patch: removing the job-image hash from the profile does not raise fps (A/B documented). The job-thread churn is not on the critical path.

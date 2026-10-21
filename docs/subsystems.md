@@ -1023,6 +1023,18 @@ sampled vs 56.58 unsampled (`--sampler none`), 317% host CPU in both.
 - Reports: `analysis/spu_profile_20261021-{135900,140513,141126}.txt` in the opus-1 worktree.
   Shares within ~5 points are sampling noise at these counts.
 
+### SPU job fingerprint memo: no gain (T055, 2026-10-21)
+
+T029's stack sampler showed 28% of on-CPU stacks on the Single Player screen in the inlined
+byte-at-a-time FNV of `spu_workload_dispatch_job`. A memcmp-verified memo of (image, fingerprint)
+removed it from the profile (SPU runtime helpers 46% to 8% of stacks) but **did not raise
+fps**: 6 menu runs (`spu_profile.sh 30 --warmup 75 --scenario menu --sampler none`, memo
+switchable by `SPU_FP_MEMO=0/1`) gave memo on 49.0/48.2/48.1 fps, memo off 56.2/56.3/47.6 fps
+(machine shared with another agent's builds, so noisy, but never better with the memo). The
+hash cost is spent on short-lived job threads that are not on the critical path; the guest
+frame rate is bound by the drain/render side (GCM/VK 18%, RSX thread 63%). Patch dropped, not
+merged. Lesson: a share of on-CPU stacks is not a share of the frame time.
+
 ## Video (Bink)
 
 - BinkPS3 is statically linked game code; the three `BINKPS3_*.BIN` files are its RSX
