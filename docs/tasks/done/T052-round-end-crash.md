@@ -1,6 +1,6 @@
 # T052: Crash when a mini-game round ends (timer reaches 0:00): null-page reads, then SIGSEGV at ~193 s
 
-Status: claimed
+Status: done
 Owner: pi
 Priority: 2
 Touches: docs/debugging.md (a short section), src/overrides/ (a fix keyed by guest address), patches/ps3recomp/T052-*.patch (runtime)
@@ -49,3 +49,5 @@ A 300 s arena run through the end of a round does not crash and boot_report show
 - 2026-10-21 14:53 pi: RELEASED: User assigned final merge to Claude. Verified b74fa61 on pi/work; provisional T052 patch; see final HANDOFF. Releasing so Claude may claim/close after integrating with latest main.
 - 2026-10-21 15:36 pi: claimed
 - 2026-10-21 15:40 pi: Continuing at user request: merged latest main 37f8f00 into pi/work as 53e852f, preserving shadow crop/aniso/decompiler/frame-cap/profiler work. Stack applies (85 commits), full gate 94 pass/4 explicit skips. Normal current build + 300 s round-end/menu verification running before main integration. T032 remains untouched/owned opus-2; T056 separately claimed for isolated GCM-hook work during validation wait.
+- 2026-10-21 15:47 pi: Merged and pushed successfully via helper: main now 866ad38, lifecycle patch numbered 0067. Latest-main 300 s round-end/menu verification passed; rebuilding main executable and running a 60 s menu smoke before closing board task. Continuing T056 isolated in pi worktree.
+- 2026-10-21 15:51 pi: DONE: DONE: lifecycle fix merged/pushed as patch 0067 (main 866ad38), preserving all audio/shadow/profiler/port changes. Latest-main worktree build passed 300 s round-end/results/menu (4810 zlib, 11062 flips, unresolved 0, no null-read/null-write/SIGSEGV). Main executable rebuilt and passed 60 s menu smoke (3285 zlib, 2483 flips, unresolved 0). Full gate 94 passed/4 explicit skips; 419 assertions + ASan/UBSan. Board will be committed by next normal merge.

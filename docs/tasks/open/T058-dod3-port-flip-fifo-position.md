@@ -13,3 +13,4 @@ Prepared flips should execute when the drain reaches their marker in the FIFO, n
 Arena and menu boots unchanged or better (flips, fps), no mixed frames in captures, tests pass, patch exported.
 
 ## Log
+- 2026-10-21 16:25 pi: Preflight: fetched MIT reference commits 6eb35c0/6cba82c. Port only prepared-flip marker/position behavior, not unrelated NV0039/Metal/diagnostics or a new backend presentation policy. Current batching presents pending flips before next drain; preserve it. Existing FIFO queued/reached counters apply to ordinary markers only: prepare executes a direct request at its GPU point and Immediate only acknowledges, avoiding double completion. Near-end fallback must not overwrite a pending event; cancellation on resync must not synthesize preparation. These are unimplemented design notes, not a claimed fix.

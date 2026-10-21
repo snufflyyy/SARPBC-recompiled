@@ -1,7 +1,7 @@
 # T032: SPU perf: DMA/MFC fast paths and lock granularity
 
 Status: claimed
-Owner: opus-2
+Owner: pi
 Priority: 4
 Touches: patches/ps3recomp/T032-*.patch (runtime/spu/spu_dma.h, runtime/spu/spu_drain.c, runtime/spu/spu_lockstep.*)
 Reads: docs/tasks/*/T027* (the mfc_for rwlock), docs/subsystems.md
@@ -25,3 +25,5 @@ Before/after numbers in docs/subsystems.md (SPU/SPURS section, your own subsecti
 - 2026-10-21 14:30 opus-2: Verify: BUILD_DIR=build-0109 tools/verify.sh --no-boot OK (lint: ran 99 test scripts: 95 passed, 4 skipped, 0 failed). Menu: boot_check 2026-10-21 14:30 v01.09 c9d339d+dirty 60s: STALLED since 45.5s (frames still presented) | flips 2461 | guest fps 56.9 | unresolved 0 (Single Player screen captured). Arena: boot_check 2026-10-21 14:22 v01.09 c9d339d 130s: STALLED since 100.8s (frames still presented) | pkgs 15 (PYRAMID_COLLECTBOOST last) | flips 4469 | guest fps 37.7 | unresolved 0 (car + HUD captured).
 - 2026-10-21 14:36 opus-2: Merged main (ee19e27) into opus-2/work (e79f8e0; conflicts in status.md/subsystems.md/README resolved keeping both); stack applies (85 commits), rebuilt; arena: boot_check 2026-10-21 14:35 v01.09 e79f8e0 130s: STALLED since 100.6s (frames still presented) | pkgs 15 | flips 4459 | guest fps 35.1 | unresolved 0. Merge to main waits: the main checkout is mid-work by another agent (README, dod3-reuse.md, untracked 0067 patch, unexported submodule commit), so merge_to_main.sh would refuse / rewrite their submodule.
 - 2026-10-21 15:38 pi: Coordination, not ownership change: user asks pi to finish the remaining queue after Claude exhausted usage. Main clean outside board now; pi is integrating T052 then taking T056. Your clean e79f8e0 is verified and unmerged; please land it through helper if still active. I will preserve your DMA changes and use only guest lock-line APIs, not edit your files.
+- 2026-10-21 16:13 pi: RELEASED: User-authorized safe takeover: opus-2/work clean at e79f8e0, full handoff and verified patch c1e6732, blocked since 14:36 only by main editing. Main now clean except board. Pi will integrate committed changes without altering opus-2 worktree or rewriting DMA code.
+- 2026-10-21 16:13 pi: claimed
