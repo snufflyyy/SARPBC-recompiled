@@ -135,6 +135,7 @@ tools/boot_check.sh 60                 # 60 s run, full report (~70 lines)
 tools/boot_check.sh 60 --quiet         # just the summary line
 tools/boot_check.sh 60 --gdb           # + every guest thread's stack at the end
 tools/boot_check.sh 60 --version 0109  # the staged 01.09 build (versions/0109/{build,game,vfs})
+tools/boot_check.sh --version 0109 --scenario arena   # named routes: boot menu single arena
 tools/boot_check.sh 120 --version 0109 --pad 'cross@40*4/5,cross@70*4/8'  # scripted offline input
 BUILD_DIR=... GAME_DIR=... VFS_DIR=... tools/boot_check.sh 60   # same variables as tools/run.sh
 tools/boot_report.py report analysis/run9.log       # report on any old log (no times/frames)

@@ -3,7 +3,7 @@
 # (docs/debugging.md, "boot_check").
 #
 #   tools/boot_check.sh [seconds] [--version V] [--gdb] [--every N] [--keep N] [--quiet]
-#                       [--pad SPEC]
+#                       [--pad SPEC] [--scenario NAME]
 #   BUILD_DIR=versions/0109/build GAME_DIR=versions/0109/game VFS_DIR=versions/0109/vfs \
 #       tools/boot_check.sh 60
 #
@@ -24,6 +24,15 @@
 #              Example, 01.09 into an exhibition match:
 #                --pad 'cross@40*4/5,cross@70*8/8'
 #
+#   --scenario NAME  a named route through the game, so nobody copies pad strings:
+#              boot    just boot (default seconds 60, no input)
+#              menu    to the main menu (60 s)
+#              single  Single Player, on to the Mini-Games screen (80 s)
+#              arena   New Game into the arena, playing a while (130 s)
+#              A given [seconds] or --pad wins; SARPBC_FRAME_STATS=1 is set so the log
+#              has fps lines. Timings are for 01.09 on the dev machine; slower hosts
+#              may need more seconds.
+#
 # BUILD_DIR, GAME_DIR and VFS_DIR mean what they mean to tools/run.sh (default:
 # this checkout's build/, game/, vfs/). A relative path that does not exist from
 # the current directory is looked up in the main checkout, where versions/ lives.
@@ -39,7 +48,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MAIN=$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)")
-SECS=60 GDB=0 EVERY=60 KEEP=5 QUIET=0 VERSION='' PAD=''
+SECS=60 SECS_SET=0 SCENARIO='' GDB=0 EVERY=60 KEEP=5 QUIET=0 VERSION='' PAD=''
 while [ $# -gt 0 ]; do
     case "$1" in
         --gdb) GDB=1 ;;
@@ -47,13 +56,28 @@ while [ $# -gt 0 ]; do
         --every) EVERY=$2; shift ;;
         --keep) KEEP=$2; shift ;;
         --pad) PAD=$2; shift ;;
+        --scenario) SCENARIO=$2; shift ;;
         -q|--quiet) QUIET=1 ;;
         -h|--help) sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
-        [0-9]*) SECS=$1 ;;
+        [0-9]*) SECS=$1; SECS_SET=1 ;;
         *) echo "boot_check: unknown argument '$1' (try --help)" >&2; exit 2 ;;
     esac
     shift
 done
+
+case "$SCENARIO" in
+    '') ;;
+    boot) SC_SECS=60 SC_PAD='' ;;
+    menu) SC_SECS=60 SC_PAD='cross@45,cross@50' ;;
+    single) SC_SECS=80 SC_PAD='cross@45,cross@50,cross@62' ;;
+    arena) SC_SECS=130 SC_PAD='cross@40*4/5,cross@70,r2:120@90,cross@100' ;;
+    *) echo "boot_check: unknown scenario '$SCENARIO' (boot menu single arena)" >&2; exit 2 ;;
+esac
+if [ -n "$SCENARIO" ]; then
+    [ "$SECS_SET" = 1 ] || SECS=$SC_SECS
+    [ -n "$PAD" ] || PAD=$SC_PAD
+    export SARPBC_FRAME_STATS=${SARPBC_FRAME_STATS:-1}
+fi
 
 [ "$KEEP" -ge 1 ] 2>/dev/null || { echo "boot_check: --keep needs a number >= 1" >&2; exit 2; }
 # Same variables and meaning as tools/run.sh; relative paths missing here fall back to MAIN.

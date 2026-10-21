@@ -41,6 +41,12 @@ class BootPadTests(unittest.TestCase):
             with self.subTest(spec=spec):
                 self.parse(spec, ok=False)
 
+    def test_unknown_scenario_fails_before_starting_a_game(self):
+        result = subprocess.run([str(Path(__file__).with_name('boot_check.sh')),
+                                 '--scenario', 'nope'], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('unknown scenario', result.stderr)
+
     def test_driver_writes_mask_poll_count_and_log(self):
         events = self.parse('cross:2@0,up@0.03')
         with tempfile.TemporaryDirectory(prefix='sarpbc-pad-test-') as name:

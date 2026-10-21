@@ -161,7 +161,9 @@ numbers:
 | `0056-vertex-fetch-all.patch` | T040: `rsx_vertex_fetch_all` fetches a draw attribute by attribute (type switch and plan resolved once per attribute); the draw engine uses it. Checked byte for byte against `rsx_vertex_fetch_one` in test_vertex_fetch_plan | generic, offer upstream |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
-`git -C external/ps3recomp format-patch -1 -o ../../patches/ps3recomp/ --start-number N`.
+`tools/export_patch.sh <slug> "<description>" ["<upstream status>"]` (next free number, the README row,
+and a check that the branch is exactly the stack plus your commit; `--count N` for a short series).
+By hand that is `git -C external/ps3recomp format-patch -1 -o ../../patches/ps3recomp/ --start-number N`.
 On a task branch, name it `T###-description.patch` (`T###-1-...`, `T###-2-...` for several, in
 apply order) and add its row to the table above; `tools/merge_to_main.sh` gives it the next free
 number when it merges (docs/workflow.md).

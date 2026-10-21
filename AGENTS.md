@@ -80,7 +80,7 @@ patches/ps3recomp/           our patches against the pinned upstream (+ README: 
 patches/experimental/        diffs kept for reference, never applied
 external/ps3recomp/          git submodule, pinned; tools/apply_patches.sh puts the patches on it
 tools/                       pipeline: extract.sh decrypt.sh relift.sh split_toc_stubs.py lift_prx_jobs.py
-                             make_spu_overlays.py apply_patches.sh
+                             make_spu_overlays.py apply_patches.sh export_patch.sh
                              run and measure: run.sh boot_check.sh boot_report.py spu_profile.{sh,py}
                              ppm2png.py hle_coverage.py
                              agents: task.sh agent_setup.sh merge_to_main.sh lint.py; tests: test_*.py
