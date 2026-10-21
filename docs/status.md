@@ -11,9 +11,11 @@ passes 300 s through results and back to the menu; two steady 40 s audio capture
 have no silent blocks, gaps or block-edge clicks. The user confirms the audio
 sounds good. Audio patches remain 0060–0062; the lifecycle repair is provisional
 `T052-coherent-taskset-lifecycle.patch`, numbered by the merge helper.
-Pi is finishing integration and the remaining queue at the user's request after
-Claude exhausted usage. T054 shadow correction and the later profiler/port work
-are preserved. T032 remains owned by opus-2; coordinate rather than overwrite it.
+Pi is finishing the remaining queue at the user's request after Claude exhausted
+usage. T052 now also passes 300 s with the latest shadow/profiler/port work
+(`53e852f`): 4810 zlib, 11062 flips, unresolved 0, returned main menu, no
+null-read/null-write/SIGSEGV. T056, T058, T009, T005 and interrupted T059 remain.
+T032 is verified on opus-2/work; coordinate integration rather than overwrite it.
 
 **User priorities (2026-10-20):** performance and stability, in that order of work: done so
 far, the pin bump (T043), the visual fixes (T051 and earlier), a steady 30+ fps (T040: Single
@@ -49,9 +51,10 @@ boot_check is PROGRESSING with 3513 flips; the main menu runs at **29.5 fps** (1
 26.3-32.3), ~130% CPU, 28 threads. Where a menu frame's ~31 ms go, and what to try next:
 subsystems.md "Menu frame rate".
 
-**State of `main`:** 59 patch files (77 commits) on upstream `749182e` (v0.16.0, T043).
-All 88 discovered test scripts return zero (T051, 2026-10-20, `tools/lint.py --tests`), as do
-three explicitly run nested SDL/Vulkan suites; optional-tool skip visibility remains T048.
+**Integrated patch stack:** 67 patch files (85 commits) on upstream `749182e`
+(v0.16.0, T043), including T052 and Claude's later audio/shadow/port work.
+Current full gate: 98 scripts, 94 passed / 4 explicit skips / 0 failures/timeouts;
+the nested SDL/Vulkan suites are included (T048).
 The upstream lifter did not
 change, so the lifts were kept. The big fixes of the last two days: the SPURS CreateTask race that started tasks twice
 (0036, T033: ~1500% CPU to ~100%) and Vulkan draw batching with a VRAM geometry cache (0038, T040:
@@ -119,7 +122,7 @@ T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena
 
 ## Log
 
-### 2026-10-21: combined audio/round-end build verified, handed off for merge (T052, pi)
+### 2026-10-21: round-end repair integrated with latest main (T052, pi)
 
 Patch `T052-coherent-taskset-lifecycle.patch` makes both SPURS task-exit bitsets and PPU bitset read/modify/write
 coherent. Old shared bits could resurrect completed island tasks, creating extra
@@ -142,9 +145,11 @@ also passes 300 s (`analysis/boot_check/20261021-035615-3491134/`): 4811 zlib,
 Two steady 40 s AUDIO_WAV windows have zero silent blocks, gaps and block-edge
 clicks. Combined gate: 98 scripts, 94 passed, 4 explicit skips; 419 lifecycle
 checks under sanitizers plus Claude's qbyte/fast-float regressions pass.
-The user confirms the audio works well and will ask Claude to merge `pi/work`.
-The T052 patch name stays provisional to avoid colliding with Claude's active
-shadow diagnostic numbered 0063; do not stash, commit or overwrite his work.
+The user confirms the audio works well. After Claude exhausted usage, pi also
+merged latest main `37f8f00` (shadow crop, aniso, decompiler, profiling and opt-in
+frame cap preserved) and verified another ordinary 300 s round-end/menu run:
+`analysis/boot_check/20261021-154006-1336355/`, 4810 zlib, 11062 flips, unresolved 0,
+no null-access alerts or SIGSEGV. The merge helper numbers the lifecycle patch.
 
 ### 2026-10-21: SPU profiler works without perf (T029, opus-1)
 - `tools/spu_profile.sh` falls back to per-thread `eu-stack` samples when perf cannot record (this container), adds `--scenario/--pad/--sampler/--interval` and a mixer PUT rate restricted to the sample window. No measurable cost (56.25 vs 56.58 fps). Single Player: lifted SPU 30%, SPU runtime 46% (28% is a per-job FNV hash of the whole job image: new T055); arena: lifted SPU 53%, the audio SPU thread (MultiStream DSP overlay + `e33837bb`) at 84% of a core. Numbers: subsystems.md "SPU time by category (T029)".
