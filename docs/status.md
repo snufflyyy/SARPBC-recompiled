@@ -109,6 +109,9 @@ T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena
 
 ## Log
 
+### 2026-10-21: SPU DMA fast paths (T032, opus-2)
+- In the arena one SPU issues all MFC DMA: the MultiStream mixer, ~168k GETs + ~65k PUTs/s. A PUT cost 853 ns (per-line reserved scans, an always-on POISON-DMA payload scan, a shared repeat-detector line); patch T032-spu-dma-put-fast-paths makes it 517 ns, mixer DMA time 84 -> 62 ms/s, bytes identical (`tools/test_spu_dma_hotpath.py`). Most of what is left is the GCM pushbuffer hook's 512-slot walk: follow-up T056. Numbers: subsystems.md "MFC DMA fast paths".
+
 ### 2026-10-21: audio crackle fixed (T053, claude)
 - The crackle was 66% silent blocks (the game wrote every 2nd-3rd ring slot because its mixer round ran 8-15 ms instead of 5.3 ms). Fixed by a faster audio SPU path (native float, lean LS, x86 `rotqby` family: patch 0060), the update thread's 5 ms nap scaled to 0 (patch 0061 + `src/overrides/audio_pacing.cpp`): 0.0% silent blocks and 0-1 block-edge clicks over 42-65 s menu/arena windows, was 860 clicks. Menu 55 fps, arena 38 fps. Details, numbers and `tools/audio_wav_report.py`: subsystems.md "Audio crackle". Not heard by an agent (no sound device here): the user should confirm by ear.
 

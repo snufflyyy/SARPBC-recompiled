@@ -165,6 +165,7 @@ numbers:
 | `0060-spu-x86-qbyte-fast-float-lean-ls.patch` | T053: x86 pshufb quadword byte shifts/rotates (lqd+rotqby was a ~100-instruction byte loop), opt-in SPU_FAST_FLOAT (native SSE fa/fm/fma) and SPU_LEAN_LS (no LS probes) per translation unit; tests test_spu_qbyte.c, test_spu_fast_float.c | generic, offer upstream |
 | `0061-usleep-scale-by-thread-name.patch` | T053: PS3_USLEEP_SCALE=<thread name>:<percent> shortens the sleeps of a named PPU thread (a guest loop napping a hardware-sized interval around work that is several times slower on the host) | generic, offer upstream |
 | `0062-audio-gaps-diagnostics.patch` | T053: AUDIO_GAPS ring-map log when a block is empty at read time; PS3_FTRACE kind 15 (silent block instants) | generic, offer upstream |
+| `T032-spu-dma-put-fast-paths.patch` | T032: DMA PUT asks the reserved-line bitmap about its whole span at once (`spu_coh_span_reserved`), the POISON-DMA payload scan is opt-in (`SPU_POISON_DMA=1`), and the wedged-job repeat detector keeps its state per context in `mfc_engine` instead of shared statics. Bench (`bench_spu_dma.c`): PUT 1 KiB 167 -> 55 ns, 16 KiB 1961 -> 335 ns, lists 2.6x, 8-thread aggregate 3.7x; arena mixer thread DMA 84 -> 62 ms/s. Test: `tools/test_spu_dma_hotpath.py` (byte model + digest) | generic, offer upstream |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `tools/export_patch.sh <slug> "<description>" ["<upstream status>"]` (next free number, the README row,
