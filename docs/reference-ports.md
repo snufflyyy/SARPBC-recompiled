@@ -95,3 +95,14 @@ and compares — copy that discipline.
 
 Not a ps3recomp port despite turning up in searches: Splatterhouse-PC (Xbox 360 recomp).
 No other port's README or code mentions Unreal.
+
+## Lifter performance (`--nonvolatile-locals`, T009 decision, 2026-10-21)
+
+Not ported. Measured instead of guessed: T029's stack sampler (docs/subsystems.md "SPU time by
+category") puts **PPU lifted code at 6.1% of on-CPU stacks** on the Single Player screen, with
+GCM/Vulkan at 18% and SPU code at 40-53%; the guest main/render threads are bound by the drain and
+the RSX thread, not by the lifted PPU code. The fork's own message says its hot code was
+float/vector and memory work, not r14-r31 spills, and the 64 KiB page-table store path would skip
+the guest lock that T052's reservation coherence relies on (pi's review). A relift of 7.5M lines
+plus a large lifter change cannot pay back a 6% share. Revisit if a PPU-heavy scene (a real match
+with game logic) shows lifted PPU code above ~30% of stacks.
