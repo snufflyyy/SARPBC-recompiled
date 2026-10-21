@@ -1,7 +1,7 @@
 # T021: Reuse Drakengard 3's port — inventory, then port the generic pieces
 
-Status: open
-Owner: -
+Status: claimed
+Owner: claude
 Priority: 17
 Touches: docs/dod3-reuse.md (new), docs/reference-ports.md, patches/ps3recomp/T021-*.patch (runtime/** and libs/** pieces NOT owned by an active task: see "Exclusions"), src/overrides/dod3_*.cpp (new)
 Reads: https://github.com/soyjxck/dod3-recomp and https://github.com/soyjxck/ps3recomp (both MIT), docs/reference-ports.md, docs/tasks/claimed/*
@@ -42,3 +42,6 @@ follow-up tasks are proposed.
 - 2026-10-20 18:19 sonnet-2: DONE-READY (inventory): branch worktree-agent-a1adb7e6c8c6fb98d commit 8aa8db3; docs/dod3-reuse.md rewritten (ranked Port next top 10, frame pacing recipe, all 208 fork commits, full dod3-recomp tree), docs/reference-ports.md and AGENTS.md index row updated. Not merged.
 - 2026-10-20 18:24 sonnet-2: RELEASED: Inventory part done and merged (claude): 208 fork commits classified against v0.16.0, ranked Port next list at the top of docs/dod3-reuse.md. Porting is the next step (do it as patches on the v0.16.0 stack); top picks: alpha-test ref for float targets (3f20f13), zero vertex stride (0eee9dd), FIFO wake on guest usleep (260ccb8).
 - 2026-10-20 18:28 claude: Ported Port-next #1 and #2 as patches 0048 (alpha ref float formats, fork 3f20f13; ours + test) and 0049 (zero vertex stride, fork 0eee9dd, author kept). Arena boot fine (125 s, 2612 flips); no visible change in the survey scenes (the white shards at boost pickups are probably the glass canisters shattering, unverified).
+- 2026-10-21 13:51 claude: claimed
+- 2026-10-21 14:03 claude: Ported Port-next #8 (DDX/DDY, NRM zero vector) as patch 0065 (author soyjxck kept, +3 checks in test_fp_decompiler: 77 pass); arena boot 130 s fine. #7: the cropped-depth half is already fixed by T054's 0064 (snapshot cropped to the sampling texture); scissored clears not needed (whole-target clear to 1.0 is a superset for the shadow map).
+- 2026-10-21 14:16 claude: Port-next #10 (aniso half) done: patch vulkan-anisotropic (idea from fork 66fd0a9, own Vulkan implementation). Arena capture sharper floors, fps 36.9, no speckle. Remaining open: #3 FIFO wake on usleep, #4 per-attribute vertex fetch, #5 prepared flips at FIFO position, #6 present pace, pipeline cache.

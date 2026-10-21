@@ -38,7 +38,7 @@ of runtime env vars is generated upstream in `external/ps3recomp/docs/DIAGNOSTIC
 | `PS3_LWCOND_POLL_MS`, `PS3_LWCOND_SLEEP` | lwcond wait tuning (patch 0017; waits now wake on signal) |
 | `PPU_THREAD_SLOTS`, `PPU_THREAD_END_STALL_US` | PPU thread table size / end-of-thread stall (patch 0018) |
 | `PS3_VFS_OVERLAY=<dir>` | Lay patched files over the dump (patch 0019) |
-| `RSX_ENGINE_PASS_DUMP=<dir>` (+ `_AFTER=<s>`, `_MAX`, `_DRAWS=1`, `_TEX=1`) | Per-pass render-target/depth capture, one line per draw (textures with mip count, pitch, filter, control0) and, with `_TEX`, every texture level decoded during the capture (patches 0044, 0045). Recipe below |
+| `RSX_ENGINE_PASS_DUMP=<dir>` (+ `_AFTER=<s>`, `_MAX`, `_DRAWS=1`, `_TEX=1`, `_ALPHA=1`: FP16 target alpha as `.a.pgm` + raw `.a.f32`, depth as raw `.f32`; T054) | Per-pass render-target/depth capture, one line per draw (textures with mip count, pitch, filter, control0) and, with `_TEX`, every texture level decoded during the capture (patches 0044, 0045). Recipe below |
 | `GCM_SUBCH1_2D=1` / `GCM_SUBCH1_3D=1` | Force subchannel 1 to NV0039 or NV4097 (default: NV0039 until a non-NV0039 method shows up there; patch 0046) |
 | `PAD_TRACE=1`, `PAD_TRIGGERS=port,value,start[,len]` | Log the pad buffer the game reads; force trigger values. Timing counts from the first GetData (~4.0 s on 01.09), not launch (patch 0015) |
 

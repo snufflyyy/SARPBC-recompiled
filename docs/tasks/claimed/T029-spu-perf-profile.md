@@ -1,7 +1,7 @@
 # T029: SPU perf: profiling harness (where SPU time goes, per image/function, spin share)
 
-Status: open
-Owner: -
+Status: claimed
+Owner: opus-1
 Priority: 3
 Touches: tools/spu_profile.sh (new), docs/debugging.md (a new "Profiling" section only)
 Reads: docs/tasks/*/T025*, docs/subsystems.md
@@ -38,3 +38,5 @@ Before/after numbers in docs/subsystems.md (SPU/SPURS section, your own subsecti
 - 2026-10-20 00:51 claude: HANDOFF (claude for pi): SARPBC_FRAME_STATS telemetry (src/overrides/frame_stats.cpp + frame_clock hook), spu_profile --warmup and guest FPS, docs/debugging.md menu baseline are merged (fc9cdf4); its 4 tool tests pass. Left: whatever remains of the mixer metric in the goal; profiler still has no perf in this container.
 - 2026-10-20 00:51 pi: RELEASED: pi out of usage; work merged, see HANDOFF
 - 2026-10-20 22:22 claude: 2026-10-20 measurement (main + 0053, Single Player screen, /proc thread CPU over 20 s at 72-92 s): whole game ~190% CPU; busiest threads 74%, 59%, 43% then 10%, 4%, rest ~0%. No thread looks like SPU spin; the T033 fix removed the 90% lock/spin of the 2026-10-19 profile. SPU speed is not limiting the menu/arena now, so no SPU change was made. Revisit only if an SPU-heavy scene (arena with physics/audio) shows SPU threads near 100%.
+- 2026-10-21 13:38 opus-1: claimed
+- 2026-10-21 14:07 opus-1: perf still denied (probe: perf record -- true fails, EPERM). New stacks sampler: per running thread eu-stack -1 -p TID (~23 ms, stops only that thread); whole-process eu-stack -p took 0.3 s/31 threads, stopped game 31% at 1 s cadence and most 'R' threads were asleep when reached (dropped approach). Menu scenario (lands on Single Player screen) 75+30s: sampled 56.25 FPS vs unsampled control 56.58, both 317% CPU -> sampler perturbation negligible. Stacks: SPU lifted 29.5%, SPU rt 46.3%, PPU 4.2%, GCM/VK 7.4%, other 12.6%, lock 0%; top images ovl_msdsp 19.5%, e33837bb 17.9%; mixer PUT in window 1620 KB/s (105.5% RT). Finding: spu_workload_dispatch_job is the leaf in 28% of stacks, on short-lived jc_thread threads: it byte-wise FNV-1a hashes the whole job image (spu_workload_fingerprint, inlined) on every job dispatch. Reports analysis/spu_profile_20261021-135900.txt / -140513.txt in opus-1 worktree.

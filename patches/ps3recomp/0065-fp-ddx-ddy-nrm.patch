@@ -1,0 +1,76 @@
+From 70b7a4ca0aad2539bb532afc273f9a9689614da2 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Wed, 21 Oct 2026 13:52:12 +0000
+Subject: [PATCH] fp decompiler: DDX/DDY cases and NRM of a zero vector
+
+Ported from soyjxck/ps3recomp c42065f and 93dbfdd (MIT), authored by soyjxck.
+DDX/DDY had no case (the destination kept stale data); NRM was a bare
+normalize, NaN for a zero vector.
+---
+ libs/video/rsx_fp_decompiler.c        | 14 +++++++++++++-
+ libs/video/tests/test_fp_decompiler.c | 17 +++++++++++++++++
+ 2 files changed, 30 insertions(+), 1 deletion(-)
+
+diff --git a/libs/video/rsx_fp_decompiler.c b/libs/video/rsx_fp_decompiler.c
+index 415046a..d7d122d 100644
+--- a/libs/video/rsx_fp_decompiler.c
++++ b/libs/video/rsx_fp_decompiler.c
+@@ -908,6 +908,11 @@ static int rsx_fp_decompile_internal(
+         case OP_MAX: snprintf(rhs, sizeof(rhs), "max((%s), (%s))", a, b); break;
+         case OP_FRC: snprintf(rhs, sizeof(rhs), "frac(%s)", a); break;
+         case OP_FLR: snprintf(rhs, sizeof(rhs), "floor(%s)", a); break;
++        /* The screen-space derivatives (RPCS3: dFdx / dFdy of the source).
++         * They had no case: the program went on without them. Ported from
++         * soyjxck/ps3recomp c42065f (MIT). */
++        case OP_DDX: snprintf(rhs, sizeof(rhs), "ddx(%s)", a); break;
++        case OP_DDY: snprintf(rhs, sizeof(rhs), "ddy(%s)", a); break;
+         case OP_RCP: snprintf(rhs, sizeof(rhs), "(1.0 / (%s).x)", a); break;
+         /* Pack/unpack (RPCS3 FragmentProgramDecompiler PK/UP cases and the pkg/upg
+          * builtins): the packed word is a scalar that replicates. */
+@@ -951,7 +956,14 @@ static int rsx_fp_decompile_internal(
+                      a, a, b);
+             break;
+         case OP_DP2: snprintf(rhs, sizeof(rhs), "dot((%s).xy, (%s).xy)", a, b); break;
+-        case OP_NRM: snprintf(rhs, sizeof(rhs), "float4(normalize((%s).xyz), 1.0)", a); break;
++        /* A zero vector is left as it is, not normalized to NaN (oracle:
++         * RPCS3 FragmentProgramDecompiler.cpp, _builtin_normalize, "some
++         * games ... generate NaNs" otherwise). In Drakengard 3 a NaN here went
++         * through the lighting into the HDR scene and the bloom spread it into
++         * black blocks. Ported from soyjxck/ps3recomp 93dbfdd (MIT). */
++        case OP_NRM:
++            snprintf(rhs, sizeof(rhs), "float4(length((%s).xyz) > 0.0 ? normalize((%s).xyz) : (%s).xyz, 1.0)", a, a, a);
++            break;
+         case OP_LRP: snprintf(rhs, sizeof(rhs), "lerp((%s), (%s), (%s))", c, b, a); break;
+         /* Lighting coefficients: (1, y, y > 0 ? 2^w : 0, 1) (RPCS3
+          * FragmentProgramDecompiler, RSX_FP_OPCODE_LIF). */
+diff --git a/libs/video/tests/test_fp_decompiler.c b/libs/video/tests/test_fp_decompiler.c
+index 650c021..c02abbf 100644
+--- a/libs/video/tests/test_fp_decompiler.c
++++ b/libs/video/tests/test_fp_decompiler.c
+@@ -154,6 +154,23 @@ int main(void)
+         check("mul_expr", hlsl, "(r[0]).xyzw) * ((r[0]).xyzw)");
+     }
+ 
++    /* DDX / DDY / NRM (ported from soyjxck/ps3recomp c42065f, 93dbfdd): the
++     * derivatives have a case, NRM leaves a zero vector alone. */
++    {
++        const u32 ops[3] = { 0x15, 0x16, 0x39 };
++        const char* want[3] = { "ddx(", "ddy(", "length(" };
++        const char* names[3] = { "ddx_emitted", "ddy_emitted", "nrm_zero_guard" };
++        for (int k = 0; k < 3; k++) {
++            u8 prog[16];
++            put_word(prog + 0, OPC(ops[k]) | OUTMASK_ALL | OUTREG(1) | END);
++            put_word(prog + 4, T_TEMP | REG(0) | SWZ_IDENT | EXEC_ALWAYS);
++            put_word(prog + 8, T_TEMP | REG(0) | SWZ_IDENT);
++            put_word(prog + 12, 0);
++            rsx_fp_decompile(prog, sizeof(prog), CTRL_32BIT, hlsl, sizeof(hlsl));
++            check(names[k], hlsl, want[k]);
++        }
++    }
++
+     /* Test 3: MAD r0, r0, CONST, r0 with inline constant + saturate. */
+     {
+         u8 prog[32];
+-- 
+2.47.3
+

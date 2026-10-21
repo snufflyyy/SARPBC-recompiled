@@ -1,0 +1,50 @@
+From d61128b57506137f6f5b78209dcbe537dc4d0bc9 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Wed, 21 Oct 2026 04:28:49 +0000
+Subject: [PATCH] rsx engine: RSX_ENGINE_PASS_DUMP_ALPHA dumps FP16 target
+ alpha
+
+---
+ libs/video/rsx_draw_engine.c | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 4cc1ec1..3fcdc29 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -2402,6 +2402,32 @@ static void pd_write_surface(u32 slot, const char* path)
+         fprintf(f, "P6\n%u %u\n255\n", s->w, s->h);
+         fwrite(rgb, 1, (size_t)s->w * s->h * 3u, f);
+         fclose(f);
++        /* RSX_ENGINE_PASS_DUMP_ALPHA=1: the alpha of an FP16 target as <path>.a.pgm,
++         * stretched over its finite range (the range goes to stderr). Titles keep
++         * linear depth in alpha for screen-space shadows. */
++        if (getenv("RSX_ENGINE_PASS_DUMP_ALPHA") && s->fmt == RSX_BE_FMT_R16G16B16A16F) {
++            char apath[1100];
++            snprintf(apath, sizeof apath, "%s.a.pgm", path);
++            const size_t n = (size_t)s->w * s->h;
++            float lo = 1e30f, hi = -1e30f;
++            for (size_t i = 0; i < n; i++) {
++                u16 h; memcpy(&h, raw + i * 8u + 6u, 2);
++                const float v = pd_half(h);
++                if (v == v && v > -6e4f && v < 6e4f) { if (v < lo) lo = v; if (v > hi) hi = v; }
++            }
++            FILE* af = fopen(apath, "wb");
++            if (af) {
++                fprintf(af, "P5\n%u %u\n255\n", s->w, s->h);
++                const float span = hi > lo ? hi - lo : 1.0f;
++                for (size_t i = 0; i < n; i++) {
++                    u16 h; memcpy(&h, raw + i * 8u + 6u, 2);
++                    float v = (pd_half(h) - lo) / span;
++                    fputc(v > 0.0f ? (v < 1.0f ? (int)(v * 255.0f) : 255) : 0, af);
++                }
++                fclose(af);
++                fprintf(stderr, "[rsx engine] pass dump alpha %s: %.6g..%.6g\n", apath, lo, hi);
++            }
++        }
+     }
+     free(raw);
+     free(rgb);
+-- 
+2.47.3
+

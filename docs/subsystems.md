@@ -289,6 +289,40 @@ switch: the square goes, nothing else changes). Patch
 `0047-shadow-compare-direction`. If another title's shadows invert after this,
 suspect this patch first.
 
+### Car shadow: where it landed (T054, 2026-10-21)
+
+After 0047 the dark square was gone but the shadow was a hard-edged patch beside
+the car that moved around when driving (user, 2026-10-21: "wrong place, swims,
+looks like a matrix problem"). Not a matrix: the constants were right (the
+shadow draw's `fp10`, the car origin, equals the map pass's `vp4` every frame,
+so nothing lags). Cause: **the depth snapshot of the shadow map was the whole
+zeta.** `eng_zdepth_get` makes every zeta canvas-sized (1280x720), the game's
+shadow map is a 512x512 texture in its top-left corner, and the snapshot copy
+was 1280x720. The shader samples with normalised coordinates, so every lookup
+was scaled by 512/1280 and 512/720 and landed elsewhere in the zeta, moving
+with the car. Patch `0064-depth-snapshot-crop` crops the snapshot to the
+sampling texture (cache keyed on size); the shadow now sits under/behind the car.
+
+How it was found (reusable): the shadow is a **screen-space multiply** (pass
+draw 3: pipe with fp `0c7d45f5d23f4dc7`, 34 constants, blend DST_COLOR x ZERO) that
+reads scene depth from the **alpha of the FP16 HDR target** (`0x0A130000`) and
+projects it through the light matrix into the map; 4 bilinear taps 0.7 texel
+apart, squared, distance fade. The light has the camera's orientation, so the
+real shadow is mostly hidden behind the car. `RSX_ENGINE_SKIP_FP=0c7d45f5d23f4dc7`
+removes it. A numpy re-run of that shader on dumped alpha, map and constants
+disagreed with the GPU image, which pointed at the texture, not the math.
+`RSX_ENGINE_PASS_DUMP_ALPHA=1` (patch 0063) writes the alpha of FP16 targets
+(`.a.pgm`, raw `.a.f32`) and the raw depth floats (`_z.pgm.f32`).
+
+### Anisotropic filtering (T021 Port next 10, 2026-10-21)
+
+Patch `0066-vulkan-anisotropic`: a sampler gets anisotropy (default 16x, `RSX_ANISO=<n>`,
+`1` = off, clamped to the device limit) only when the bound object is a guest texture with
+more than one mip level, not a cube, and the title asked for linear min/mag/mip filtering.
+Render targets, their views and depth/colour snapshots keep the title's filter: the Drakengard
+fork found 16x over those (shadow maps, packed depth, post inputs) puts speckle on floors.
+Arena run: floors visibly sharper at a glancing angle, no artefacts, guest fps 36.9 vs ~35.
+
 ### Loading / splash screen orientation (T038/T050/T051, 2026-10-20)
 
 The root cause was **PNG scanline order, not shader projection**. A fresh 01.09 boot
@@ -938,6 +972,15 @@ range cleanup, reverse-order removal, and reuse of the same addresses.
   to libs/spurs/cellSpursQueue.c, and the test does not compile that file. All 9 ctest tests
   (`-DPS3RECOMP_BUILD_TESTS=ON`) and `tools/test_spu_context_registries.py` pass.
 
+### SPU codegen wins: not needed (T031, 2026-10-21)
+
+Measured in the arena (`boot_check --scenario arena`, 20 s of `/proc/<pid>/task/*/stat`
+at 100-120 s, guest ~35 fps): the whole game uses ~82% of one core; the busiest
+threads are 46% and 31%, the rest under 4%. Nothing SPU-shaped is near 100%, so
+lifter codegen changes (always_inline `spu_shufb`, direct calls, constant folding)
+would buy nothing measurable and risk bit-exactness. Revisit when an SPU-heavy
+scene (a real match with physics and audio, phase 8) puts an SPU thread near 100%.
+
 ### SPU time by category (T029, 2026-10-21)
 
 `tools/spu_profile.sh` with the per-thread `eu-stack` sampler (perf is denied here; method in
@@ -964,12 +1007,17 @@ sampled vs 56.58 unsampled (`--sampler none`), 317% host CPU in both.
   arena these two images are 63% of all on-CPU stacks (32% and 31%, inclusive). It keeps the mixer
   at real time, so it is not yet a limit, but at ~84% it is the first SPU thread that would
   become one (claude's T032 note asked to revisit at "near 100%"). Top functions: msdsp
-  `0x37614`, `0x39A18`, `0x37B20`, `0x37198`; e33837bb `0x4DB0`, `0x53B8`. Candidates for T031
-  (codegen).
+  `0x37614`, `0x39A18`, `0x37B20`, `0x37198`; e33837bb `0x4DB0`, `0x53B8`. Candidates if T031
+  (codegen, closed) is reopened.
 - **Per-job image hash (new T055).** On the Single Player screen `spu_workload_dispatch_job` is
   the leaf of 28% of all on-CPU stacks (54 of 190), each on a short-lived `jc_thread`: the inlined
   `spu_workload_fingerprint` runs a byte-wise FNV-1a over the whole job image on every dispatch.
   Not seen in the arena run.
+- **Differs from T031's arena measurement above** (~82% of one core in total, busiest thread
+  46%). This run, on `c9d339d` (after T053's patches 0060/0061 removed the audio update thread's
+  5 ms nap), shows 243% and the audio SPU thread at 84%. The stacks put that thread in lifted
+  msdsp/`e33837bb` code, not in a lock or yield, but whether that code is mixing or polling a
+  channel in a loop is not established (guess to check before any T031-style codegen work).
 - The other busy threads are the RSX/FIFO thread (`frame_clock` -> `cellGcm_rsx_process_fifo`,
   53-54%: `rsx_vertex_remap_build`, `rsx_vertex_fetch_all`) and PPU threads (21-47%).
 - Reports: `analysis/spu_profile_20261021-{135900,140513,141126}.txt` in the opus-1 worktree.

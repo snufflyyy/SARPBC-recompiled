@@ -1,0 +1,110 @@
+From cefcb21561260bdde3f1b7e99771791990006c91 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Wed, 21 Oct 2026 13:42:11 +0000
+Subject: [PATCH] rsx engine: crop depth snapshots to the sampling texture
+ (shadow map in a canvas-sized zeta)
+
+---
+ libs/video/rsx_draw_engine.c                  | 19 ++++++++++++++-----
+ libs/video/tests/test_color_feedback_engine.c |  6 ++++++
+ libs/video/tests/test_rsx_draw_engine.c       |  3 ++-
+ 3 files changed, 22 insertions(+), 6 deletions(-)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 3fcdc29..1490688 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -110,6 +110,7 @@ typedef struct {
+     int cleared;
+     int had_write;
+     int snapshot_valid;
++    u32 snap_w, snap_h;    /* size of that copy: the texture's, not the zeta's */
+     u64 depth_serial;      /* g.write_serial of the last depth write or clear */
+     int guest_dirty;       /* written since guest memory last got a copy     */
+     u32 zfmt, pitch;       /* SURFACE_FORMAT depth field and zeta pitch then */
+@@ -886,15 +887,23 @@ static u32 eng_zdepth_get(u32 location, u32 offset, u32 rt_w, u32 rt_h)
+  * a depth-WRITING draw: a write-enable bit alone does not prove the pass
+  * produced a usable depth map, and a clear-only zeta falls through to guest
+  * memory instead (rsx_live_draw.c:6016-6018, 6265-6269). */
+-static u32 eng_zdepth_snapshot(u32 slot)
++static u32 eng_zdepth_snapshot(u32 slot, u32 tex_w, u32 tex_h)
+ {
+     eng_zdepth* z = &g.zdepths[slot];
+     if (!z->handle || !z->had_write) return 0;
+-    if (z->snapshot_valid && z->snapshot) return z->snapshot;
++    /* The copy is cropped to the sampling texture. A zeta is allocated at the
++     * size of the screen it was first bound with, while a shadow map is a
++     * smaller texture in its corner (SARPBC: 512x512 in a 1280x720 zeta);
++     * sampled whole, normalised coordinates would span the full zeta and the
++     * lookup lands in the wrong place, scaled by texture size over zeta size. */
++    u32 w = tex_w && tex_w < z->w ? tex_w : z->w;
++    u32 h = tex_h && tex_h < z->h ? tex_h : z->h;
++    if (z->snapshot_valid && z->snapshot && z->snap_w == w && z->snap_h == h) return z->snapshot;
+     if (!g.be->depth_snapshot) return 0;
+-    const u32 tex = g.be->depth_snapshot(g.be->user, z->handle, z->w, z->h);
++    const u32 tex = g.be->depth_snapshot(g.be->user, z->handle, w, h);
+     if (!tex) return 0;
+     z->snapshot = tex;
++    z->snap_w = w; z->snap_h = h;
+     z->snapshot_valid = 1;
+     return tex;
+ }
+@@ -2159,7 +2168,7 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
+             /* DEPTH24_D8 keeps the backend's own snapshot when it has one;
+              * anything else goes through guest memory. */
+             if (base_fmt == RSX_TEX_FMT_DEPTH24_D8 && current_zslot != (u32)zsrc) {
+-                const u32 snap = eng_zdepth_snapshot((u32)zsrc);
++                const u32 snap = eng_zdepth_snapshot((u32)zsrc, t.width, t.height);
+                 if (snap) { textures[u] = snap; continue; }
+             }
+             if (eng_zdepth_to_guest((u32)zsrc)) {
+@@ -2218,7 +2227,7 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
+             for (u32 i = 0; i < g.n_zdepths; i++)
+                 if (g.zdepths[i].location == t.location &&
+                     g.zdepths[i].offset == t.offset && current_zslot != i) {
+-                    const u32 snap = eng_zdepth_snapshot(i);
++                    const u32 snap = eng_zdepth_snapshot(i, t.width, t.height);
+                     if (snap) textures[u] = snap;
+                     break;
+                 }
+diff --git a/libs/video/tests/test_color_feedback_engine.c b/libs/video/tests/test_color_feedback_engine.c
+index d2d870d..39eab7f 100644
+--- a/libs/video/tests/test_color_feedback_engine.c
++++ b/libs/video/tests/test_color_feedback_engine.c
+@@ -29,6 +29,12 @@ int main(void){vm_base=calloc(1,GUEST_BYTES);ppu_vm_size=GUEST_BYTES;
+  up();m(M_COLOR_TARGET,CELL_GCM_SURFACE_TARGET_MRT1);m(M_CONTEXT_DMA_COLOR_B,DMA_LOCAL);m(M_COLOR_B_OFFSET,0x50000);m(0x021C,1024);for(u32 a=0;a<0x20;a+=4)m(M_TEX_UNIT+0x20+a,rsx_dsp_reg(&g.rsx,M_TEX_UNIT+a));m(0x1844,1024);m(M_TEX_UNIT+0x20,0x50000);nt=eng_current_target_set(targets);memset(tx,0,sizeof tx);T(nt==2&&sink_bind_textures(targets,nt,ENG_INVALID,3,tx,ss)==3&&copies==2&&tx[0]!=tx[1],"MRT feedback snapshots every owned member independently");down();
+  up();feedback_backend.surface_view=NULL;draw_triangle();T(copies==1&&stub.n_draw==1&&stub.bound_tex[0]==snapshot_seen,"absent view allows identity copy");down();
+  up();feedback_backend.surface_view=NULL;m(M_TEX_UNIT+0x10,0xAA6C);draw_triangle();T(copies==1&&!stub.n_draw,"absent remap view rejects instead of silently changing channels");down();
++ /* A shadow map is a small texture in the corner of a zeta that covers the whole canvas (1280x720): the snapshot is cropped to the texture and re-taken for another size. */
++ up();{u32 zs2=eng_zdepth_get(RSX_LOCATION_LOCAL,0x40000,256,256);g.zdepths[zs2].had_write=1;g.zdepths[zs2].snapshot_valid=0;
++ T(eng_zdepth_snapshot(zs2,64,32)!=0&&stub.snap_w==64&&stub.snap_h==32,"depth snapshot cropped to the sampling texture");
++ int n=stub.n_depth_snapshot;eng_zdepth_snapshot(zs2,64,32);T(stub.n_depth_snapshot==n,"same-size snapshot is reused");
++ eng_zdepth_snapshot(zs2,128,128);T(stub.n_depth_snapshot==n+1&&stub.snap_w==128,"other texture size takes a new snapshot");
++ eng_zdepth_snapshot(zs2,4000,4000);T(stub.snap_w==g.zdepths[zs2].w&&stub.snap_h==g.zdepths[zs2].h,"texture larger than the zeta clamps to it");}down();
+  /* Independently newer depth at the same address keeps its established route. */
+  up();nt=eng_current_target_set(targets);u32 zs=eng_zdepth_get(RSX_LOCATION_LOCAL,0x40000,256,256);g.zdepths[zs].depth_serial=2;g.zdepths[zs].had_write=1;g.zdepths[zs].snapshot_valid=0;m(M_TEX_UNIT+4,1|(2<<4)|(0xB0<<8)|(1<<16));memset(tx,0,sizeof tx);T(sink_bind_textures(targets,nt,ENG_INVALID,1,tx,ss)==1&&copies==0&&stub.n_depth_snapshot==1,"newer depth wins over own color metadata");down();
+  /* Full physical layouts and matching formats, without reinterpretation. */
+diff --git a/libs/video/tests/test_rsx_draw_engine.c b/libs/video/tests/test_rsx_draw_engine.c
+index 86a1023..9958615 100644
+--- a/libs/video/tests/test_rsx_draw_engine.c
++++ b/libs/video/tests/test_rsx_draw_engine.c
+@@ -71,6 +71,7 @@ typedef struct {
+     int n_texture_create, n_texture_release, n_texture_upload;
+     int n_color_create, n_color_release, n_color_seeded;
+     int n_depth_create, n_depth_snapshot;
++    u32 snap_w, snap_h;                 /* size the last depth snapshot asked for */
+     int n_pipeline_create;
+     rsx_be_render_state pipeline_rs;   /* the last pipeline's render state */
+     int n_draw, n_clear_color, n_clear_ds, n_present;
+@@ -163,7 +164,7 @@ static u32 stub_depth_create(void* u, u32 w, u32 h)
+ { (void)u; (void)w; (void)h; stub.n_depth_create++; return stub_handle(); }
+ 
+ static u32 stub_depth_snapshot(void* u, u32 d, u32 w, u32 h)
+-{ (void)u; (void)d; (void)w; (void)h; stub.n_depth_snapshot++; return stub_handle(); }
++{ (void)u; (void)d; stub.snap_w = w; stub.snap_h = h; stub.n_depth_snapshot++; return stub_handle(); }
+ 
+ static u32 stub_pipeline_create(void* u, const char* vs, const char* ps,
+                                 const rsx_be_render_state* rs,
+-- 
+2.47.3
+
