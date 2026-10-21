@@ -93,10 +93,11 @@ work. Update the **Status** line of a section when you change it.
   (stored at `0x0123CDB0`; `0xFF` = none) and calls `cellGcmSetFlipImmediate` with it. That
   data is the return value of `cellGcmSetPrepareFlip`, which the RHI writes into its command
   stream. The pin returned `CELL_OK` (0) and flipped on the spot, so the game prepared 0/1
-  alternately but every flip showed buffer 0 (108 of 108). Now PrepareFlip returns the id and
-  does not flip; FlipImmediate alternates 0/1. Part of fork 0049 (6eb35c0); its FIFO marker
-  and no-op FlipImmediate are not ported, because the park release needs FlipImmediate to
-  call the flip handler. `GCM_PREPARE_FLIPS_NOW=1` restores the old behaviour.
+  alternately but every flip showed buffer 0 (108 of 108). T024 corrected the return id.
+  T058 now queues the preparation at its FIFO position; Immediate acknowledges it without
+  another flip. The legacy optional early callback stays on that successful PPU ack for
+  park release, never on the locked GPU drain. `GCM_PREPARE_FLIPS_NOW` is removed; the
+  current implementation and validation are in docs/dod3-reuse.md, item 5.
 - **Flip handler `func_000DC144` (01.09).** Bumps a counter at `0x01295428`; if the pending
   count at `0x01295460` is non-zero it decrements it, takes the park slot from a 2-entry table
   at `0x01295430` (index `0x01295458`, toggled each time; it waits for the slot with

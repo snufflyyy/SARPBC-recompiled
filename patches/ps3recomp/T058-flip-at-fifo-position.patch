@@ -1,0 +1,535 @@
+From e74f9d80bc78df8273ee5acfa479614f7696ddc2 Mon Sep 17 00:00:00 2001
+From: soyjxck <soyjxck@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 16:40:51 +0000
+Subject: [PATCH] fix(gcm): execute prepared flips at their FIFO position
+
+Adapt prepared-flip portions of MIT fork commits 6eb35c0 and 6cba82c. Keep existing present gating and ordinary flip accounting. Use atomic per-buffer acknowledgements and a non-overwriting position fallback; cancel skipped preparations on resync. Preserve immediate-only titles, reject malformed contexts, and remove the obsolete flip-now diagnostic mode.
+
+Co-authored-by: pi <pi@localhost>
+---
+ libs/video/cellGcmSys.c        | 198 +++++++++++++++++++++------------
+ tests/test_gcm_prepare_flip.c  | 150 +++++++++++++++++++------
+ tools/test_gcm_prepare_flip.py |  11 +-
+ 3 files changed, 253 insertions(+), 106 deletions(-)
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 01fcb5c..3fbf5bb 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -116,6 +116,22 @@ static u32 s_current_display_buffer_id = 0;
+ static volatile int s_flip_pending = 0;
+ /* A flip _cellGcmSetFlipCommand queued in the FIFO: | bufferId, bit 8 = ours. */
+ #define GCM_FLIP_MARKER 0xFEAD0100u
++#define GCM_PREPARE_MARKER 0xFEAD0200u
++/* Ready preparations await a PPU acknowledgement, possibly on another thread.
++ * Track each buffer independently: a delayed callback for 0 must survive 1. */
++static atomic_uint s_prepare_used;
++static atomic_uint s_prepared_ready[CELL_GCM_MAX_DISPLAY_BUFFER_NUM];
++#define GCM_NO_POS_PREPARE UINT64_MAX
++/* No marker room: {buffer id, IO cursor}, published as one atomic event. */
++static _Atomic(u64) s_pos_prepare = GCM_NO_POS_PREPARE;
++static void gcm_record_flip_request(u32 bufferId, int in_fifo);
++static void gcm_reset_prepared_flips(void)
++{
++    atomic_store(&s_prepare_used, 0);
++    for (u32 i = 0; i < CELL_GCM_MAX_DISPLAY_BUFFER_NUM; i++)
++        atomic_store(&s_prepared_ready[i], 0);
++    atomic_store(&s_pos_prepare, GCM_NO_POS_PREPARE);
++}
+ /* Flips queued into the command stream by gcm_flip_into_fifo, and how many of
+  * those markers the drain has reached. The RSX completes a flip when it
+  * executes it; until the drain reaches the marker, the flip has not happened,
+@@ -254,6 +270,14 @@ static int gcm_flipcb_on_tick_only(void)
+     return v;
+ }
+ 
++/* Keep legacy early callbacks on PPU-facing paths. A FIFO drain holds its
++ * lock and must not enter a guest handler that can wait for that same FIFO. */
++static void gcm_early_flip_callback(void)
++{
++    if (s_flip_handler_opd && g_ps3_guest_caller && !gcm_flipcb_on_tick_only())
++        g_ps3_guest_caller(s_flip_handler_opd, 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
+ static u32 s_vblank_handler_opd   = 0;
+ static u32 s_user_handler_opd     = 0;
+ static u32 s_second_v_handler_opd = 0;
+@@ -612,6 +636,7 @@ s32 cellGcmInit(u32 cmdSize, u32 ioSize, u32 ioAddress)
+       gcm_forget_spu_blocks();
+       g_spu_put_hook = gcm_note_spu_put; }
+ 
++    gcm_reset_prepared_flips();
+     s_gcm_initialized = 1;
+     return CELL_OK;
+ }
+@@ -1831,6 +1856,10 @@ static void gcm_fifo_resync_why(const char* why, u32* getoff, u32 put)
+             fprintf(stderr, "[cellGcmSys] resync rescued %u fence(s) from"
+                     " 0x%08X..0x%08X\n", rescued, from, land); }
+     }
++    /* A skipped preparation did not execute. Never acknowledge it later at
++     * an unrelated cursor after resync/wrap. Ordinary marker accounting above
++     * remains separate: preparations do not request a flip until execution. */
++    atomic_store_explicit(&s_pos_prepare, GCM_NO_POS_PREPARE, memory_order_release);
+     *getoff = land;
+ }
+ 
+@@ -2002,6 +2031,25 @@ static int gcm_get_eq_put(void)
+     return eq;
+ }
+ 
++/* FIFO execution, shared by a real marker and the ring-end position event.
++ * Existing present gating stops before the next drain, so no backend policy
++ * change is needed. Guest callbacks remain on the PPU ack/completion paths. */
++static void gcm_prepare_executed(u32 id)
++{
++    if (id >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM || !s_display_buffer_set[id]) return;
++    gcm_record_flip_request(id, 0);
++    atomic_store_explicit(&s_prepare_used, 1, memory_order_release);
++    atomic_fetch_add_explicit(&s_prepared_ready[id], 1, memory_order_release);
++}
++static int gcm_fire_pos_prepare(void)
++{
++    u64 event = atomic_load_explicit(&s_pos_prepare, memory_order_acquire);
++    if (event == GCM_NO_POS_PREPARE || (u32)event != s_fifo_getoff) return 0;
++    if (!atomic_compare_exchange_strong_explicit(&s_pos_prepare, &event,
++            GCM_NO_POS_PREPARE, memory_order_acq_rel, memory_order_acquire)) return 0;
++    gcm_prepare_executed((u32)(event >> 32));
++    return 1;
++}
+ static void gcm_rsx_process_fifo_unlocked(void)
+ {
+     { static unsigned _n = 0; static unsigned long long _t0 = 0;
+@@ -2118,7 +2166,10 @@ static void gcm_rsx_process_fifo_unlocked(void)
+      * short of `put` every tick is the signature of a FIFO that can never
+      * catch up, and the reason is the whole diagnosis. */
+     const char* why = "caught-up";
+-    while (s_fifo_getoff != put && budget-- > 0) {
++    while (budget-- > 0) {
++        /* Also test get==put: a preparation may be at that exact write head. */
++        if (gcm_fire_pos_prepare()) { why = "prepare-position"; break; }
++        if (s_fifo_getoff == put) break;
+         u32 ea = gcm_io2ea(s_fifo_getoff);
+         if (!ea) {
+             /* get is sitting on an IO offset with no mapping -- the title
+@@ -2194,6 +2245,8 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                 /* Not past `queued`: a resync may already have written off
+                  * this flip. */
+                 if (s_fifo_flips_reached != s_fifo_flips_queued) s_fifo_flips_reached++;
++            } else if ((w & 0xFFFFFF00u) == GCM_PREPARE_MARKER) {
++                gcm_prepare_executed(w & 7u);
+             } else {
+                 cellGcmSetFlipCommand(w & 0xFFu);
+             }
+@@ -2886,6 +2939,25 @@ u32 cellGcm_display_buffer_count(void)
+     return n;
+ }
+ 
++/* Shared request bookkeeping, with no guest callback. FIFO preparation uses
++ * it at execution; ordinary HLE requests use it before their legacy callback. */
++static void gcm_record_flip_request(u32 bufferId, int in_fifo)
++{
++    if (!in_fifo) {
++        gcm_set_current_display_buffer(bufferId);
++        s_flip_pending = 1;   /* ticker: present BEFORE the next drain */
++        s_flip_request_count++;
++        s_flip_direct_pending = 1;
++    }
++    FLIP_LOCK();
++    s_flip_status = CELL_GCM_FLIP_STATUS_WAITING;
++    s_flip_req_seq++;
++    FLIP_UNLOCK();
++    s_last_flip_time = get_timestamp_ns();
++    if (PS3_FT_ON()) { const uint64_t t = ps3_ft_now();
++                       ps3_ft_span(PS3_FT_FLIP_REQ, 0, bufferId, (uint32_t)in_fifo, t, t); }
++}
++
+ static s32 gcm_flip_request(u32 bufferId, int in_fifo)
+ {
+     /* GCM_FLIPCOUNT=1: every flip, with a timestamp. FLIP_DBG caps at 20 lines,
+@@ -2939,23 +3011,9 @@ static s32 gcm_flip_request(u32 bufferId, int in_fifo)
+         return CELL_GCM_ERROR_INVALID_VALUE;
+ 
+ 
+-    /* in_fifo: the flip sits in the command stream as a GCM_FLIP_MARKER, and
+-     * the drain does this half when it reaches it (see the 0xFEAD case). */
+-    if (!in_fifo) {
+-        gcm_set_current_display_buffer(bufferId);
+-        s_flip_pending = 1;   /* ticker: present BEFORE the next drain */
+-        s_flip_request_count++;
+-        s_flip_direct_pending = 1;
+-    }
+-    /* Flip requested but not yet shown: a subsequent cellGcmSetWaitFlip blocks
+-     * until the present thread's cellGcmTickFlip marks it done (vsync). */
+-    FLIP_LOCK();
+-    s_flip_status = CELL_GCM_FLIP_STATUS_WAITING;
+-    s_flip_req_seq++;
+-    FLIP_UNLOCK();
+-    s_last_flip_time = get_timestamp_ns();
+-    if (PS3_FT_ON()) { const uint64_t t = ps3_ft_now();
+-                       ps3_ft_span(PS3_FT_FLIP_REQ, 0, bufferId, (uint32_t)in_fifo, t, t); }
++    /* An ordinary in-FIFO request records its guest-visible half now;
++     * the drain changes the displayed buffer when it reaches that marker. */
++    gcm_record_flip_request(bufferId, in_fifo);
+ 
+     /* Invoke via OPD resolution, not a raw call into guest code.
+      *
+@@ -2966,8 +3024,7 @@ static s32 gcm_flip_request(u32 bufferId, int in_fifo)
+      * handler against half-built state. Tokyo Jungle faults that way, in
+      * func_001F2D3C, dereferencing a singleton it has not constructed yet.
+      * GCM_FLIPCB_ONTICK=1 leaves the callback to the tick alone. */
+-    if (s_flip_handler_opd && g_ps3_guest_caller && !gcm_flipcb_on_tick_only())
+-        g_ps3_guest_caller(s_flip_handler_opd, 0, 0, 0, 0, 0, 0, 0, 0);  /* head 0 = primary display */
++    gcm_early_flip_callback();
+ 
+     return CELL_OK;
+ }
+@@ -2983,16 +3040,18 @@ s32 cellGcmSetFlipCommand(u32 bufferId) { return gcm_flip_request(bufferId, 0);
+  * at ctx->current instead; the drain stops at it and fires the flip there,
+  * exactly as it does for the 0xFEAD words a statically-linked libgcm emits.
+  * Returns 0 when there is no room or ctx is not a mapped command buffer. */
+-static int gcm_flip_into_fifo(u32 ctx, u32 bufferId)
++static int gcm_word_into_fifo(u32 ctx, u32 word)
+ {
+-    if (!ctx || bufferId >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM ||
+-        !s_display_buffer_set[bufferId]) return 0;
+-    const u32 end = vm_read32(ctx + 4), cur = vm_read32(ctx + 8);
++    if (!ctx) return 0;
++    const u32 begin = vm_read32(ctx), end = vm_read32(ctx + 4), cur = vm_read32(ctx + 8);
+     /* Never near the end: those bytes are the title's reserve before its
+      * ring wraps, and the recycle above keys on them. */
+-    if (cur + 8 + GCM_RECYCLE_SLACK > end || gcm_ea2io(cur) == 0xFFFFFFFFu) return 0;
+-    vm_write32(cur, GCM_FLIP_MARKER | bufferId);
+-    s_fifo_flips_queued++;
++    if (cur < begin || (u64)cur + 8 + GCM_RECYCLE_SLACK > end ||
++        gcm_ea2io(cur) == 0xFFFFFFFFu) return 0;
++    if ((word & 0xFFFFFF00u) == GCM_PREPARE_MARKER)
++        atomic_store_explicit(&s_prepare_used, 1, memory_order_release);
++    vm_write32(cur, word);
++    if ((word & 0xFFFFFF00u) == GCM_FLIP_MARKER) s_fifo_flips_queued++;
+     /* Wrap here, on the guest thread, once the ring is nearly used -- what the
+      * SDK's buffer-full callback does. Otherwise the drain thread recycles it
+      * (see "recycled the title's own ring"), rewriting ctx->current and put
+@@ -3008,7 +3067,7 @@ static int gcm_flip_into_fifo(u32 ctx, u32 bufferId)
+      * moves down as it allocates from the top, so it always looks nearly full.
+      * Rewinding it to `begin` in mid-frame cut the frame short, dropping the
+      * fence release in its tail, and the title then waited for it forever. */
+-    const u32 begin = vm_read32(ctx), io_begin = gcm_ea2io(begin);
++    const u32 io_begin = gcm_ea2io(begin);
+     const u32 cb_opd = vm_read32(ctx + 0xC);
+     const int runtime_ring = cb_opd && vm_read32(cb_opd) == GCM_FIFO_CALLBACK_SENTINEL_EA;
+     if (runtime_ring && end - (cur + 4) < GCM_FLIP_WRAP_BYTES && io_begin != 0xFFFFFFFFu &&
+@@ -3021,6 +3080,12 @@ static int gcm_flip_into_fifo(u32 ctx, u32 bufferId)
+     return 1;
+ }
+ 
++static int gcm_flip_into_fifo(u32 ctx, u32 bufferId)
++{
++    if (bufferId >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM || !s_display_buffer_set[bufferId]) return 0;
++    return gcm_word_into_fifo(ctx, GCM_FLIP_MARKER | bufferId);
++}
++
+ /* cellGcmSetFlip(context, buffer_id) — immediate flip request. PSL1GHT's
+  * gcmSetFlip import (NID 0xDC09357E) lands here; without it vkcube's flip was
+  * a no-op, GetFlipStatus never cleared, and init timed out into exit(-1). */
+@@ -3043,54 +3108,35 @@ s32 cellGcmSetFlipCommandWithWaitLabel(u32 bufferId, u32 labelIndex, u32 labelVa
+     return cellGcmSetFlipCommand(bufferId);
+ }
+ 
+-static int gcm_prepare_flips_now(void)
++static int gcm_prepare_at_position(u32 ctx, u32 id)
+ {
+-    static int v = -1;
+-    if (v < 0) { const char* e = getenv("GCM_PREPARE_FLIPS_NOW"); v = (e && *e == '1') ? 1 : 0; }
+-    return v;
++    const u32 begin = vm_read32(ctx), end = vm_read32(ctx + 4);
++    const u32 cur = vm_read32(ctx + 8), io = gcm_ea2io(cur);
++    if (cur < begin || cur > end || io == 0xFFFFFFFFu) return 0;
++    const u64 event = ((u64)id << 32) | io;
++    u64 empty = GCM_NO_POS_PREPARE;
++    atomic_store_explicit(&s_prepare_used, 1, memory_order_release);
++    /* One pending position is enough for the ring-end fallback. If occupied,
++     * report failure; overwriting it would silently discard an earlier flip. */
++    return atomic_compare_exchange_strong_explicit(&s_pos_prepare, &empty,
++        event, memory_order_release, memory_order_relaxed);
+ }
+ 
+ /* NID: 0xA2478CA3 */
+ s32 cellGcmSetPrepareFlip(void* ctx, u32 bufferId)
+ {
+-    (void)ctx;  /* command buffer context -- not used in HLE */
+-
+-    if (bufferId >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM)
+-        return CELL_GCM_ERROR_INVALID_VALUE;
+-
+-    if (!s_display_buffer_set[bufferId])
+-        return CELL_GCM_ERROR_INVALID_VALUE;
+-
+-    printf("[cellGcmSys] SetPrepareFlip(bufferId=%u)\n", bufferId);
+-
+-    /* libgcm only queues the preparation in the command buffer and RETURNS
+-     * THE BUFFER ID; the flip itself is cellGcmSetFlipImmediate(id), which
+-     * the title calls once the RSX has reached the preparation. Unreal
+-     * Engine 3's PS3 RHI writes the return value into its command stream as
+-     * the data of a GCM_SET_USER_COMMAND; its user handler then calls
+-     * SetFlipImmediate with it. Returning CELL_OK (0) here made every
+-     * SetFlipImmediate flip buffer 0, and flipping here as well presented
+-     * the buffer the drain was still drawing into (Supersonic Acrobatic
+-     * Rocket-Powered Battle-Cars: Prepare 0/1 alternating, FlipImmediate 0
+-     * every time; Drakengard 3 saw the same, ported from soyjxck/ps3recomp
+-     * 6eb35c0 "prepared flips execute in FIFO order", MIT).
+-     * GCM_PREPARE_FLIPS_NOW=1 restores the old behaviour (flip here, CELL_OK). */
+-    if (!gcm_prepare_flips_now())
++    if (!ctx || bufferId >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM ||
++        !s_display_buffer_set[bufferId]) return CELL_GCM_ERROR_INVALID_VALUE;
++    /* The GPU performs the flip at this point, after all earlier draws.
++     * A later SetFlipImmediate only acknowledges it. Adapted from MIT fork
++     * commits 6eb35c0 / 6cba82c; preserve the current backend present gate. */
++    const u32 ea = (u32)(uintptr_t)ctx;
++    if (gcm_word_into_fifo(ea, GCM_PREPARE_MARKER | bufferId) ||
++        gcm_prepare_at_position(ea, bufferId)) {
++        printf("[cellGcmSys] SetPrepareFlip(bufferId=%u) -> FIFO\n", bufferId);
+         return (s32)bufferId;
+-
+-    gcm_set_current_display_buffer(bufferId);
+-    s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
+-    s_flip_request_count++;
+-    s_last_flip_time = get_timestamp_ns();
+-
+-    /* Invoke the guest flip handler via OPD resolution -- s_flip_handler holds
+-     * the raw guest OPD (e.g. 0x530D70); calling it as a host function pointer
+-     * jumps into guest code and crashes. See cellGcmSetFlipCommand for why
+-     * GCM_FLIPCB_ONTICK exists. */
+-    if (s_flip_handler_opd && g_ps3_guest_caller && !gcm_flipcb_on_tick_only())
+-        g_ps3_guest_caller(s_flip_handler_opd, 0, 0, 0, 0, 0, 0, 0, 0);
+-
+-    return CELL_OK;
++    }
++    return CELL_GCM_ERROR_FAILURE;
+ }
+ 
+ /* NID: 0x1BFAB6EE */
+@@ -3879,6 +3925,7 @@ void cellGcmTerminate(void)
+     printf("[cellGcmSys] Terminate\n");
+ 
+     s_gcm_initialized = 0;
++    gcm_reset_prepared_flips();
+     s_flip_mode   = CELL_GCM_DISPLAY_VSYNC;
+     s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
+     s_debug_level = CELL_GCM_DEBUG_LEVEL0;
+@@ -4062,6 +4109,19 @@ u32 cellGcmGetDefaultSegmentWordSize(void)
+ /* Immediate flip — perform flip right now */
+ s32 cellGcmSetFlipImmediate(u32 bufferId)
+ {
++    if (bufferId >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM || !s_display_buffer_set[bufferId])
++        return CELL_GCM_ERROR_INVALID_VALUE;
++    if (atomic_load_explicit(&s_prepare_used, memory_order_acquire)) {
++        u32 ready = atomic_load_explicit(&s_prepared_ready[bufferId], memory_order_acquire);
++        while (ready && !atomic_compare_exchange_weak_explicit(&s_prepared_ready[bufferId],
++                &ready, ready - 1, memory_order_acq_rel, memory_order_acquire)) {}
++        if (!ready) return CELL_GCM_ERROR_FAILURE;
++        printf("[cellGcmSys] SetFlipImmediate(bufferId=%u) (prepared ack)\n", bufferId);
++        /* Preserve the existing optional early park-release edge on the PPU,
++         * without creating another flip or entering the guest from the drain. */
++        gcm_early_flip_callback();
++        return CELL_OK;
++    }
+     printf("[cellGcmSys] SetFlipImmediate(bufferId=%u)\n", bufferId);
+     return cellGcmSetFlipCommand(bufferId);
+ }
+diff --git a/tests/test_gcm_prepare_flip.c b/tests/test_gcm_prepare_flip.c
+index 79022d5..dac5464 100644
+--- a/tests/test_gcm_prepare_flip.c
++++ b/tests/test_gcm_prepare_flip.c
+@@ -1,49 +1,131 @@
+-/* cellGcmSetPrepareFlip returns the buffer id and does not flip; the flip is
+- * cellGcmSetFlipImmediate(id). Includes the real implementation, as
+- * test_gcm_map_flags.c does. */
++/* Prepared flips execute at the GPU FIFO point, not on the later PPU ack.
++ * Includes the real implementation; the backend and guest callbacks are inert. */
+ #include "../libs/video/cellGcmSys.c"
+ #include <assert.h>
+ 
+ uint8_t* vm_base;
+-uint32_t g_ww_lo, g_ww_hi;
+-void ps3_ww_report_inline(uint32_t a, uint64_t v, int w) { (void)a; (void)v; (void)w; abort(); }
++uint32_t ppu_vm_size, g_ww_lo, g_ww_hi;
+ int g_resv_store_active;
+-void ppu_resv_break_store(uint64_t addr) { (void)addr; abort(); }
+-int spu_coh_is_reserved(uint32_t addr) { (void)addr; return 0; }
+-void spu_coh_notify_write(uint32_t addr) { (void)addr; abort(); }
+-void spu_lockline_lock(void) { abort(); }
+-void spu_lockline_unlock(void) { abort(); }
+-/* The flip path's runtime hooks: no guest, no draw engine, no diagnostics. */
++void ps3_ww_report_inline(uint32_t a, uint64_t v, int w) { (void)a; (void)v; (void)w; }
++void ppu_resv_break_store(uint64_t a) { (void)a; }
++int spu_coh_is_reserved(uint32_t a) { (void)a; return 0; }
++void spu_coh_notify_write(uint32_t a) { (void)a; }
++void spu_lockline_lock(void) {}
++void spu_lockline_unlock(void) {}
++#ifndef _WIN32
++BOOL SetEvent(HANDLE h) { (void)h; return 1; }
++#endif
+ ps3_guest_caller_fn g_ps3_guest_caller;
+ PPU_THREAD_LOCAL ppu_context* g_active_ctx;
+-void ppu_dump_guest_stack(ppu_context* c, const char* t) { (void)c; (void)t; abort(); }
+-void ppu_dump_bctrl_ring(uint32_t id, const char* t) { (void)id; (void)t; abort(); }
++u32 g_rsx_last_reference;
++void (*g_spu_put_hook)(uint32_t ea, uint32_t size);
++void ppu_dump_guest_stack(ppu_context* c, const char* t) { (void)c; (void)t; }
++void ppu_dump_bctrl_ring(uint32_t n, const char* t) { (void)n; (void)t; }
++void rsx_raise_user_cmd(uint32_t a) { (void)a; }
++void rsx_state_init(rsx_state* s) { (void)s; }
++int rsx_process_method(rsx_state* s, u32 m, u32 d)
++{ (void)s; if(m==0x50)g_rsx_last_reference=d; return 0; }
+ int rsx_draw_engine_enabled(void) { return 0; }
+-void rsx_draw_engine_note_flip(u32 id) { (void)id; abort(); }
+-
++void rsx_draw_engine_note_flip(u32 id) { (void)id; }
++void rsx_draw_engine_method(u32 m, u32 a) { (void)m; (void)a; }
++void rsx_draw_engine_guest_read(u32 l,u32 o,u32 p,u32 w,u32 h) { (void)l;(void)o;(void)p;(void)w;(void)h; }
++void rsx_draw_engine_guest_wrote(u32 l,u32 o,u32 p,u32 w,u32 h) { (void)l;(void)o;(void)p;(void)w;(void)h; }
++int rsx_live_draw_enabled(void) { return 0; }
++void rsx_live_draw_method(u32 m,u32 a) { (void)m;(void)a; }
++int rsx_live_draw_blit(u32 a,u32 b,u32 c,u32 d,u32 e,u32 f,u32 w,u32 h)
++{ (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)w;(void)h;return 0; }
++void rsx_live_draw_note_resolve(u32 a,u32 b,u32 c,u32 d) { (void)a;(void)b;(void)c;(void)d; }
++int rsx_live_draw_resolve_blit(u32 a,u32 b,u32 c,u32 d,u32 e,u32 f,u32 g,u32 h,u32 i,u32 j,u32 k,u32 l)
++{ (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k;(void)l;return 0; }
++static unsigned callbacks;
++static void fake_guest(u32 opd,u64 a,u64 b,u64 c,u64 d,u64 e,u64 f,u64 g,u64 h)
++{ (void)opd;(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;callbacks++; }
++static u32 heap=0x00800000;
++static u32 host_alloc(u32 size,u32 align)
++{ if(!align)align=4;heap=(heap+align-1)&~(align-1);u32 r=heap;heap+=size;return r; }
++static void host_w32(u32 a,u32 v) { vm_write32(a,v); }
++static void fence(u32 a,u32 value) { vm_write32(a,0x00040050u);vm_write32(a+4,value); }
+ int main(void)
+ {
+-    vm_base = calloc(1, 0x10000); assert(vm_base);
+-    s_display_buffer_set[0] = s_display_buffer_set[1] = 1;
+-    s_current_display_buffer_id = 0;
+-    const u32 flips = s_flip_request_count;
++    setvbuf(stdout,NULL,_IONBF,0);
++    ppu_vm_size=ppu_hle_inject_base+0x10000u;
++    vm_base=calloc(1,ppu_vm_size);assert(vm_base);
++    const u32 out=host_alloc(4,4);
++    assert(cellGcmSetupContext(out,0x80000,0x400000,0x100000,host_alloc,host_w32)!=0);
++    s_display_buffer_set[0]=s_display_buffer_set[1]=1;
++    const u32 ctx=host_alloc(0x18,16),buf=0x300000,io=gcm_ea2io(buf);
++    vm_write32(ctx,buf);vm_write32(ctx+4,buf+0x30000);
++    vm_write32(ctx+8,buf);vm_write32(ctx+12,ctx+16);
++    vm_write32(ctx+16,0x12345678); /* title-owned, never recycle it */
++    s_fifo_getoff=io;vm_write32(GCM_CONTROL_GUEST_ADDR,io);
++
++    /* Immediate-only titles retain their original path. */
++    assert(cellGcmSetFlipImmediate(0)==CELL_OK);
++    s_flip_pending=s_flip_direct_pending=0;
++    u32 flips=s_flip_request_count;
++    s_flip_handler_opd=0x1234;g_ps3_guest_caller=fake_guest;
++    const unsigned cbperack=getenv("GCM_FLIPCB_ONTICK")?0:1;
++    fence(buf,7);vm_write32(ctx+8,buf+8);
++    assert(cellGcmSetPrepareFlip((void*)(uintptr_t)ctx,1)==1);
++    assert(vm_read32(buf+8)==0xfead0201u && vm_read32(ctx+8)==buf+12);
++    assert(s_flip_request_count==flips && s_current_display_buffer_id==0);
++    assert(cellGcmSetFlipImmediate(1)==(s32)CELL_GCM_ERROR_FAILURE);
++    assert(s_flip_request_count==flips);
++    fence(buf+12,99);vm_write32(GCM_CONTROL_GUEST_ADDR,io+20);
++    cellGcm_rsx_process_fifo();
++    assert(s_fifo_getoff==io+12 && g_rsx_last_reference==7);
++    assert(s_flip_request_count==++flips && s_current_display_buffer_id==1);
++    assert(callbacks==0); /* The GPU drain must never enter guest callbacks. */
++    assert(cellGcmSetFlipImmediate(1)==CELL_OK);assert(callbacks==cbperack);
++    assert(cellGcmSetFlipImmediate(1)==(s32)CELL_GCM_ERROR_FAILURE);
++    assert(s_flip_request_count==flips); /* no duplicate flip */
++    cellGcm_rsx_process_fifo();
++    assert(g_rsx_last_reference==99 && s_fifo_getoff==io+20);
++    (void)GCM_PENDING_TAKE();cellGcm_request_tick();assert(GCM_PENDING_TAKE()&2);
++    cellGcm_request_tick();assert(!(GCM_PENDING_TAKE()&2));
++    assert(cellGcmSetPrepareFlip(NULL,1)==(s32)CELL_GCM_ERROR_INVALID_VALUE);
++    assert(cellGcmSetPrepareFlip((void*)(uintptr_t)ctx,8)==(s32)CELL_GCM_ERROR_INVALID_VALUE);
++    assert(cellGcmSetPrepareFlip((void*)(uintptr_t)ctx,2)==(s32)CELL_GCM_ERROR_INVALID_VALUE);
+ 
+-    /* Unreal Engine 3 carries this return value to cellGcmSetFlipImmediate. */
+-    assert(cellGcmSetPrepareFlip(NULL, 1) == 1);
+-    assert(cellGcmSetPrepareFlip(NULL, 0) == 0);
+-    assert(cellGcmSetPrepareFlip(NULL, 1) == 1);
+-    /* Preparing is not flipping: nothing is presented and no flip counted. */
+-    assert(s_current_display_buffer_id == 0);
+-    assert(s_flip_request_count == flips);
++    /* Delayed PPU callbacks may acknowledge both buffers after both markers. */
++    vm_write32(ctx+8,buf+32);s_fifo_getoff=io+32;
++    assert(cellGcmSetPrepareFlip((void*)(uintptr_t)ctx,0)==0);
++    assert(cellGcmSetPrepareFlip((void*)(uintptr_t)ctx,1)==1);
++    vm_write32(GCM_CONTROL_GUEST_ADDR,io+40);
++    cellGcm_rsx_process_fifo();cellGcm_rsx_process_fifo();flips+=2;
++    assert(s_flip_request_count==flips && callbacks==cbperack);
++    assert(cellGcmSetFlipImmediate(0)==CELL_OK && cellGcmSetFlipImmediate(1)==CELL_OK);
++    assert(callbacks==3*cbperack);
++    assert(s_flip_request_count==flips);
+ 
+-    assert(cellGcmSetPrepareFlip(NULL, CELL_GCM_MAX_DISPLAY_BUFFER_NUM) ==
+-           (s32)CELL_GCM_ERROR_INVALID_VALUE);
+-    assert(cellGcmSetPrepareFlip(NULL, 2) == (s32)CELL_GCM_ERROR_INVALID_VALUE);  /* not set */
++    /* No marker space: the exact FIFO cursor is an event, including get==put.
++     * Refuse a second pending event, rather than overwrite an earlier frame. */
++    const u32 pos=buf+0x30000-4,posio=gcm_ea2io(pos);
++    fence(pos-8,55);vm_write32(pos,0xabcdef01);vm_write32(ctx+8,pos);
++    s_fifo_getoff=posio-8;vm_write32(GCM_CONTROL_GUEST_ADDR,posio);
++    assert(cellGcmSetPrepareFlip((void*)(uintptr_t)ctx,1)==1);
++    assert(vm_read32(pos)==0xabcdef01 && vm_read32(ctx+8)==pos);
++    assert(cellGcmSetPrepareFlip((void*)(uintptr_t)ctx,0)==(s32)CELL_GCM_ERROR_FAILURE);
++    assert(cellGcmSetFlipImmediate(1)==(s32)CELL_GCM_ERROR_FAILURE);
++    cellGcm_rsx_process_fifo();
++    assert(s_fifo_getoff==posio && g_rsx_last_reference==55);
++    assert(s_flip_request_count==++flips && s_current_display_buffer_id==1);
++    assert(callbacks==3*cbperack);
++    assert(cellGcmSetFlipImmediate(1)==CELL_OK);assert(callbacks==4*cbperack);
++    cellGcm_rsx_process_fifo();assert(s_flip_request_count==flips);
+ 
+-    /* The flip itself. */
+-    assert(cellGcmSetFlipImmediate(1) == CELL_OK);
+-    assert(s_current_display_buffer_id == 1);
+-    assert(s_flip_request_count == flips + 1);
+-    puts("test_gcm_prepare_flip: OK");
++    /* A resync is cancellation, not execution of the skipped preparation. */
++    assert(cellGcmSetPrepareFlip((void*)(uintptr_t)ctx,1)==1);
++    s_fifo_getoff=0x0fd00000u;cellGcm_rsx_process_fifo();
++    assert(cellGcmSetFlipImmediate(1)==(s32)CELL_GCM_ERROR_FAILURE);
++    assert(s_flip_request_count==flips);
++    vm_write32(ctx+8,buf-4);
++    assert(cellGcmSetPrepareFlip((void*)(uintptr_t)ctx,1)==(s32)CELL_GCM_ERROR_FAILURE);
++    vm_write32(ctx+8,buf+0x30000+4);
++    assert(cellGcmSetPrepareFlip((void*)(uintptr_t)ctx,1)==(s32)CELL_GCM_ERROR_FAILURE);
++    vm_write32(ctx+8,0x70000000);vm_write32(ctx+4,0x70010000);
++    assert(cellGcmSetPrepareFlip((void*)(uintptr_t)ctx,1)==(s32)CELL_GCM_ERROR_FAILURE);
++    assert(s_flip_request_count==flips);
++    free(vm_base);puts("test_gcm_prepare_flip: FIFO ordering / ack / position / resync OK");
+     return 0;
+ }
+diff --git a/tools/test_gcm_prepare_flip.py b/tools/test_gcm_prepare_flip.py
+index d167039..94f0861 100644
+--- a/tools/test_gcm_prepare_flip.py
++++ b/tools/test_gcm_prepare_flip.py
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env python3
+-"""cellGcmSetPrepareFlip returns the buffer id; SetFlipImmediate flips."""
++"""Prepared flips execute at their FIFO point; SetFlipImmediate acknowledges."""
+ import os
+ from pathlib import Path
+ import subprocess
+@@ -17,5 +17,10 @@ with tempfile.TemporaryDirectory(prefix='gcm-prepare-flip-') as tmp:
+     subprocess.run([os.environ.get('CC','cc'),'-std=gnu17','-D_GNU_SOURCE','-O1','-UNDEBUG',
+         '-ffunction-sections','-fdata-sections','-I'+str(root/'include'),
+         str(root/'tests/test_gcm_prepare_flip.c'),*linker,'-o',str(binary)],check=True)
+-    subprocess.run([str(binary)],check=True,timeout=10,
+-        env={k:v for k,v in os.environ.items() if not k.startswith('A2O_')})
++    env={k:v for k,v in os.environ.items() if not k.startswith('A2O_')}
++    env.pop('GCM_FLIPCB_ONTICK',None)
++    env['GCM_INTR_THREAD']='0'
++    for tick_only in (False,True):
++        if tick_only:
++            env['GCM_FLIPCB_ONTICK']='1'
++        subprocess.run([str(binary)],check=True,timeout=10,env=env)
+-- 
+2.47.3
+

@@ -17,8 +17,9 @@ usage. T052 now also passes 300 s with the latest shadow/profiler/port work
 null-read/null-write/SIGSEGV. T032/T056 are now combined and verified: 100-script gate, ordinary 300 s through
 round end/results/menu, and full DMA PUT cost 233 ns (~7% above the earlier
 hook-skipped 218 ns reference). Pi preserved opus-2's authored patch and clean
-worktree. Next: T058 prepared-flip ordering, T009/T005 lifter work, then T059
-pipeline caching (interrupted claim safely transferred from Claude).
+worktree. T058 prepared-flip ordering is implemented and synthetic/sanitizer
+tests pass in both callback modes; game verification is running. Then T009/T005
+lifter work and T059 pipeline caching (claim safely transferred from Claude).
 
 **User priorities (2026-10-20):** performance and stability, in that order of work: done so
 far, the pin bump (T043), the visual fixes (T051 and earlier), a steady 30+ fps (T040: Single
@@ -54,7 +55,7 @@ boot_check is PROGRESSING with 3513 flips; the main menu runs at **29.5 fps** (1
 26.3-32.3), ~130% CPU, 28 threads. Where a menu frame's ~31 ms go, and what to try next:
 subsystems.md "Menu frame rate".
 
-**Integrated patch stack:** 69 patch files (87 commits) on upstream `749182e`
+**Integrated patch stack:** 70 patch files (88 commits) on upstream `749182e`
 (v0.16.0, T043), including T052 and Claude's later audio/shadow/port work.
 Current full gate: 100 scripts, 96 passed / 4 explicit skips / 0 failures/timeouts;
 the nested SDL/Vulkan suites are included (T048).
