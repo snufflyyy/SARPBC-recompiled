@@ -288,11 +288,9 @@ static DWORD WINAPI frame_clock(LPVOID)
         while ((long long)(now_x3 - next_tick_x3) >= 0 && fired < 240) {
             cellGcmTickVBlank();
             cellGcmTickFlip();
-            /* Present a pending flip BEFORE draining any further. The flip
-             * fires at a get==put frame boundary on the guest thread, so the
-             * batch held right now is exactly the completed frame; presenting
-             * after the drain races the guest's next-frame writes and shows a
-             * mixed one. */
+            /* Present a pending flip BEFORE draining any further. A PPU-side
+             * request or the previous drain's FIFO marker marks the completed
+             * frame; another drain could overwrite it with next-frame draws. */
             if (rsx_ok && cellGcm_take_flip_pending()) {
                 if (cap_on) FC_TIMED(st_sleep, flip_cap_wait(next_flip_us));
                 FC_TIMED(st_present, present_guest_frame()); st_presents++;
@@ -330,6 +328,9 @@ static DWORD WINAPI frame_clock(LPVOID)
              * present freely, so the window is not blank during boot. */
             unsigned fc = cellGcm_flip_request_count();
             if (fc != last_flip) {
+                /* A marker reached by this drain also left the pending flag.
+                 * Claim it here, or the next iteration presents it again. */
+                (void)cellGcm_take_flip_pending();
                 if (cap_on) FC_TIMED(st_sleep, flip_cap_wait(next_flip_us));
                 FC_TIMED(st_present, present_guest_frame()); st_presents++;
                 last_flip = fc;
