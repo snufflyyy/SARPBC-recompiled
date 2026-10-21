@@ -30,6 +30,9 @@ of runtime env vars is generated upstream in `external/ps3recomp/docs/DIAGNOSTIC
 | `PS3_EVQSTAT`, `PS3_LWMUTEX_TRACE` | Event-queue and lwmutex state |
 | `SPU_DUMP_MISS=<dir>` | Dump SPU images that have no lifted match |
 | `PS3_NO_AUDIO`, `SDL_AUDIODRIVER=dummy` | Remove audio from the equation |
+| `AUDIO_WAV=<f>`, `AUDIO_RATE=1`, `AUDIO_PEAK=1`, `AUDIO_GAPS=1` | Capture the final mix (raw f32le stereo 48 kHz), every 5 s blocks/s + silent share + underruns, the mix peak, and a ring map when a block is empty at read time (`[audio-gap] ... ring=[#.#.>...]`: `#` holds data, `>` is the block being read). Judge a capture with `tools/audio_wav_report.py` (silent blocks, gaps, block-edge clicks). `PS3_FTRACE` also records every silent block (kind 15). A WAV with sound in it is not good audio: see subsystems.md "Audio crackle" |
+| `PS3_USLEEP_SCALE=<thread name>:<percent>[,...]` | Shorten (or stretch) the `sys_timer_usleep` of the PPU threads with that name (patch 0061). `src/overrides/audio_pacing.cpp` sets `MultiStream Update Thread:0` unless the variable is set; an empty `PS3_USLEEP_SCALE=` restores the game's own timing |
+| `SARPBC_MP3_TIME=1`, `SARPBC_MP3_TRACE=<n>`, `SARPBC_MP3_NATIVE=0` | Native MP3 decoder: every 5 s calls and mean/max host time per frame (~75 us), log the first n calls, switch it off |
 | `PAD_SCRIPT="frame:mask,..."` | Scripted input for unattended runs |
 | `PS3RECOMP_VK_DUMP=<path>` + `_EVERY` | Save presented frames to check rendering headlessly |
 | `PS3_LWCOND_POLL_MS`, `PS3_LWCOND_SLEEP` | lwcond wait tuning (patch 0017; waits now wake on signal) |

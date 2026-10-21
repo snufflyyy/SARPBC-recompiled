@@ -1,0 +1,351 @@
+From 58255067f906b470f1949b3f20ac5f838f7bf809 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyy@proton.me>
+Date: Wed, 21 Oct 2026 03:35:56 +0000
+Subject: [PATCH] spu: x86 pshufb quadword byte shifts/rotates, opt-in
+ SPU_FAST_FLOAT and SPU_LEAN_LS
+
+- rotqby/rotqbyi/shlqby/shlqbyi/shlqbybi/rotqbybi/rotqmby/rotqmbybi/rotqmbyi had only NEON
+  versions; on x86 they were 16-iteration byte loops (~100 instructions), and lqd+rotqby is
+  how SPU code loads an unaligned scalar. SSSE3 forms, tested against the _ref loops for
+  every shift amount (tests/test_spu_qbyte.c).
+- SPU_FAST_FLOAT (per translation unit): fa/fs/fm/fma/fms/fnms as native SSE singles with
+  denormals flushed, for DSP code that does not need bit-exact truncating arithmetic.
+- SPU_LEAN_LS (per translation unit): spu_ls_read128/write128 without the probe, watchpoint
+  and SMC-watch checks.
+---
+ runtime/spu/spu_context.h               | 12 ++++
+ runtime/spu/spu_helpers.h               | 85 ++++++++++++++++++++++++-
+ runtime/spu/tests/test_spu_fast_float.c | 53 +++++++++++++++
+ runtime/spu/tests/test_spu_qbyte.c      | 42 ++++++++++++
+ 4 files changed, 191 insertions(+), 1 deletion(-)
+ create mode 100644 runtime/spu/tests/test_spu_fast_float.c
+ create mode 100644 runtime/spu/tests/test_spu_qbyte.c
+
+diff --git a/runtime/spu/spu_context.h b/runtime/spu/spu_context.h
+index 53c63a2..4ab2658 100644
+--- a/runtime/spu/spu_context.h
++++ b/runtime/spu/spu_context.h
+@@ -545,15 +545,23 @@ static __attribute__((noinline, cold)) void spu_ls_read_probe(const spu_context*
+     }
+ }
+ 
++/* SPU_LEAN_LS: a translation unit that defines it (lifted images whose debug probes are
++ * not wanted: the port defines it for audio DSP code) gets local-store loads and stores
++ * without the probe/watchpoint/SMC-watch checks. Each check is a load and a branch the
++ * compiler cannot hoist (the LS store may alias what it reads), ~70 per DSP loop pass. */
+ static inline u128 spu_ls_read128(const spu_context* ctx, uint32_t lsa)
+ {
+     u128 v;
++#ifndef SPU_LEAN_LS
+     if (__builtin_expect(g_spu_ls_probe != 0, 0) || (ctx->image_id == 2 && ctx->policy_mode))
+         spu_ls_read_probe(ctx, lsa);
++#endif
+     lsa &= SPU_LS_MASK & ~0xFu;
+     const uint8_t* p = &ctx->ls[lsa];
++#ifndef SPU_LEAN_LS
+     spu_ls_watch_hit2(lsa, 0, p, (uint32_t)ctx->pc & SPU_LS_MASK,
+                       ctx->gpr[0]._u32[0] & SPU_LS_MASK);
++#endif
+ #if SPU_LS_FAST
+     uint32_t w0, w1, w2, w3;
+     memcpy(&w0, p,      4); memcpy(&w1, p + 4,  4);
+@@ -634,8 +642,10 @@ static inline void spu_ls_write128(spu_context* ctx, uint32_t lsa, u128 val)
+      * why it resolves to an empty buffer: the resolved address, the whole
+      * bufferSetArray (0xDF0), and the live loadCommands (0xC00) whose RunJob
+      * command (commandNum==5) names the code buffer set. */
++#ifndef SPU_LEAN_LS
+     if (lsa == 0x1320 && ctx->image_id == 2 && ctx->policy_mode)
+         spu_ls_write_probe_pre(ctx, lsa, val);
++#endif
+ #if SPU_LS_FAST
+     uint32_t w0 = SPU_BSWAP32(val._u32[0]), w1 = SPU_BSWAP32(val._u32[1]);
+     uint32_t w2 = SPU_BSWAP32(val._u32[2]), w3 = SPU_BSWAP32(val._u32[3]);
+@@ -650,10 +660,12 @@ static inline void spu_ls_write128(spu_context* ctx, uint32_t lsa, u128 val)
+         p[i*4 + 3] = (uint8_t)w;
+     }
+ #endif
++#ifndef SPU_LEAN_LS
+     spu_ls_watch_hit2(lsa, 1, p, (uint32_t)ctx->pc & SPU_LS_MASK,
+                       ctx->gpr[0]._u32[0] & SPU_LS_MASK);
+     if (__builtin_expect(g_spu_smc_watch != 0, 0))
+         spu_ls_write_probe_smc(ctx, lsa, p);
++#endif
+ }
+ 
+ /* ---------------------------------------------------------------------------
+diff --git a/runtime/spu/spu_helpers.h b/runtime/spu/spu_helpers.h
+index b8ed655..327227e 100644
+--- a/runtime/spu/spu_helpers.h
++++ b/runtime/spu/spu_helpers.h
+@@ -453,6 +453,37 @@ static inline u128 spu_shufb(u128 a, u128 b, u128 c) {
+ #define spu_shufb_ref spu_shufb
+ #endif
+ 
++/* ---- quadword byte shifts/rotates on x86 (SSSE3 pshufb) ----------------------------------
++ * The byte loops below (the _ref forms) compile to ~100 instructions each; the DSP code of
++ * MultiStream uses lqd+rotqby for every unaligned scalar load. SPU byte P lives at host byte
++ * P ^ 3, so lane h of spu__qb_pos() holds the SPU position it stands for; a result lane takes
++ * host source lane (P + k) ^ 3. pshufb zeroes a lane whose index has bit 7 set, which is the
++ * zero fill of the shifts. */
++#if defined(__SSSE3__) && !defined(__ARM_NEON) && !defined(SPU_SCALAR_HELPERS) && !defined(SPU_SCALAR_INT)
++#include <tmmintrin.h>
++#define SPU__QB_X86 1
++static inline __m128i spu__qb_ld(u128 a) { __m128i v; memcpy(&v, &a, 16); return v; }
++static inline u128 spu__qb_st(__m128i v) { u128 r; memcpy(&r, &v, 16); return r; }
++static inline __m128i spu__qb_pos(void) { return _mm_setr_epi8(3,2,1,0, 7,6,5,4, 11,10,9,8, 15,14,13,12); }
++/* result byte P = source byte P + sh (sh 0..31), zero past the end: shlqby */
++static inline u128 spu__qb_shl(u128 a, unsigned sh) {
++    const __m128i v = _mm_add_epi8(spu__qb_pos(), _mm_set1_epi8((char)sh));
++    const __m128i bad = _mm_cmpgt_epi8(v, _mm_set1_epi8(15));
++    return spu__qb_st(_mm_shuffle_epi8(spu__qb_ld(a), _mm_or_si128(_mm_xor_si128(v, _mm_set1_epi8(3)), bad)));
++}
++/* result byte P = source byte (P + sh) mod 16: rotqby */
++static inline u128 spu__qb_rot(u128 a, unsigned sh) {
++    const __m128i v = _mm_and_si128(_mm_add_epi8(spu__qb_pos(), _mm_set1_epi8((char)sh)), _mm_set1_epi8(15));
++    return spu__qb_st(_mm_shuffle_epi8(spu__qb_ld(a), _mm_xor_si128(v, _mm_set1_epi8(3))));
++}
++/* result byte P = source byte P - sh (sh 0..31), zero before the start: rotqmby */
++static inline u128 spu__qb_shr(u128 a, unsigned sh) {
++    const __m128i v = _mm_sub_epi8(spu__qb_pos(), _mm_set1_epi8((char)sh));
++    const __m128i bad = _mm_cmpgt_epi8(_mm_setzero_si128(), v);
++    return spu__qb_st(_mm_shuffle_epi8(spu__qb_ld(a), _mm_or_si128(_mm_xor_si128(v, _mm_set1_epi8(3)), bad)));
++}
++#endif
++
+ /* ---- shift / rotate immediate (word lanes) ---- */
+ static inline u128 spu_shli(u128 a, int sh)  { u128 r; sh&=0x3F; for(int i=0;i<4;i++) r._u32[i]=(sh>31)?0:(a._u32[i]<<sh); return r; }
+ static inline u128 spu_shlhi(u128 a, int sh) { u128 r; sh&=0x1F; for(int i=0;i<8;i++) r._u16[i]=(sh>15)?0:(uint16_t)(a._u16[i]<<sh); return r; }
+@@ -466,6 +497,8 @@ static inline u128 spu_shlqbyi_ref(u128 a, int sh) { u128 r=spu_zero(); sh&=0x1F
+ static inline u128 spu_shlqbyi(u128 a, int sh) {
+     return spu__perm(a, vaddq_u8(spu__iota(), vdupq_n_u8((uint8_t)(sh & 0x1F))));
+ }
++#elif defined(SPU__QB_X86)
++static inline u128 spu_shlqbyi(u128 a, int sh) { return spu__qb_shl(a, (unsigned)(sh & 0x1F)); }
+ #else
+ static inline u128 spu_shlqbyi(u128 a, int sh) { return spu_shlqbyi_ref(a, sh); }
+ #endif
+@@ -474,6 +507,8 @@ static inline u128 spu_rotqbyi_ref(u128 a, int sh) { u128 r; sh&=0x0F; for(int i
+ static inline u128 spu_rotqbyi(u128 a, int sh) {
+     return spu__perm(a, vandq_u8(vaddq_u8(spu__iota(), vdupq_n_u8((uint8_t)sh)), vdupq_n_u8(15)));
+ }
++#elif defined(SPU__QB_X86)
++static inline u128 spu_rotqbyi(u128 a, int sh) { return spu__qb_rot(a, (unsigned)(sh & 0x0F)); }
+ #else
+ static inline u128 spu_rotqbyi(u128 a, int sh) { return spu_rotqbyi_ref(a, sh); }
+ #endif
+@@ -698,7 +733,41 @@ SPU__NV_SLOW void spu__ff_tally_lanes(int op, const uint32_t m[4], const uint32_
+                                   : spu__ff_why_fma(x[i], y[i], z[i], negp, negc));
+ }
+ #endif
+-#if defined(__ARM_NEON) && !defined(SPU_SCALAR_HELPERS)
++#if defined(SPU_FAST_FLOAT) && defined(__SSE2__) && !defined(SPU_SCALAR_HELPERS)
++/* SPU_FAST_FLOAT: native single-precision SSE for float arithmetic, opted into per translation
++ * unit (the port defines it for audio DSP images). The exact paths below reproduce the SPU's
++ * truncating, extended-range, NaN-free arithmetic bit for bit at ~40 instructions per op; DSP
++ * code (reverb taps, biquads, mixing) does not care about the last bit, and a 7.1 MultiStream
++ * mixer cycle was 3x slower than real time on them. Differences from the SPU: round to nearest
++ * instead of toward zero, overflow gives infinity instead of the extended-range maximum.
++ * Denormal results are flushed to zero as on the SPU (this also keeps a decaying reverb tail
++ * from falling into the slow denormal range), so no MXCSR setting is needed. A fused multiply-
++ * add is used when the build has FMA. */
++#include <emmintrin.h>
++#if defined(__FMA__)
++#include <immintrin.h>
++#endif
++#define SPU_FLOAT_SIMD "fast-sse"
++#define SPU__FF_INLINE static inline __attribute__((always_inline))
++SPU__FF_INLINE __m128 spu__ff_ld(u128 a) { return _mm_loadu_ps((const float*)(const void*)a._u32); }
++SPU__FF_INLINE u128 spu__ff_st(__m128 v) {
++    const __m128 absv = _mm_and_ps(v, _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF)));
++    v = _mm_and_ps(v, _mm_cmpge_ps(absv, _mm_set1_ps(1.17549435e-38f)));   /* flush denormals */
++    u128 r; _mm_storeu_ps((float*)(void*)r._u32, v); return r;
++}
++SPU__FF_INLINE u128 spu_fa(u128 a, u128 b) { return spu__ff_st(_mm_add_ps(spu__ff_ld(a), spu__ff_ld(b))); }
++SPU__FF_INLINE u128 spu_fs(u128 a, u128 b) { return spu__ff_st(_mm_sub_ps(spu__ff_ld(a), spu__ff_ld(b))); }
++SPU__FF_INLINE u128 spu_fm(u128 a, u128 b) { return spu__ff_st(_mm_mul_ps(spu__ff_ld(a), spu__ff_ld(b))); }
++#if defined(__FMA__)
++SPU__FF_INLINE u128 spu_fma(u128 a, u128 b, u128 c)  { return spu__ff_st(_mm_fmadd_ps(spu__ff_ld(a), spu__ff_ld(b), spu__ff_ld(c))); }
++SPU__FF_INLINE u128 spu_fms(u128 a, u128 b, u128 c)  { return spu__ff_st(_mm_fmsub_ps(spu__ff_ld(a), spu__ff_ld(b), spu__ff_ld(c))); }
++SPU__FF_INLINE u128 spu_fnms(u128 a, u128 b, u128 c) { return spu__ff_st(_mm_fnmadd_ps(spu__ff_ld(a), spu__ff_ld(b), spu__ff_ld(c))); }
++#else
++SPU__FF_INLINE u128 spu_fma(u128 a, u128 b, u128 c)  { return spu__ff_st(_mm_add_ps(_mm_mul_ps(spu__ff_ld(a), spu__ff_ld(b)), spu__ff_ld(c))); }
++SPU__FF_INLINE u128 spu_fms(u128 a, u128 b, u128 c)  { return spu__ff_st(_mm_sub_ps(_mm_mul_ps(spu__ff_ld(a), spu__ff_ld(b)), spu__ff_ld(c))); }
++SPU__FF_INLINE u128 spu_fnms(u128 a, u128 b, u128 c) { return spu__ff_st(_mm_sub_ps(spu__ff_ld(c), _mm_mul_ps(spu__ff_ld(a), spu__ff_ld(b)))); }
++#endif
++#elif defined(__ARM_NEON) && !defined(SPU_SCALAR_HELPERS)
+ /* The same fast path four lanes at a time, as two f64x2 halves: widen (exact), operate, clear
+  * the 29 low significand bits, narrow (exact: the value now fits a single). Each lane is judged
+  * on its own: the lanes that qualify keep the vector result, and only the others are redone one
+@@ -1312,6 +1381,8 @@ static inline u128 spu_shlqby_ref(u128 a, u128 b){ int sh=b._u32[0]&0x1F; u128 r
+ static inline u128 spu_shlqby(u128 a, u128 b) {
+     return spu__perm(a, vaddq_u8(spu__iota(), vdupq_n_u8((uint8_t)(b._u32[0] & 0x1F))));
+ }
++#elif defined(SPU__QB_X86)
++static inline u128 spu_shlqby(u128 a, u128 b) { return spu__qb_shl(a, b._u32[0] & 0x1F); }
+ #else
+ static inline u128 spu_shlqby(u128 a, u128 b) { return spu_shlqby_ref(a, b); }
+ #endif
+@@ -1320,6 +1391,8 @@ static inline u128 spu_rotqby_ref(u128 a, u128 b){ int sh=b._u32[0]&0x0F; u128 r
+ static inline u128 spu_rotqby(u128 a, u128 b) {
+     return spu__perm(a, vandq_u8(vaddq_u8(spu__iota(), vdupq_n_u8((uint8_t)b._u32[0])), vdupq_n_u8(15)));
+ }
++#elif defined(SPU__QB_X86)
++static inline u128 spu_rotqby(u128 a, u128 b) { return spu__qb_rot(a, b._u32[0] & 0x0F); }
+ #else
+ static inline u128 spu_rotqby(u128 a, u128 b) { return spu_rotqby_ref(a, b); }
+ #endif
+@@ -1328,6 +1401,8 @@ static inline u128 spu_shlqbybi_ref(u128 a, u128 b){ int sh=(b._u32[0]>>3)&0x1F;
+ static inline u128 spu_shlqbybi(u128 a, u128 b) {
+     return spu__perm(a, vaddq_u8(spu__iota(), vdupq_n_u8((uint8_t)((b._u32[0] >> 3) & 0x1F))));
+ }
++#elif defined(SPU__QB_X86)
++static inline u128 spu_shlqbybi(u128 a, u128 b) { return spu__qb_shl(a, (b._u32[0] >> 3) & 0x1F); }
+ #else
+ static inline u128 spu_shlqbybi(u128 a, u128 b) { return spu_shlqbybi_ref(a, b); }
+ #endif
+@@ -1336,6 +1411,8 @@ static inline u128 spu_rotqbybi_ref(u128 a, u128 b){ int sh=(b._u32[0]>>3)&0x0F;
+ static inline u128 spu_rotqbybi(u128 a, u128 b) {
+     return spu__perm(a, vandq_u8(vaddq_u8(spu__iota(), vdupq_n_u8((uint8_t)(b._u32[0] >> 3))), vdupq_n_u8(15)));
+ }
++#elif defined(SPU__QB_X86)
++static inline u128 spu_rotqbybi(u128 a, u128 b) { return spu__qb_rot(a, (b._u32[0] >> 3) & 0x0F); }
+ #else
+ static inline u128 spu_rotqbybi(u128 a, u128 b) { return spu_rotqbybi_ref(a, b); }
+ #endif
+@@ -1574,6 +1651,8 @@ static inline u128 spu_rotqmby_ref(u128 a, u128 b)   { int sh=(0-(int)b._u32[0])
+ static inline u128 spu_rotqmby(u128 a, u128 b) {
+     return spu__perm(a, vsubq_u8(spu__iota(), vdupq_n_u8((uint8_t)((0 - (int)b._u32[0]) & 0x1F))));
+ }
++#elif defined(SPU__QB_X86)
++static inline u128 spu_rotqmby(u128 a, u128 b) { return spu__qb_shr(a, (unsigned)(0 - (int)b._u32[0]) & 0x1F); }
+ #else
+ static inline u128 spu_rotqmby(u128 a, u128 b) { return spu_rotqmby_ref(a, b); }
+ #endif
+@@ -1582,6 +1661,8 @@ static inline u128 spu_rotqmbybi_ref(u128 a, u128 b) { int sh=(0-((int)b._u32[0]
+ static inline u128 spu_rotqmbybi(u128 a, u128 b) {
+     return spu__perm(a, vsubq_u8(spu__iota(), vdupq_n_u8((uint8_t)((0 - ((int)b._u32[0] >> 3)) & 0x1F))));
+ }
++#elif defined(SPU__QB_X86)
++static inline u128 spu_rotqmbybi(u128 a, u128 b) { return spu__qb_shr(a, (unsigned)(0 - ((int)b._u32[0] >> 3)) & 0x1F); }
+ #else
+ static inline u128 spu_rotqmbybi(u128 a, u128 b) { return spu_rotqmbybi_ref(a, b); }
+ #endif
+@@ -1594,6 +1675,8 @@ static inline u128 spu_rotqmbyi_ref(u128 a, int i7)  { int sh=(0-i7)&0x1F; u128
+ static inline u128 spu_rotqmbyi(u128 a, int i7) {
+     return spu__perm(a, vsubq_u8(spu__iota(), vdupq_n_u8((uint8_t)((0 - i7) & 0x1F))));
+ }
++#elif defined(SPU__QB_X86)
++static inline u128 spu_rotqmbyi(u128 a, int i7) { return spu__qb_shr(a, (unsigned)(0 - i7) & 0x1F); }
+ #else
+ static inline u128 spu_rotqmbyi(u128 a, int i7) { return spu_rotqmbyi_ref(a, i7); }
+ #endif
+diff --git a/runtime/spu/tests/test_spu_fast_float.c b/runtime/spu/tests/test_spu_fast_float.c
+new file mode 100644
+index 0000000..370db60
+--- /dev/null
++++ b/runtime/spu/tests/test_spu_fast_float.c
+@@ -0,0 +1,53 @@
++/* SPU_FAST_FLOAT (native SSE single precision for fa/fs/fm/fma/fms/fnms) against the exact
++ * SPU arithmetic: a few ulp apart (round to nearest against round toward zero), denormal
++ * results flushed to zero as on the SPU. The file defines SPU_FAST_FLOAT itself. */
++#define SPU_FAST_FLOAT 1
++#include "../spu_helpers.h"
++#include <math.h>
++#include <stdio.h>
++#include <stdlib.h>
++
++static float rnd(void) { return ((float)rand() / (float)RAND_MAX - 0.5f) * powf(2.0f, (float)(rand() % 40 - 20)); }
++
++/* Both results are within a few ulp of the exact value; a sum that cancels is judged against
++ * the size of its terms, not of its (tiny) result. */
++static int near(float got, float want, float terms)
++{
++    return fabsf(got - want) <= 4.0f * 1.1920929e-7f * fmaxf(terms, 1e-30f);
++}
++
++int main(void)
++{
++#if !defined(__SSE2__)
++    puts("test_spu_fast_float: no SSE2, nothing to compare");
++    return 0;
++#else
++    srand(99);
++    for (int it = 0; it < 100000; it++) {
++        u128 a, b, c;
++        for (int i = 0; i < 4; i++) { a._f32[i] = rnd(); b._f32[i] = rnd(); c._f32[i] = rnd(); }
++        const u128 r[6] = { spu_fa(a, b), spu_fs(a, b), spu_fm(a, b), spu_fma(a, b, c), spu_fms(a, b, c), spu_fnms(a, b, c) };
++        const u128 e[6] = { spu_fa_ref(a, b), spu_fs_ref(a, b), spu_fm_ref(a, b), spu_fma_ref(a, b, c), spu_fms_ref(a, b, c), spu_fnms_ref(a, b, c) };
++        for (int op = 0; op < 6; op++)
++            for (int i = 0; i < 4; i++) {
++                const float x = a._f32[i], y = b._f32[i], z = c._f32[i];
++                const float terms = op < 2 ? fmaxf(fabsf(x), fabsf(y))          /* fa, fs */
++                                  : op == 2 ? fabsf(x * y)                        /* fm */
++                                  : fmaxf(fabsf(x * y), fabsf(z));                /* fma, fms, fnms */
++                if (!near(r[op]._f32[i], e[op]._f32[i], terms)) {
++                    printf("test_spu_fast_float: MISMATCH op %d lane %d: %g vs %g (it %d)\n", op, i,
++                           r[op]._f32[i], e[op]._f32[i], it);
++                    return 1;
++                }
++            }
++    }
++    /* denormal result flushes */
++    u128 tiny, half;
++    for (int i = 0; i < 4; i++) { tiny._f32[i] = 1.0e-30f; half._f32[i] = 1.0e-10f; }
++    const u128 z = spu_fm(tiny, half);   /* 1e-40: denormal */
++    for (int i = 0; i < 4; i++)
++        if (z._u32[i] != 0) { puts("test_spu_fast_float: denormal result not flushed"); return 1; }
++    puts("test_spu_fast_float: ok (100000 random cases x 6 ops, denormal flush)");
++    return 0;
++#endif
++}
+diff --git a/runtime/spu/tests/test_spu_qbyte.c b/runtime/spu/tests/test_spu_qbyte.c
+new file mode 100644
+index 0000000..b3292d3
+--- /dev/null
++++ b/runtime/spu/tests/test_spu_qbyte.c
+@@ -0,0 +1,42 @@
++/* The quadword byte shifts/rotates (SSSE3 pshufb path on x86) must match the byte-loop
++ * references for every shift amount, including the zero-fill ranges and the amounts that
++ * wrap (rotqby takes the count mod 16, shlqby/rotqmby mod 32). Build with -mssse3 or
++ * -march=x86-64-v2 so the SIMD version is the one under test. */
++#include "../spu_helpers.h"
++#include <stdio.h>
++#include <stdlib.h>
++
++#if defined(SPU__QB_X86)
++#define CHECK(expr_a, expr_b, what) do { u128 x = (expr_a), y = (expr_b); \
++    if (memcmp(&x, &y, 16)) { printf("test_spu_qbyte: MISMATCH %s sh=%d it=%d\n", what, sh, it); return 1; } } while (0)
++#endif
++
++int main(void)
++{
++#if !defined(SPU__QB_X86)
++    puts("test_spu_qbyte: built without SSSE3, nothing to compare");
++    return 0;
++#else
++    srand(4242);
++    for (int it = 0; it < 2000; it++) {
++        u128 a, b;
++        for (int i = 0; i < 16; i++) a._u8[i] = (uint8_t)rand();
++        for (int sh = -40; sh < 300; sh++) {
++            for (int i = 0; i < 4; i++) b._u32[i] = (uint32_t)rand();
++            b._u32[0] = (uint32_t)sh;
++            CHECK(spu_shlqbyi(a, sh), spu_shlqbyi_ref(a, sh), "shlqbyi");
++            CHECK(spu_rotqbyi(a, sh), spu_rotqbyi_ref(a, sh), "rotqbyi");
++            CHECK(spu_shlqby(a, b), spu_shlqby_ref(a, b), "shlqby");
++            CHECK(spu_rotqby(a, b), spu_rotqby_ref(a, b), "rotqby");
++            CHECK(spu_rotqmby(a, b), spu_rotqmby_ref(a, b), "rotqmby");
++            CHECK(spu_rotqmbyi(a, sh), spu_rotqmbyi_ref(a, sh), "rotqmbyi");
++            b._u32[0] = (uint32_t)sh << 3 | ((uint32_t)rand() & 7);   /* bit count in the low 3 bits */
++            CHECK(spu_shlqbybi(a, b), spu_shlqbybi_ref(a, b), "shlqbybi");
++            CHECK(spu_rotqbybi(a, b), spu_rotqbybi_ref(a, b), "rotqbybi");
++            CHECK(spu_rotqmbybi(a, b), spu_rotqmbybi_ref(a, b), "rotqmbybi");
++        }
++    }
++    puts("test_spu_qbyte: ok (2000 vectors x 340 shift amounts x 9 ops)");
++    return 0;
++#endif
++}
+-- 
+2.47.3
+

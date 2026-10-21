@@ -32,7 +32,7 @@ intro is Loading, ESRB with the car, Powered by Unreal, the Psyonix logo, the sa
 and **the arena renders and plays** (T045: reversed-Z depth clear, then NV0039 texture copies):
 clean textures, a working HUD, the car drives on throttle, its shadow is right (depth-compare
 direction). T045 is done; the 85% black border is the game's own safe-area setting (menus have it too). Real MP3 audio
-plays (T007). `boot_check --pad` scripts the presses (T036). There's no Bink in 01.09.
+plays (T007) without crackle (T053, 2026-10-21). `boot_check --pad` scripts the presses (T036). There's no Bink in 01.09.
 
 **Last verified on `main` (fc9cdf4, 2026-10-20, `PS3_VERBOSE=0`, under the boot lock):** a 120 s
 boot_check is PROGRESSING with 3513 flips; the main menu runs at **29.5 fps** (1 s windows
@@ -108,6 +108,9 @@ T007, T036, T037, T044 and T045 were closed on 2026-10-20. Next up for the arena
   POSIX boot scaffold gets this UE3 title to the menus on Linux.
 
 ## Log
+
+### 2026-10-21: audio crackle fixed (T053, claude)
+- The crackle was 66% silent blocks (the game wrote every 2nd-3rd ring slot because its mixer round ran 8-15 ms instead of 5.3 ms). Fixed by a faster audio SPU path (native float, lean LS, x86 `rotqby` family: patch 0060), the update thread's 5 ms nap scaled to 0 (patch 0061 + `src/overrides/audio_pacing.cpp`): 0.0% silent blocks and 0-1 block-edge clicks over 42-65 s menu/arena windows, was 860 clicks. Menu 55 fps, arena 38 fps. Details, numbers and `tools/audio_wav_report.py`: subsystems.md "Audio crackle". Not heard by an agent (no sound device here): the user should confirm by ear.
 
 ### 2026-10-20: attribute-major vertex fetch (0056, claude)
 - `rsx_vertex_fetch_all` replaces the per-vertex `fetch_one` loop in the draw engine; byte-identical on 6000 random plans (test_vertex_fetch_plan). Arena 36-39 -> ~38 (small: the arena's next costs are texture hashing and the remap build). Optimization series total (01.09, this machine, 2026-10-20): Single Player 19.5 -> ~54 fps, arena ~30 -> ~38.

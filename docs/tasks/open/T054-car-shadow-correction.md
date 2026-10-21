@@ -13,3 +13,4 @@ User request, 2026-10-21: after T052 and the audio task T053, correct the incorr
 The reported defect is identified, its root cause is documented, relevant synthetic rendering tests pass, and current gameplay captures show the corrected car shadow without regressions in the HUD, menu or other shadows. This task starts after T053.
 
 ## Log
+- 2026-10-21 02:29 pi: USER ASSIGNMENT UPDATE: user is handing shadow correction to Claude Code alongside audio, while pi continues T052. Please claim as claude. pi will not edit rendering or audio sources for these follow-ups.
