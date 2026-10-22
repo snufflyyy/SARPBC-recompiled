@@ -28,6 +28,9 @@ INI_REL = 'CONFIG/BATTLEBALL/PS3/COOKED/COALESCED.INI'
 GRAPHICS_TEXT = 'Graphics'
 GRAPHICS_DESC = 'Change the resolution, frame rate and other video options.'
 GRAPHICS_TITLE = 'Graphics Options'
+PICTURE_TEXT = 'Picture'
+PICTURE_DESC = 'Change texture quality, texture filtering and brightness.'
+PICTURE_TITLE = 'Picture Options'
 SKIP_INTRO_TEXT = 'Skip Intro'
 MAX_ROWS = 10       # rows the page can show: rows 0-5 clone the instance's VSync row, later ones clone row 0
 MAX_CHOICES = 12    # choices a row can offer
@@ -41,20 +44,22 @@ def patch_coalesced(path):
             e[1] = coalesced.section_add(e[1], 'MainMenuSceneContainer', [
                 'GraphicsOptions="%s"' % GRAPHICS_TEXT,
                 'GraphicsOptionsDesc="%s"' % GRAPHICS_DESC,
+                'PictureOptions="%s"' % PICTURE_TEXT,
+                'PictureOptionsDesc="%s"' % PICTURE_DESC,
             ])
             e[1] = coalesced.section_add(e[1], 'MidGameMenuActor', ['SkipIntroStr="%s"' % SKIP_INTRO_TEXT])
-            e[1] = coalesced.section_add(e[1], 'BackNextWidget', ['GraphicsOptions="%s"' % GRAPHICS_TITLE])
+            e[1] = coalesced.section_add(e[1], 'BackNextWidget', ['GraphicsOptions="%s"' % GRAPHICS_TITLE,
+                                                                  'PictureOptions="%s"' % PICTURE_TITLE])
             return coalesced.dump(entries)
     raise KeyError('TAGame.int')
 
 
-# Engine-INI settings (graphics.ini keys / SARPBC_* indexes; the choice tables mirror graphics_settings.h).
-TEXTURE_LOD_BIAS = (3, 0, -1)                       # Low, Default, High (+3 softens modestly, tested)
-TEXTURE_FILTER = ((4, False), (8, False), (16, False), (16, True))   # (MaxAnisotropy, Trilinear)
+# Engine-INI settings (graphics.ini keys / SARPBC_* environment; BRIGHTNESS_GAMMA mirrors graphics_settings.h).
+# Texture filtering and quality are live in the Vulkan sampler and brightness is written into the running
+# game (src/overrides/live_gamma.cpp); the INI value only makes the game *start* at the chosen brightness.
 BRIGHTNESS_GAMMA = ('1.800000', '2.000000', '2.200000', '2.500000', '2.800000')
-DEFAULTS = {'unlock_fps': 0, 'texture_quality': 1, 'texture_filter': 0, 'brightness': 2}
-ENV = {'unlock_fps': 'SARPBC_UNLOCK_FPS', 'texture_quality': 'SARPBC_TEXTURE_QUALITY',
-       'texture_filter': 'SARPBC_TEXTURE_FILTER', 'brightness': 'SARPBC_BRIGHTNESS'}
+DEFAULTS = {'unlock_fps': 0, 'brightness': 2}
+ENV = {'unlock_fps': 'SARPBC_UNLOCK_FPS', 'brightness': 'SARPBC_BRIGHTNESS'}
 
 
 def engine_settings():
@@ -74,8 +79,6 @@ def engine_settings():
         e = os.environ.get(name)
         if e is not None and e.strip().lstrip('-').isdigit():
             vals[k] = int(e)
-    vals['texture_quality'] = min(max(vals['texture_quality'], 0), len(TEXTURE_LOD_BIAS) - 1)
-    vals['texture_filter'] = min(max(vals['texture_filter'], 0), len(TEXTURE_FILTER) - 1)
     vals['brightness'] = min(max(vals['brightness'], 0), len(BRIGHTNESS_GAMMA) - 1)
     vals['unlock_fps'] = 1 if vals['unlock_fps'] else 0
     return vals
@@ -93,9 +96,7 @@ def patch_engine_ini(path):
     """Edit PS3-TAEngine.ini, inside COALESCED.INI, for the settings that live there:
     - unlocked fps (T062): UE3 sleeps to hold [Engine.GameEngine] MaxSmoothedFrameRate (60) and clamps
       its frame time to it: 1000;
-    - texture quality: the LODBias of every TEXTUREGROUP_* (+1 low, -1 high);
-    - texture filtering: MaxAnisotropy (4 in the game's four [SystemSettings*]) and Trilinear;
-    - brightness: [Engine.Client] DisplayGamma (2.2; lower is darker, tested)."""
+    - brightness: [Engine.Client] DisplayGamma (2.2; lower is darker, tested), the value the game starts with."""
     import re
     cfg = engine_settings()
     entries = coalesced.load(open(path, 'rb').read())
@@ -106,17 +107,6 @@ def patch_engine_ini(path):
                 if 'MaxSmoothedFrameRate=60' not in t:
                     raise KeyError('MaxSmoothedFrameRate=60')
                 t = t.replace('MaxSmoothedFrameRate=60', 'MaxSmoothedFrameRate=1000')
-            bias = TEXTURE_LOD_BIAS[cfg['texture_quality']]
-            if bias:
-                t, n = re.subn(r'^(TEXTUREGROUP_[A-Za-z0-9_]+=\(.*?)LODBias=-?\d+', r'\g<1>LODBias=%d' % bias, t, flags=re.M)
-                if not n:
-                    raise KeyError('TEXTUREGROUP LODBias')
-            aniso, trilinear = TEXTURE_FILTER[cfg['texture_filter']]
-            if (aniso, trilinear) != TEXTURE_FILTER[0]:
-                t, n = re.subn(r'^MaxAnisotropy=\d+', 'MaxAnisotropy=%d' % aniso, t, flags=re.M)
-                t, m = re.subn(r'^Trilinear=\w+', 'Trilinear=%s' % ('true' if trilinear else 'false'), t, flags=re.M)
-                if not n or not m:
-                    raise KeyError('MaxAnisotropy/Trilinear')
             if cfg['brightness'] != DEFAULTS['brightness']:
                 t, n = re.subn(r'^DisplayGamma=[\d.]+', 'DisplayGamma=%s' % BRIGHTNESS_GAMMA[cfg['brightness']], t, flags=re.M)
                 if not n:
@@ -127,21 +117,22 @@ def patch_engine_ini(path):
 
 
 def add_options_item(pkg):
-    """OptionsItems of MainMenuSceneContainer's defaults: a Graphics entry after System. It
-    reuses the System state ('GameOptions'); the page code tells them apart by the row."""
+    """OptionsItems of MainMenuSceneContainer's defaults: Graphics and Picture entries after System.
+    They reuse the System state ('GameOptions'); NextScene tells them apart by the selected row."""
     idx = upk.find_export(pkg.imps, pkg.exps, 'Default__MainMenuSceneContainer')
     e = pkg.exps[idx - 1]
     body = props.parse_body(pkg.u, e['off'], e['size'], pkg.names)
     tag = body.get('OptionsItems')
     items = props.parse_struct_array(tag['value'], pkg.names)
     system = items[0]
-    gfx = [dict(t) for t in system]
-    for t in gfx:
-        if t['pname'] == 'ItemText':
-            t['value'] = props.fstring_value('?loc:tagame:MainMenuSceneContainer:GraphicsOptions')
-        elif t['pname'] == 'HonkyDescStr':
-            t['value'] = props.fstring_value('?loc:tagame:MainMenuSceneContainer:GraphicsOptionsDesc')
-    items.insert(1, gfx)
+    for at, key in ((1, 'GraphicsOptions'), (2, 'PictureOptions')):
+        new = [dict(t) for t in system]
+        for t in new:
+            if t['pname'] == 'ItemText':
+                t['value'] = props.fstring_value('?loc:tagame:MainMenuSceneContainer:%s' % key)
+            elif t['pname'] == 'HonkyDescStr':
+                t['value'] = props.fstring_value('?loc:tagame:MainMenuSceneContainer:%sDesc' % key)
+        items.insert(at, new)
     tag['value'] = props.encode_struct_array(items, body.none_idx)
     pkg.replace_export(idx, body.build())
 
@@ -221,11 +212,15 @@ class Patcher:
         st = f.stmts
         selected = self.selected_row('MainMenuSceneContainer.Main.PressedConfirm',
                                      'self.MainMenuList.GetSelectedIndex()')
-        title = asm.clone(st[1])                      # NewTitleName = 'GameOptions'
-        title.parts[-1] = ('e', a.s('GraphicsOptions'))   # NewTitleName is a string: ?loc:tagame:BackNextWidget:<it>
+        def entry(row, key, page):
+            title = asm.clone(st[1])                  # NewTitleName = 'GameOptions'
+            title.parts[-1] = ('e', a.s(key))         # a string: ?loc:tagame:BackNextWidget:<it>
+            return a.if_(a.native('EqualEqual_IntInt', asm.clone(selected), a.i(row)),
+                         [title, self.bridge('open:' + page)])
         seq = Seq()
-        seq.block(a.if_(a.native('EqualEqual_IntInt', selected, a.i(1)),
-                        [title, self.bridge('open:gfx')], [self.bridge('open:sys')]))
+        seq.stmt(self.bridge('open:sys'))
+        seq.block(entry(1, 'GraphicsOptions', 'gfx'))
+        seq.block(entry(2, 'PictureOptions', 'pic'))
         seq.finish(st[2])
         f.stmts = st[:2] + list(seq) + st[2:]
         self.done(idx, f)

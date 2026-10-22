@@ -123,7 +123,7 @@ struct Row {
 
 using sarpbc_gfx::settings;
 
-std::vector<Row> make_rows()
+std::vector<Row> make_graphics_rows()
 {
     std::vector<Row> rows;
     {
@@ -146,33 +146,43 @@ std::vector<Row> make_rows()
     rows.push_back({"VSync", "VSync", {"Enabled", "Disabled"}, [] { return 0; }, [](int) {}});
     rows.push_back({"Frame Rate", "Frame Rate (restart to apply)", {"Game default", "Unlocked"},
                     [] { return settings().unlock_fps.load(); }, [](int i) { settings().unlock_fps = i; }});
+    rows.push_back({"FPS Counter", "FPS Counter", {"Off", "On"},
+                    [] { return settings().fps_overlay.load(); }, [](int i) { settings().fps_overlay = i; }});
+    return rows;
+}
+
+// The Picture page: what the image looks like. All three are live.
+std::vector<Row> make_picture_rows()
+{
+    std::vector<Row> rows;
     auto names = [](const char* const* n, int count) {
         std::vector<std::string> v;
         for (int i = 0; i < count; i++) v.push_back(n[i]);
         return v;
     };
-    rows.push_back({"FPS Counter", "FPS Counter", {"Off", "On"},
-                    [] { return settings().fps_overlay.load(); }, [](int i) { settings().fps_overlay = i; }});
-    rows.push_back({"Texture Quality", "Texture Quality (restart to apply)",
+    rows.push_back({"Texture Quality", "Texture Quality",
                     names(sarpbc_gfx::kTextureQualityNames, sarpbc_gfx::kNumTextureQuality),
                     [] { return settings().texture_quality.load(); }, [](int i) { settings().texture_quality = i; }});
-    rows.push_back({"Texture Filtering", "Texture Filtering (restart to apply)",
+    rows.push_back({"Texture Filtering", "Texture Filtering",
                     names(sarpbc_gfx::kTextureFilterNames, sarpbc_gfx::kNumTextureFilter),
                     [] { return settings().texture_filter.load(); }, [](int i) { settings().texture_filter = i; }});
-    rows.push_back({"Brightness", "Brightness (restart to apply)",
+    rows.push_back({"Brightness", "Brightness",
                     names(sarpbc_gfx::kBrightnessNames, sarpbc_gfx::kNumBrightness),
                     [] { return settings().brightness.load(); }, [](int i) { settings().brightness = i; }});
     return rows;
 }
 
+enum class Page { System, Graphics, Picture };
+Page s_page = Page::System;
+
 const std::vector<Row>& rows()
 {
-    static const std::vector<Row> r = make_rows();
-    return r;
+    static const std::vector<Row> graphics = make_graphics_rows(), picture = make_picture_rows();
+    return s_page == Page::Picture ? picture : graphics;
 }
 
-bool s_gfx_page = false;
-constexpr int kVsyncRow = 3;   // after Resolution, Render Scale and Fullscreen (make_rows)
+bool s_gfx_page() { return s_page != Page::System; }
+constexpr int kVsyncRow = 3;   // on the Graphics page, after Resolution, Render Scale and Fullscreen
 
 bool parse_int(const char*& p, int& out)
 {
@@ -188,9 +198,11 @@ std::string command(const std::string& cmd)
 {
     const char* c = cmd.c_str();
     const int n = (int)rows().size();
-    if (cmd == "page") return s_gfx_page ? "gfx" : "sys";
-    if (cmd == "open:gfx") { s_gfx_page = true; return ""; }
-    if (cmd == "open:sys" || cmd == "close") { s_gfx_page = false; return ""; }
+    // "gfx" is the script's mode for either of our pages; "open:" says which rows
+    if (cmd == "page") return s_gfx_page() ? "gfx" : "sys";
+    if (cmd == "open:gfx") { s_page = Page::Graphics; return ""; }
+    if (cmd == "open:pic") { s_page = Page::Picture; return ""; }
+    if (cmd == "open:sys" || cmd == "close") { s_page = Page::System; return ""; }
     if (cmd == "rows") return std::to_string(n);
     if (cmd == "skipintro") return settings().skip_intro.load() ? "1" : "0";
     if (cmd == "intro:get") return settings().skip_intro.load() ? "0" : "1";   // Enabled = 0
@@ -200,7 +212,7 @@ std::string command(const std::string& cmd)
         fprintf(stderr, "[gfx] Skip Intro -> %s\n", settings().skip_intro.load() ? "Enabled" : "Disabled");
         return "";
     }
-    if (!strncmp(c, "isvsync:", 8)) return atoi(c + 8) == kVsyncRow ? "1" : "0";
+    if (!strncmp(c, "isvsync:", 8)) return s_page == Page::Graphics && atoi(c + 8) == kVsyncRow ? "1" : "0";
     // 64 + 64 per row of frame, centred: the System page (7 rows) is 512 high at 0.2777, the
     // Profile page (3 rows) 256 at 0.3888 (MidGameMenuActor SystemOptions/ProfileOptions BeginState)
     if (cmd == "frame:h") return std::to_string(64 + 64 * n);
@@ -260,7 +272,9 @@ void thunk(ppu_context* ctx)
 extern "C" void sarpbc_register_graphics_menu(void)
 {
     sarpbc_gfx::load();
+    sarpbc_gfx::start_live_gamma();
     const char* off = getenv("SARPBC_NO_GRAPHICS_MENU");
     if (off && *off && *off != '0') return;
     ppu_register_function(kThunkAddr, thunk);
 }
+

@@ -119,13 +119,12 @@ class EngineIniTest(unittest.TestCase):
         self.assertIsNone(self.patched())
 
     def test_settings_edit_the_ini(self):
-        t = self.patched(SARPBC_UNLOCK_FPS='1', SARPBC_TEXTURE_QUALITY='2', SARPBC_TEXTURE_FILTER='3',
-                     SARPBC_BRIGHTNESS='4')[0][1]
-        for want in ('MaxSmoothedFrameRate=1000', 'MaxAnisotropy=16', 'Trilinear=true', 'DisplayGamma=2.800000',
-                     'LODBias=-1)'):
-            self.assertIn(want, t)
-        self.assertEqual(t.count('LODBias=-1'), 2)
-        self.assertNotIn('LODBias=0', t)
+        t = self.patched(SARPBC_UNLOCK_FPS='1', SARPBC_BRIGHTNESS='4')[0][1]
+        self.assertIn('MaxSmoothedFrameRate=1000', t)
+        self.assertIn('DisplayGamma=2.800000', t)
+        # texture filtering and quality are live in the sampler now: the INI keeps the game's values
+        self.assertIn('MaxAnisotropy=4', t)
+        self.assertIn('LODBias=0', t)
 
 
 if __name__ == '__main__':

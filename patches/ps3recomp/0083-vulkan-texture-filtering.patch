@@ -1,0 +1,99 @@
+From 8b9639b37df8eac8ed36f156e479200051cc0dec Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Thu, 22 Oct 2026 21:58:02 +0000
+Subject: [PATCH] vulkan: rsx_vulkan_backend_set_texture_filtering: trilinear /
+ anisotropy / mip LOD bias changeable at run time (sampler key carries them)
+
+---
+ libs/video/rsx_vulkan_backend.c | 32 ++++++++++++++++++++++++++++----
+ libs/video/rsx_vulkan_backend.h |  6 ++++++
+ 2 files changed, 34 insertions(+), 4 deletions(-)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 948a7da..e5cb772 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -3460,7 +3460,7 @@ static struct {
+     u32                   dummy_cube;
+ } s_e2;
+ 
+-#define VK_ENG_SAMP_CACHE 64
++#define VK_ENG_SAMP_CACHE 256
+ static struct { u64 key; VkSampler s; } s_esamp[VK_ENG_SAMP_CACHE];
+ static u32 s_esamp_count;
+ 
+@@ -3957,14 +3957,34 @@ static VkImageView vk_eng_scratch_depth(u32 w, u32 h)
+ 
+ /* rsx_be_sampler_desc is the registers decoded the D3D12 way; the wrap codes
+  * stay the guest's 1..8, which vk_gcm_wrap already translates. */
++/* Texture filtering the host can change at run time (rsx_vulkan_backend_set_texture_filtering): the
++ * sampler key carries them, so a change just makes new samplers; nothing is destroyed under the GPU. */
++static int s_tex_trilinear, s_tex_aniso;     /* force trilinear; anisotropy level forced on filtered mips (0: the game's own) */
++static int s_tex_bias_16;                    /* mip LOD bias, in 1/16 */
++
++void rsx_vulkan_backend_set_texture_filtering(int trilinear, int anisotropy, float lod_bias)
++{
++    int b = (int)(lod_bias * 16.0f + (lod_bias < 0 ? -0.5f : 0.5f));
++    if (b < -64) b = -64;
++    if (b > 63) b = 63;
++    __atomic_store_n(&s_tex_trilinear, trilinear ? 1 : 0, __ATOMIC_RELAXED);
++    __atomic_store_n(&s_tex_aniso, anisotropy < 0 ? 0 : anisotropy > 16 ? 16 : anisotropy, __ATOMIC_RELAXED);
++    __atomic_store_n(&s_tex_bias_16, b, __ATOMIC_RELAXED);
++}
++
+ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d, int aniso)
+ {
++    const int tri = __atomic_load_n(&s_tex_trilinear, __ATOMIC_RELAXED) && d->mip_present;
++    /* only textures that filter between mips: render targets and UI quads keep what the game asked */
++    const int fx_aniso = d->min_linear && d->mip_present ? __atomic_load_n(&s_tex_aniso, __ATOMIC_RELAXED) : 0;
++    const int bias16 = d->mip_present ? __atomic_load_n(&s_tex_bias_16, __ATOMIC_RELAXED) : 0;
+     u32 lo, hi;
+     memcpy(&lo, &d->min_lod, 4); memcpy(&hi, &d->max_lod, 4);
+     const u64 key = (u64)d->min_linear | ((u64)d->mag_linear << 1) | ((u64)d->mip_linear << 2)
+                   | ((u64)d->mip_present << 3) | ((u64)(d->wrap_s & 0xF) << 4)
+                   | ((u64)(d->wrap_t & 0xF) << 8) | ((u64)(d->wrap_r & 0xF) << 12)
+-                  | ((u64)(lo >> 16) << 16) | ((u64)(hi >> 16) << 32) | ((u64)(aniso != 0) << 48);
++                  | ((u64)(lo >> 16) << 16) | ((u64)(hi >> 16) << 32) | ((u64)(aniso != 0) << 48)
++                  | ((u64)tri << 49) | ((u64)fx_aniso << 50) | ((u64)(u8)(int8_t)bias16 << 56);
+     for (u32 i = 0; i < s_esamp_count; i++) if (s_esamp[i].key == key) return s_esamp[i].s;
+     if (s_esamp_count >= VK_ENG_SAMP_CACHE) return s_vk.sampler;
+     float min_lod = d->min_lod, max_lod = d->mip_present ? d->max_lod : d->min_lod;
+@@ -3973,12 +3993,16 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d, int aniso)
+         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+         .magFilter = d->mag_linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST,
+         .minFilter = d->min_linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST,
+-        .mipmapMode = d->mip_linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST,
++        .mipmapMode = (d->mip_linear || tri) ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST,
++        .mipLodBias = (float)bias16 / 16.0f,
+         .addressModeU = vk_gcm_wrap(d->wrap_s), .addressModeV = vk_gcm_wrap(d->wrap_t),
+         .addressModeW = vk_gcm_wrap(d->wrap_r),
+         .minLod = min_lod, .maxLod = max_lod,
+         .borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK };
+-    if (aniso) { sci.anisotropyEnable = VK_TRUE; sci.maxAnisotropy = s_vk.max_aniso; }
++    if (aniso || fx_aniso) {
++        sci.anisotropyEnable = VK_TRUE;
++        sci.maxAnisotropy = fx_aniso && (float)fx_aniso < s_vk.max_aniso ? (float)fx_aniso : s_vk.max_aniso;
++    }
+     VkSampler smp;
+     if (pvkCreateSampler(s_vk.device, &sci, NULL, &smp) != VK_SUCCESS) return s_vk.sampler;
+     s_esamp[s_esamp_count].key = key;
+diff --git a/libs/video/rsx_vulkan_backend.h b/libs/video/rsx_vulkan_backend.h
+index efca64e..f16a6f0 100644
+--- a/libs/video/rsx_vulkan_backend.h
++++ b/libs/video/rsx_vulkan_backend.h
+@@ -119,6 +119,12 @@ void rsx_vulkan_backend_set_render_scale(float scale);
+  * leaving it restores the last size given to _set_window_size. Applied by the event-pump thread. */
+ void rsx_vulkan_backend_set_fullscreen(int on);
+ 
++/* Texture filtering, changeable at run time (draw-engine path): trilinear forces linear mip blending
++ * on every mipmapped sampler; anisotropy (1-16, 0 = the game's own request, which is already the device
++ * maximum) is forced on filtered mipmapped textures; lod_bias shifts the mip chosen (positive softer,
++ * negative sharper). Render targets (no mips) are untouched. Safe from any thread. */
++void rsx_vulkan_backend_set_texture_filtering(int trilinear, int anisotropy, float lod_bias);
++
+ /* Resize the window (windowed runs; the frame is scaled to it by the present's blit). Takes effect
+  * the next time the event pump runs; any thread may ask. */
+ void rsx_vulkan_backend_set_window_size(int w, int h);
+-- 
+2.47.3
+

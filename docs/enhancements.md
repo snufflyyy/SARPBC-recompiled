@@ -7,7 +7,7 @@ the runtime but not yet tried. The engine INI is `PS3-TAEngine.ini` inside `COAL
 (`tools/graphics_menu_patch.py`, see `patch_engine_ini`) already rewrites it for the unlocked frame rate, so an INI
 value costs one line plus a menu row, and applies at the next start.
 
-## Tested: work through the INI (easy) - done 2026-10-22: Texture Quality, Texture Filtering, Brightness rows (graphics-menu.md)
+## Tested: work through the INI (easy) - done 2026-10-22: Texture Quality, Texture Filtering, Brightness on the Picture page, all live (graphics-menu.md)
 
 | Idea | How | Result |
 |---|---|---|
