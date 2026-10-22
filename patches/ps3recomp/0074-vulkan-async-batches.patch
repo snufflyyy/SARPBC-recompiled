@@ -1,0 +1,479 @@
+From f0f3be0732eff8d29dc5e962ea6c6970d7316009 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Thu, 22 Oct 2026 15:44:52 +0000
+Subject: [PATCH] vulkan: double-buffered engine batches (submit without
+ waiting), deferred image/framebuffer destruction, depth snapshot recorded in
+ the batch
+
+A flush used to submit and vkWaitForFences, so the FIFO thread idled while the GPU ran ~100 draws
+(36-41 s of 130 s in SARPBC's arena, 46% of drain stack samples). Batches now alternate between two
+contexts (command buffer, fence, arenas, descriptor pool, graveyard); the present and a full batch
+flush asynchronously and a context is waited for when it comes round. Images and framebuffers
+released with work recorded or in flight go to the live context's graveyard. The depth snapshot
+records its two copies in the batch through one persistent staging buffer instead of a host buffer
+and a submit-and-wait. PS3RECOMP_VK_ASYNC=0 restores the old behaviour.
+---
+ libs/video/rsx_vulkan_backend.c               | 326 ++++++++++++++----
+ .../tests/test_vulkan_present_readback.c      |   2 +-
+ 2 files changed, 263 insertions(+), 65 deletions(-)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index ba5fb80..fc577e5 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -486,6 +486,7 @@ static struct {
+ } s_batch = { .mode = -1, .vs_at = VK_BATCH_NONE, .ps_at = VK_BATCH_NONE };
+ 
+ static int vk_submit_and_wait(void);
++static VkResult vk_queue_submit(const VkSubmitInfo* si, VkFence fence);
+ static void vk_geo_release(void);
+ 
+ /* PS3RECOMP_VK_DRAW_TIMES=1: GPU time of every batched draw (timestamp pair
+@@ -544,30 +545,191 @@ static void vk_ts_collect(void)
+     }
+ }
+ 
+-/* Submit the open batch and wait for it, then recycle its arenas and sets. */
++/* ---------------------------------------------------------------------------
++ * Double-buffered batches
++ *
++ * A batch used to be submitted and waited for: the FIFO thread recorded ~100
++ * draws, then sat in vkWaitForFences while the GPU ran them (on SARPBC's arena
++ * 36 s of 130 s, 46% of the drain thread's stack samples). Now a flush can
++ * submit and carry on recording the next batch into a second context: its own
++ * command buffer, fence, vertex/index/constant arenas, descriptor pool and
++ * graveyard. A context is waited for only when it comes round again (one batch
++ * behind), or when something needs the GPU's results on the CPU.
++ *
++ *  - s_batch.vb/ib/ubo/pool/sets and s_vk.cmd/fence are the LIVE context's;
++ *    vk_ctx_switch() swaps them with the saved ones. The live context is
++ *    never in flight.
++ *  - Ordering between submissions: every command buffer begun while the other
++ *    context is in flight (vk_begin) opens with a full barrier, so the GPU
++ *    runs batches and the one-shot copies and uploads in submission order.
++ *  - vk_batch_flush() keeps its old contract (everything submitted is
++ *    complete when it returns, both contexts); vk_batch_flush_async() is for
++ *    the present and for a full batch.
++ *  - Geometry in s_geo is append-only between flushes of both contexts, so an
++ *    in-flight batch never has its vertices overwritten.
++ *  PS3RECOMP_VK_ASYNC=0 turns it off. */
++#define VK_GRAVE_MAX 256u
++typedef struct {
++    vk_image      im[VK_GRAVE_MAX];
++    VkFramebuffer fb[VK_GRAVE_MAX];
++    u32           nim, nfb;
++} vk_grave;
++
++static struct {
++    VkCommandBuffer cmd;
++    VkFence         fence;
++    int             inflight;       /* submitted, fence not yet waited for */
++    vk_grave        grave;          /* released while this context was live */
++    struct { vk_buffer vb, ib, ubo; VkDescriptorPool pool; u32 sets; } saved;   /* while not live */
++} s_bc[2];
++static u32 s_cur;
++static int s_async = -1;            /* -1 unread, 0 off, 1 ready */
++
++static void vk_destroy_image_now(vk_image* im)
++{
++    /* Never under a present's copy that may still read it. */
++    if (im->img) vk_present_wait_gpu();
++    if (im->view) pvkDestroyImageView(s_vk.device, im->view, NULL);
++    if (im->img)  pvkDestroyImage(s_vk.device, im->img, NULL);
++    if (im->mem)  pvkFreeMemory(s_vk.device, im->mem, NULL);
++    memset(im, 0, sizeof *im);
++}
++
++/* Images and framebuffers released while draws are recorded or in flight.
++ * Destroying one used to flush the batch and wait for the GPU (about 1.5
++ * releases a frame in SARPBC's arena). They are queued on the live context
++ * instead and destroyed once that context has completed, when no submission
++ * can name them. */
++static void vk_grave_drain(vk_grave* g)
++{
++    for (u32 i = 0; i < g->nfb; i++) pvkDestroyFramebuffer(s_vk.device, g->fb[i], NULL);
++    for (u32 i = 0; i < g->nim; i++) vk_destroy_image_now(&g->im[i]);
++    g->nfb = g->nim = 0;
++}
++
++static int vk_defer_destroy(void)
++{
++    return s_batch.open || (s_async == 1 && s_bc[s_cur ^ 1u].inflight);
++}
++
++static u64 s_vk_wait_ns, s_vk_submits;
++static u64 vk_now_ns(void);
++
++/* Wait for context `c`'s last submission and recycle what it used. */
++static void vk_ctx_retire(u32 c)
++{
++    if (s_bc[c].inflight) {
++        const u64 t0 = vk_now_ns();
++        pvkWaitForFences(s_vk.device, 1, &s_bc[c].fence, VK_TRUE, UINT64_MAX);
++        s_vk_wait_ns += vk_now_ns() - t0;
++        s_bc[c].inflight = 0;
++        VkDescriptorPool pool = c == s_cur ? s_batch.pool : s_bc[c].saved.pool;
++        u32* sets = c == s_cur ? &s_batch.sets : &s_bc[c].saved.sets;
++        if (*sets) { pvkResetDescriptorPool(s_vk.device, pool, 0); *sets = 0; }
++    }
++    if (s_bc[c].grave.nim || s_bc[c].grave.nfb) {
++        /* Complete: nothing in flight names a released object. */
++        if (!s_bc[c].inflight) vk_grave_drain(&s_bc[c].grave);
++    }
++}
++
++static void vk_ctx_switch(void)
++{
++    const u32 o = s_cur, n = s_cur ^ 1u;
++    s_bc[o].saved.vb = s_batch.vb;   s_bc[o].saved.ib = s_batch.ib;   s_bc[o].saved.ubo = s_batch.ubo;
++    s_bc[o].saved.pool = s_batch.pool; s_bc[o].saved.sets = s_batch.sets;
++    s_batch.vb = s_bc[n].saved.vb;   s_batch.ib = s_bc[n].saved.ib;   s_batch.ubo = s_bc[n].saved.ubo;
++    s_batch.pool = s_bc[n].saved.pool; s_batch.sets = s_bc[n].saved.sets;
++    s_cur = n;
++    s_vk.cmd = s_bc[n].cmd; s_vk.fence = s_bc[n].fence;
++    s_batch.vb_off = s_batch.ib_off = s_batch.ubo_off = 0;
++    s_batch.vs_at = s_batch.ps_at = VK_BATCH_NONE;
++    vk_ctx_retire(n);               /* a batch behind: usually long finished */
++}
++
++static int vk_batch_ready(void);
++static int vk_batch_new_pool(VkDescriptorPool* out);
++
++/* The second context, once: its command buffer, fence and descriptor pool. */
++static int vk_async_ready(void)
++{
++    if (s_async >= 0) return s_async;
++    s_async = 0;
++    const char* e = getenv("PS3RECOMP_VK_ASYNC");
++    if (e && *e == '0') return 0;
++    if (vk_batch_ready() || s_batch.mode == 0) return 0;
++    VkCommandBufferAllocateInfo cai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
++                                        .commandPool = s_vk.pool,
++                                        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
++                                        .commandBufferCount = 1 };
++    VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
++    VkCommandBuffer cb = VK_NULL_HANDLE; VkFence f = VK_NULL_HANDLE; VkDescriptorPool pool = VK_NULL_HANDLE;
++    if (pvkAllocateCommandBuffers(s_vk.device, &cai, &cb) != VK_SUCCESS ||
++        pvkCreateFence(s_vk.device, &fci, NULL, &f) != VK_SUCCESS ||
++        vk_batch_new_pool(&pool)) {
++        if (f) pvkDestroyFence(s_vk.device, f, NULL);
++        /* cb goes with the pool */
++        return 0;
++    }
++    s_bc[0].cmd = s_vk.cmd; s_bc[0].fence = s_vk.fence;
++    s_bc[1].cmd = cb; s_bc[1].fence = f; s_bc[1].saved.pool = pool;
++    s_cur = 0;
++    s_async = 1;
++    return 1;
++}
++
++/* Submit the open batch and wait for it, then every other submission: all
++ * the GPU's work is complete and its arenas, sets and graveyards recycled. */
+ static int vk_batch_flush(void)
++{
++    int rc = 0;
++    if (s_batch.open) {
++        s_batch.open = 0;
++        if (s_batch.pass_fb) { pvkCmdEndRenderPass(s_vk.cmd); s_batch.pass_fb = VK_NULL_HANDLE; }
++        rc = vk_submit_and_wait();
++        vk_ts_collect();
++        s_batch.vb_off = s_batch.ib_off = s_batch.ubo_off = 0;
++        s_batch.vs_at = s_batch.ps_at = VK_BATCH_NONE;
++        if (s_batch.sets) { pvkResetDescriptorPool(s_vk.device, s_batch.pool, 0); s_batch.sets = 0; }
++        s_batch.flushes++;
++    }
++    if (s_async == 1) vk_ctx_retire(s_cur ^ 1u);
++    vk_ctx_retire(s_cur);
++    vk_grave_drain(&s_bc[s_cur].grave);
++    if (s_async == 1) vk_grave_drain(&s_bc[s_cur ^ 1u].grave);
++    return rc;
++}
++
++/* Submit the open batch without waiting and go on with the other context. */
++static int vk_batch_flush_async(void)
+ {
+     if (!s_batch.open) return 0;
++    if (s_ts.on == 1 || !vk_async_ready()) return vk_batch_flush();
+     s_batch.open = 0;
+     if (s_batch.pass_fb) { pvkCmdEndRenderPass(s_vk.cmd); s_batch.pass_fb = VK_NULL_HANDLE; }
+-    const int rc = vk_submit_and_wait();
+-    vk_ts_collect();
+-    s_batch.vb_off = s_batch.ib_off = s_batch.ubo_off = 0;
+-    s_batch.vs_at = s_batch.ps_at = VK_BATCH_NONE;
+-    if (s_batch.sets) { pvkResetDescriptorPool(s_vk.device, s_batch.pool, 0); s_batch.sets = 0; }
++    VK_CHECK(pvkEndCommandBuffer(s_vk.cmd), "vkEndCommandBuffer");
++    VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
++                        .commandBufferCount = 1, .pCommandBuffers = &s_vk.cmd };
++    VK_CHECK(pvkResetFences(s_vk.device, 1, &s_vk.fence), "vkResetFences");
++    VK_CHECK(vk_queue_submit(&si, s_vk.fence), "vkQueueSubmit");
++    s_bc[s_cur].inflight = 1;
++    s_vk_submits++;
+     s_batch.flushes++;
+-    return rc;
++    vk_ctx_switch();
++    return 0;
+ }
+ 
+ static void vk_destroy_image(vk_image* im)
+ {
+-    vk_batch_flush();   /* a recorded draw may still use it */
+-    /* Never under a present's copy that may still read it. */
+-    if (im->img) vk_present_wait_gpu();
+-    if (im->view) pvkDestroyImageView(s_vk.device, im->view, NULL);
+-    if (im->img)  pvkDestroyImage(s_vk.device, im->img, NULL);
+-    if (im->mem)  pvkFreeMemory(s_vk.device, im->mem, NULL);
+-    memset(im, 0, sizeof *im);
++    if (!im->img && !im->view && !im->mem) return;
++    vk_grave* g = &s_bc[s_cur].grave;
++    if (vk_defer_destroy() && g->nim < VK_GRAVE_MAX) {      /* a recorded draw may still use it */
++        g->im[g->nim++] = *im;
++        memset(im, 0, sizeof *im);
++        return;
++    }
++    vk_batch_flush();
++    vk_destroy_image_now(im);
+ }
+ 
+ static int vk_create_host_buffer_ex(vk_buffer* b, VkDeviceSize size, VkBufferUsageFlags usage,
+@@ -682,7 +844,7 @@ static void vk_cmd_after_everything(VkCommandBuffer cb)
+ static int vk_begin(void)
+ {
+     /* Anything that records its own work runs after the batched draws. */
+-    if (s_batch.open && vk_batch_flush()) return -1;
++    if (s_batch.open && vk_batch_flush_async()) return -1;
+     VK_CHECK(pvkResetCommandBuffer(s_vk.cmd, 0), "vkResetCommandBuffer");
+     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                     .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+@@ -690,12 +852,14 @@ static int vk_begin(void)
+     /* A present's copy may still be reading the surface this frame is about
+      * to draw over: order everything here after it. Set only by a present,
+      * which never runs alongside the walker's recording. */
+-    if (s_vk.present_order) { vk_cmd_after_everything(s_vk.cmd); s_vk.present_order = 0; }
++    if (s_vk.present_order || (s_async == 1 && s_bc[s_cur ^ 1u].inflight)) {
++        vk_cmd_after_everything(s_vk.cmd);
++        s_vk.present_order = 0;
++    }
+     return 0;
+ }
+ 
+-/* Time spent waiting on the GPU, for PS3RECOMP_VK_BATCH_STATS. */
+-static u64 s_vk_wait_ns, s_vk_submits;
++/* s_vk_wait_ns: time spent waiting on the GPU, for PS3RECOMP_VK_BATCH_STATS. */
+ 
+ static u64 vk_now_ns(void)
+ {
+@@ -2143,7 +2307,7 @@ static VkCommandBuffer vk_present_record_begin(void)
+ {
+     /* The engine's draws for this frame may still be in the open batch; the
+      * present's own command buffer must not overtake them. */
+-    vk_batch_flush();
++    vk_batch_flush_async();
+     vk_present_complete_locked();
+     VkCommandBuffer cb = s_vk.present_cmd;
+     if (pvkResetCommandBuffer(cb, 0) != VK_SUCCESS) return VK_NULL_HANDLE;
+@@ -2837,6 +3001,8 @@ static u32 vk_eng_color_snapshot(void* user, u32 surface)
+  * Each depth target keeps ONE snapshot texture (its handle in `surface`),
+  * refilled on every request, so nothing accumulates however often the engine
+  * invalidates and asks again; it goes when the depth target goes. */
++static vk_buffer s_depth_stage;
++
+ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
+ {
+     vk_eng_obj* z = vk_eng_get(depth, VK_ENG_DEPTH);
+@@ -2853,6 +3019,7 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
+     if (!w || !h) return 0;
+ 
+     u32 snap = z->surface;
++    int fresh = 0;
+     vk_eng_obj* t = vk_eng_get(snap, VK_ENG_TEXTURE);
+     if (!t || t->w != w || t->h != h) {
+         if (t) vk_eng_release(user, snap);
+@@ -2868,37 +3035,44 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
+         t->kind = VK_ENG_TEXTURE; t->fmt = VK_FORMAT_R32_SFLOAT; t->bpp = 4; t->w = w; t->h = h;
+         z = vk_eng_get(depth, VK_ENG_DEPTH);          /* same slot; reload for clarity */
+         z->surface = snap;
+-        if (vk_begin()) return 0;
+-        vk_barrier_image(t->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
+-        if (vk_submit_and_wait()) return 0;
++        fresh = 1;
+     }
+ 
+-    vk_buffer st = {0};
+-    if (vk_create_host_buffer(&st, (VkDeviceSize)w * h * 4u,
+-                              VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+-        vk_destroy_buffer(&st); return 0;
+-    }
+-    int rc = vk_begin();
+-    if (!rc) {
+-        vk_barrier_image(z->im.img, s_vk.depth_aspect, VK_IMAGE_LAYOUT_GENERAL);
+-        vk_barrier_image(t->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+-        VkBufferImageCopy out = { .imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 },
+-                                  .imageExtent = { w, h, 1 } };
+-        pvkCmdCopyImageToBuffer(s_vk.cmd, z->im.img, VK_IMAGE_LAYOUT_GENERAL, st.buf, 1, &out);
+-        VkBufferMemoryBarrier bb = {
+-            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+-            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+-            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+-            .buffer = st.buf, .offset = 0, .size = VK_WHOLE_SIZE };
+-        pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+-                              0, 0, NULL, 1, &bb, 0, NULL);
+-        VkBufferImageCopy in = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+-                                 .imageExtent = { w, h, 1 } };
+-        pvkCmdCopyBufferToImage(s_vk.cmd, st.buf, t->im.img, VK_IMAGE_LAYOUT_GENERAL, 1, &in);
+-        rc = vk_submit_and_wait();
++    /* One staging buffer for every snapshot, in VRAM when the BAR window allows:
++     * the two copies stay on the GPU. A per-call host buffer and a submit-and-
++     * wait here stalled the FIFO thread once or twice a frame in the arena. */
++    const VkDeviceSize need = (VkDeviceSize)w * h * 4u;
++    if (!s_depth_stage.buf || s_depth_stage.size < need) {
++        vk_destroy_buffer(&s_depth_stage);                /* flushes: the GPU may be reading it */
++        if (vk_create_host_buffer_ex(&s_depth_stage, need > (1u << 20) ? need : (1u << 20),
++                                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, 1)) {
++            vk_destroy_buffer(&s_depth_stage); return 0;
++        }
+     }
+-    vk_destroy_buffer(&st);
+-    return rc ? 0 : snap;
++    if (vk_batch_begin_cmds()) return 0;
++    /* The staging buffer's last reader and the depth this copies are both
++     * earlier commands in the batch (or the batch before it). */
++    vk_cmd_after_everything(s_vk.cmd);
++    vk_barrier_image(z->im.img, s_vk.depth_aspect, VK_IMAGE_LAYOUT_GENERAL);
++    vk_barrier_image(t->im.img, VK_IMAGE_ASPECT_COLOR_BIT,
++                     fresh ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL);
++    VkBufferImageCopy out = { .imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 },
++                              .imageExtent = { w, h, 1 } };
++    pvkCmdCopyImageToBuffer(s_vk.cmd, z->im.img, VK_IMAGE_LAYOUT_GENERAL, s_depth_stage.buf, 1, &out);
++    VkBufferMemoryBarrier bb = {
++        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
++        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
++        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++        .buffer = s_depth_stage.buf, .offset = 0, .size = VK_WHOLE_SIZE };
++    pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                          0, 0, NULL, 1, &bb, 0, NULL);
++    VkBufferImageCopy in = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++                             .imageExtent = { w, h, 1 } };
++    pvkCmdCopyBufferToImage(s_vk.cmd, s_depth_stage.buf, t->im.img, VK_IMAGE_LAYOUT_GENERAL, 1, &in);
++    /* The copy, made visible to whatever samples it next. */
++    vk_barrier_image(t->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
++    if (s_batch.mode == 0) vk_batch_flush();
++    return snap;
+ }
+ /* The depth aspect of a D32_SFLOAT target copies out as 32-bit floats, which
+  * is what the engine asks for; other depth formats report failure. */
+@@ -3007,9 +3181,16 @@ static u32 s_esamp_count;
+ 
+ static void vk_eng_drop_framebuffers(void)
+ {
+-    vk_batch_flush();
+-    for (u32 i = 0; i < s_e2.fb_count; i++)
+-        if (s_e2.fb[i].fb) pvkDestroyFramebuffer(s_vk.device, s_e2.fb[i].fb, NULL);
++    for (u32 i = 0; i < s_e2.fb_count; i++) {
++        if (!s_e2.fb[i].fb) continue;
++        vk_grave* g = &s_bc[s_cur].grave;
++        if (vk_defer_destroy() && g->nfb < VK_GRAVE_MAX) {   /* the open pass may use it */
++            g->fb[g->nfb++] = s_e2.fb[i].fb;
++            continue;
++        }
++        vk_batch_flush();
++        pvkDestroyFramebuffer(s_vk.device, s_e2.fb[i].fb, NULL);
++    }
+     s_e2.fb_count = 0;
+ }
+ 
+@@ -3335,6 +3516,17 @@ static void vk_eng_bind_pipeline(void* user, u32 pipeline) { (void)user; s_e2.pi
+ static void vk_eng2_shutdown(void* user)
+ {
+     vk_batch_flush();
++    if (s_async == 1) {              /* back to the first context, then free the second */
++        if (s_cur) vk_ctx_switch();
++        vk_destroy_buffer(&s_bc[1].saved.vb);
++        vk_destroy_buffer(&s_bc[1].saved.ib);
++        vk_destroy_buffer(&s_bc[1].saved.ubo);
++        if (s_bc[1].saved.pool) pvkDestroyDescriptorPool(s_vk.device, s_bc[1].saved.pool, NULL);
++        if (s_bc[1].fence) pvkDestroyFence(s_vk.device, s_bc[1].fence, NULL);
++        memset(&s_bc, 0, sizeof s_bc);
++    }
++    s_async = -1; s_cur = 0;
++    vk_destroy_buffer(&s_depth_stage);
+     vk_destroy_buffer(&s_batch.vb);
+     vk_destroy_buffer(&s_batch.ib);
+     vk_destroy_buffer(&s_batch.ubo);
+@@ -3616,18 +3808,11 @@ static int vk_batch_arena(vk_buffer* b, VkDeviceSize bytes, VkDeviceSize first,
+     return 0;
+ }
+ 
+-static int vk_batch_ready(void)
++/* A descriptor pool with room for VK_BATCH_SETS sets of either layout
++ * (vk_eng_split_layout has the same descriptor counts as the shared one,
++ * spread over more bindings). */
++static int vk_batch_new_pool(VkDescriptorPool* out)
+ {
+-    if (s_batch.mode < 0) {
+-        const char* e = getenv("PS3RECOMP_VK_BATCH");
+-        s_batch.mode = (e && *e == '0') ? 0 : 1;
+-    }
+-    if (s_batch.pool) return 0;
+-    VkPhysicalDeviceProperties p;
+-    pvkGetPhysicalDeviceProperties(s_vk.phys, &p);
+-    s_batch.ubo_align = p.limits.minUniformBufferOffsetAlignment ? p.limits.minUniformBufferOffsetAlignment : 256;
+-    /* Enough for every set of either layout (vk_eng_split_layout has the same
+-     * descriptor counts as the shared one, spread over more bindings). */
+     VkDescriptorPoolSize ps[3] = {
+         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2u * VK_BATCH_SETS },
+         { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, RSX_MAX_TEXTURES * VK_BATCH_SETS },
+@@ -3635,14 +3820,27 @@ static int vk_batch_ready(void)
+     };
+     VkDescriptorPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+                                        .maxSets = VK_BATCH_SETS, .poolSizeCount = 3, .pPoolSizes = ps };
+-    if (pvkCreateDescriptorPool(s_vk.device, &pci, NULL, &s_batch.pool) != VK_SUCCESS) {
+-        s_batch.pool = VK_NULL_HANDLE;
++    if (pvkCreateDescriptorPool(s_vk.device, &pci, NULL, out) != VK_SUCCESS) {
++        *out = VK_NULL_HANDLE;
+         VK_LOG("engine: no descriptor pool for draw batches\n");
+         return -1;
+     }
+     return 0;
+ }
+ 
++static int vk_batch_ready(void)
++{
++    if (s_batch.mode < 0) {
++        const char* e = getenv("PS3RECOMP_VK_BATCH");
++        s_batch.mode = (e && *e == '0') ? 0 : 1;
++    }
++    if (s_batch.pool) return 0;
++    VkPhysicalDeviceProperties p;
++    pvkGetPhysicalDeviceProperties(s_vk.phys, &p);
++    s_batch.ubo_align = p.limits.minUniformBufferOffsetAlignment ? p.limits.minUniformBufferOffsetAlignment : 256;
++    return vk_batch_new_pool(&s_batch.pool);
++}
++
+ static VkDeviceSize vk_batch_align(VkDeviceSize v, VkDeviceSize a) { return (v + a - 1u) / a * a; }
+ 
+ /* Vertex and index data by content. The engine hands every draw its decoded
+@@ -3832,7 +4030,7 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+         if (!s_batch.open) break;
+         if (vb_at + gvb <= s_batch.vb.size && ib_at + gib <= s_batch.ib.size &&
+             ub_at + ubytes <= s_batch.ubo.size && s_batch.sets < VK_BATCH_SETS) break;
+-        if (vk_batch_flush()) return;
++        if (vk_batch_flush_async()) return;
+     }
+     if (!s_batch.open) {
+         if (vk_batch_arena(&s_batch.vb, gvb ? gvb : 16u, 4u << 20, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) ||
+diff --git a/libs/video/tests/test_vulkan_present_readback.c b/libs/video/tests/test_vulkan_present_readback.c
+index bf05864..907d545 100644
+--- a/libs/video/tests/test_vulkan_present_readback.c
++++ b/libs/video/tests/test_vulkan_present_readback.c
+@@ -45,7 +45,7 @@ static PFN_vkEndCommandBuffer pvkEndCommandBuffer = end_cb;
+ static PFN_vkResetFences pvkResetFences = reset_fences;
+ static void vk_cmd_after_everything(VkCommandBuffer cb) {}
+ static unsigned batch_flushes;
+-static int vk_batch_flush(void) { batch_flushes++; return 0; }
++static int vk_batch_flush_async(void) { batch_flushes++; return 0; }
+ static void vk_barrier_image_on(VkCommandBuffer cb, VkImage image, VkImageAspectFlags aspect, VkImageLayout layout) {}
+ static VkResult vk_queue_submit(const VkSubmitInfo* si, VkFence f) { return fail_submit ? VK_ERROR_DEVICE_LOST : VK_SUCCESS; }
+ static void vk_invalidate(vk_buffer* buffer) { assert(buffer->coherent); }
+-- 
+2.47.3
+

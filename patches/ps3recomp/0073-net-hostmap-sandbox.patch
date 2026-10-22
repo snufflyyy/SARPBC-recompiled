@@ -1,0 +1,150 @@
+From 15fab803d788f077aba2dafbfa8bb77696073528 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Wed, 21 Oct 2026 21:25:28 +0000
+Subject: [PATCH] sys_net: PS3_NET_HOSTMAP (name=ip) and PS3_NET_SANDBOX (no
+ DNS, loopback/LAN/mapped destinations only)
+
+---
+ libs/network/sysNet.c | 89 +++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 89 insertions(+)
+
+diff --git a/libs/network/sysNet.c b/libs/network/sysNet.c
+index 87595f3..c78668f 100644
+--- a/libs/network/sysNet.c
++++ b/libs/network/sysNet.c
+@@ -55,6 +55,7 @@
+ 
+ #include <stdio.h>
+ #include <string.h>
++#include <ctype.h>
+ #include <stdlib.h>
+ 
+ extern void ps3_hle_register_ctx(uint32_t nid, const char* name, void (*fn)(ppu_context*));
+@@ -99,6 +100,8 @@ static int32_t  s_errno = 0;   /* ponytail: one errno for every thread, per-thre
+ #define HOSTENT_SCRATCH 320u
+ 
+ static int net_trace(void);   /* PS3_NET_TRACE; defined with the send/recv paths */
++struct sockaddr_in;
++static int net_dest_allowed(const struct sockaddr_in* a, const char* what);   /* PS3_NET_SANDBOX */
+ 
+ static uint32_t scratch(uint32_t* ea, uint32_t size)
+ {
+@@ -523,6 +526,7 @@ int32_t sys_net_bnet_connect(int32_t s, const sys_net_sockaddr* addr, uint32_t a
+ 
+     char ip[16];
+     printf("[sys_net] connect(%d, %s:%u)\n", s, ip_str(&a.sin_addr, ip), ntohs(a.sin_port));
++    if (!net_dest_allowed(&a, "connect")) return fail(SYS_NET_ECONNREFUSED);
+     if (s_sockets[s].p2p && s_sockets[s].stream) {
+         /* A peer that can't take a direct connection (behind its router):
+          * the stream goes through psnr's relay, and its socket replaces
+@@ -619,6 +623,7 @@ int32_t sys_net_bnet_sendto(int32_t s, const void* buf, uint32_t len, int32_t fl
+     if (!valid_socket(s)) return fail(SYS_NET_EBADF);
+     if (!to) return sys_net_bnet_send(s, buf, len, flags);   /* connected socket */
+     if (read_sockaddr(EA(to), &a)) return fail(SYS_NET_EINVAL);
++    if (!net_dest_allowed(&a, "sendto")) return fail(SYS_NET_ENETUNREACH);
+     if (s_sockets[s].p2p && np_psnr_p2p_route(GUEST_PTR(EA(buf), const char*), len,
+                                              (const uint8_t*)&a.sin_addr, ntohs(a.sin_port)))
+         return (int32_t)len;   /* went through psnr's relay */
+@@ -983,6 +988,68 @@ uint32_t sys_net_bnet_inet_ntoa(uint32_t addr)
+     return ea;
+ }
+ 
++/* PS3_NET_HOSTMAP="name=ip,name=ip": gethostbyname answers these names from the map
++ * instead of DNS (a title's dead service hostnames pointed at a server of your own).
++ * PS3_NET_SANDBOX=1: a name that is not in the map resolves to 127.0.0.1 without
++ * touching DNS, and connect/sendto only reach loopback, hostmap targets and
++ * private LAN ranges (10/8, 172.16/12, 192.168/16): a title's unknown traffic is
++ * logged as "[sys_net] SANDBOX blocked" and refused. For finding out what an
++ * online title does before it is allowed to talk to anything real. */
++static int net_sandbox(void)
++{
++    static int v = -1;
++    if (v < 0) { const char* e = getenv("PS3_NET_SANDBOX"); v = e && *e && *e != '0'; }
++    return v;
++}
++
++static int net_ieq(const char* a, const char* b, size_t n)
++{
++    for (size_t i = 0; i < n; i++)
++        if (tolower((unsigned char)a[i]) != tolower((unsigned char)b[i])) return 0;
++    return 1;
++}
++
++/* The address `host` is mapped to by PS3_NET_HOSTMAP (case-insensitive), or 0. */
++static int net_hostmap_lookup(const char* host, struct in_addr* out)
++{
++    const char* e = getenv("PS3_NET_HOSTMAP");
++    if (!e || !host) return 0;
++    const size_t hl = strlen(host);
++    while (*e) {
++        const char* eq = strchr(e, '=');
++        const char* end = strchr(e, ',');
++        if (!end) end = e + strlen(e);
++        if (eq && eq < end) {
++            char ip[64];
++            const size_t il = (size_t)(end - eq - 1);
++            if ((size_t)(eq - e) == hl && net_ieq(e, host, hl) && il < sizeof ip) {
++                memcpy(ip, eq + 1, il); ip[il] = 0;
++                if (inet_pton(AF_INET, ip, out) == 1) return 1;
++            }
++        }
++        e = *end ? end + 1 : end;
++    }
++    return 0;
++}
++
++/* Is a connection to `a` allowed? Always, unless the sandbox is on. */
++static int net_dest_allowed(const struct sockaddr_in* a, const char* what)
++{
++    if (!net_sandbox()) return 1;
++    const uint32_t ip = ntohl(a->sin_addr.s_addr);
++    int ok = (ip >> 24) == 127 || (ip >> 24) == 10 || (ip >> 20) == 0xAC1 || (ip >> 16) == 0xC0A8;
++    if (!ok) {
++        const char* e = getenv("PS3_NET_HOSTMAP");   /* a mapped target is the user's own server */
++        char ips[16]; ip_str(&a->sin_addr, ips);
++        ok = e && strstr(e, ips) != NULL;
++    }
++    if (!ok) {
++        char ips[16];
++        printf("[sys_net] SANDBOX blocked %s to %s:%u\n", what, ip_str(&a->sin_addr, ips), ntohs(a->sin_port));
++    }
++    return ok;
++}
++
+ uint32_t sys_net_bnet_gethostbyname(const char* name)
+ {
+     const char* host = GUEST_PTR(EA(name), const char*);
+@@ -990,8 +1057,30 @@ uint32_t sys_net_bnet_gethostbyname(const char* name)
+     struct addrinfo hints, *res = NULL;
+     if (!host || !h) return 0;
+ 
++    struct in_addr mapped;
++    int is_mapped = net_hostmap_lookup(host, &mapped);
+     memset(&hints, 0, sizeof(hints));
+     hints.ai_family = AF_INET;
++    if (!is_mapped && net_sandbox()) {
++        printf("[sys_net] gethostbyname('%s') SANDBOXED -> 127.0.0.1 (no DNS)\n", host);
++        is_mapped = 1;
++        mapped.s_addr = htonl(0x7F000001u);
++    }
++    if (is_mapped) {
++        memset(vm_ptr8(h), 0, HOSTENT_SCRATCH);
++        vm_write32(h + 0,  h + 64);
++        vm_write32(h + 4,  h + 32);
++        vm_write32(h + 8,  SYS_NET_AF_INET);
++        vm_write32(h + 12, 4);
++        vm_write32(h + 16, h + 40);
++        vm_write32(h + 40, h + 48);
++        memcpy(vm_ptr8(h + 48), &mapped, 4);
++        strncpy((char*)vm_ptr8(h + 64), host, HOSTENT_SCRATCH - 65);
++        char ip[16];
++        printf("[sys_net] gethostbyname('%s') -> %s%s\n", host, ip_str(&mapped, ip),
++               net_sandbox() ? " (hostmap/sandbox)" : " (hostmap)");
++        return h;
++    }
+     if (getaddrinfo(host, NULL, &hints, &res) != 0 || !res) {
+         printf("[sys_net] gethostbyname('%s') failed\n", host);
+         if (scratch(&s_h_errno_ea, 4)) vm_write32(s_h_errno_ea, SYS_NET_HOST_NOT_FOUND);
+-- 
+2.47.3
+

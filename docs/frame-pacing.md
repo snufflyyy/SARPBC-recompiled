@@ -19,7 +19,7 @@ and wait on GCM labels/flips the clock services. `g_frames_presented` counts pre
 | Screen | Guest frames/s | Frame clock per 5 s |
 |---|---|---|
 | Main menu / Single Player | ~54 | idle about a third of gdb samples (T040 session); not re-measured with the counters |
-| Arena (New Game) | 36-38 | sleep 0.3 s, **fifo 4.3 s**, present 0.1-0.8 s |
+| Arena (New Game) | 36-38 (47-48 after T060's async batches, see subsystems.md) | sleep 0.3 s, **fifo 4.3 s**, present 0.1-0.8 s (before T060) |
 
 - In the arena the clock thread is **87% busy draining the FIFO** (decoding draws, uploads,
   Vulkan recording). Pacing is not the limit there: the RSX-to-Vulkan work is. A cap at 30

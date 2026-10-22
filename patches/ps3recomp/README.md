@@ -175,6 +175,8 @@ numbers:
 | `0070-pipe-times.patch` | T059: RSX_ENGINE_PIPE_TIMES per-pipeline build time diagnostic | generic diagnostic |
 | `0071-loader-toc-stubs.patch` | T005: ppu_loader splits linker TOC-switch stub runs into one function each (+ test) | generic, offer upstream |
 | `0072-flip-at-fifo-position.patch` | T058: prepare-flip markers execute at their FIFO point, with a non-overwriting cursor fallback near ring end; per-buffer atomic acknowledgements do not flip twice. Preserve legacy PPU callback policy, never enter guests from the drain, and cancel skipped position events. Two callback modes, FIFO/fence/ack/position/resync tests, ASan/UBSan | adapted from soyjxck MIT fork 6eb35c0 / 6cba82c; offer upstream |
+| `0073-net-hostmap-sandbox.patch` | T015: PS3_NET_HOSTMAP redirects a title's service hostnames, PS3_NET_SANDBOX logs and blocks outside traffic | generic, offer upstream |
+| `0074-vulkan-async-batches.patch` | T060: engine batches submit without waiting (two contexts), deferred destroy of released images/framebuffers, depth snapshot recorded in the batch; arena 39 to 48 fps, GPU waits 41 s to 1.4 s per 130 s; PS3RECOMP_VK_ASYNC=0 disables | generic, offer upstream |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `tools/export_patch.sh <slug> "<description>" ["<upstream status>"]` (next free number, the README row,

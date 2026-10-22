@@ -205,6 +205,42 @@ Single Player screen, 0053 applied): the game uses ~190% CPU in total, three thr
 59% and 43%, the rest under 10%. The 90% lock/spin share seen on 2026-10-19 was T033's
 double-started tasks. T029/T031/T032 (SPU speed) stay open for an SPU-heavy scene.
 
+### Async batches: CPU and GPU overlap (T060, 2026-10-22, patch 0074)
+
+After 0056 the arena ran at 38-40 guest fps with the frame clock thread 78% busy in the FIFO drain
+(`FRAME_CLOCK_STATS`: fifo 3.9 s of 5 s). gdb stack samples (40 samples of a 130 s arena run, `bt 30`,
+frame-clock thread only) put **46% of that thread in `vk_submit_and_wait`**: every batch was submitted
+and waited for, so recording (CPU) and execution (GPU) ran in series. `PS3RECOMP_VK_BATCH_STATS=1`
+said 41 s of 130 s in GPU waits, from two call sites: the present's flush (4955, 2.7 ms each) and
+`vk_eng_release` (7370, 2.9 ms each: every released image flushed and waited).
+
+What changed, in `rsx_vulkan_backend.c` (all of it behind `PS3RECOMP_VK_ASYNC=0` for the old
+behaviour):
+- **Deferred destroy**: an image or framebuffer released while a batch is open, or another is in
+  flight, goes to the live context's graveyard and is destroyed once that context has completed.
+  Alone it moved the wait (41 to 36 s) and gained ~1 fps: the work still ran in series.
+- **Two contexts** (`s_bc[2]`: command buffer, fence, vertex/index/constant arenas, descriptor pool,
+  graveyard). `vk_batch_flush_async()` submits and switches to the other context, waiting for it only
+  when it comes round (one batch behind). The present and a full batch flush asynchronously;
+  `vk_batch_flush()` keeps the old contract (everything complete on return) for every other caller.
+  Every command buffer begun while the other context is in flight starts with a full barrier, so
+  batches and the one-shot copies/uploads run in submission order. The geometry cache is append-only
+  between full flushes, so an in-flight batch's vertices are never overwritten.
+- **Depth snapshot** (the shadow map's copy, `vk_eng_depth_snapshot`) recorded in the batch through one
+  persistent staging buffer (VRAM via the BAR window when available) instead of a host buffer and a
+  submit-and-wait. After the contexts it was the stall: 9 of 33 samples.
+
+| 130 s arena run (`PS3_VERBOSE=0`) | guest fps (steady) | GPU waits |
+|---|---|---|
+| before (main 00092fb) | 38-40 | 41.2 s |
+| deferred destroy | ~40 | 36.4 s |
+| + two contexts | ~40 | 13.6 s |
+| + snapshot in the batch | **47-48** | **1.4 s** |
+
+Menus ran 55-60 fps in the same run. Captures (menu and arena, shadow under the car) are unchanged.
+Remaining waits: texture creation and uploads (`vk_begin` + `vk_submit_and_wait`), the present's
+`vk_present_complete_locked` (GPU at most one frame behind, by design).
+
 ### Arena flip-callback stall (T044, 2026-10-20)
 
 After the slab-service repair lets the challenge package load, a 140 s boot
