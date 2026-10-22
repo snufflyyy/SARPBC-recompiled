@@ -186,6 +186,7 @@ numbers:
 | `0081-vulkan-render-scale.patch` | T063: internal render scale: scaled colour/depth targets, the engine keeps speaking guest pixels | generic, offer upstream |
 | `0082-vulkan-fullscreen.patch` | Fullscreen toggle at run time (applied on the event-pump thread, logged) | generic, offer upstream |
 | `0083-vulkan-texture-filtering.patch` | Texture filtering at run time: force trilinear and anisotropy on mipmapped samplers, mip LOD bias | generic, offer upstream |
+| `0084-vulkan-live-render-scale.patch` | T063: change the render scale at run time (engine drops its targets under the FIFO lock, backend rebuilds the display image) | generic, offer upstream |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `tools/export_patch.sh <slug> "<description>" ["<upstream status>"]` (next free number, the README row,

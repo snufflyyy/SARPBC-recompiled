@@ -117,7 +117,7 @@ shows no title). The patch uses no new package objects; new names are appended (
 
 The host side is `src/overrides/graphics_menu.cpp` (the bridge and the row list) and `graphics_settings.{h,cpp}`
 (values, persisted in `gamedata/graphics.ini`, `$SARPBC_GFX_FILE`). Rows today, Graphics page: Resolution (the window's
-size; the frame is scaled to it, patch 0080), Render Scale (T063, restart), Fullscreen (live), VSync (the game's
+size; the frame is scaled to it, patch 0080), Render Scale (T063, live), Fullscreen (live), VSync (the game's
 own), Frame Rate (T062, restart to apply), FPS Counter (T064); Picture page: see the last section; the ones that switch something (T062-T064) read
 `sarpbc_gfx::settings()`.
 
@@ -156,7 +156,17 @@ scale is done in the Vulkan backend (patch 0081, `rsx_vulkan_backend_set_render_
 - Verified (arena, menus, loading screens): 100% unchanged, 50% = 640x360, 150% = 1920x1080, 200% = 2560x1440,
   300% = 3840x2160; shadows, glow, HUD and post effects match 100% at the same moment, the HUD and text are sharp.
   Guest fps in the arena at 300%: ~23 (the GPU idles at P8/405 MHz here); 100-150% cost little.
-- Not done: changing it at run time (surfaces are cached by the engine), and the screen-space constants the game
+- **Live (2026-10-22, patch 0084)**: the Render Scale row and `rsx_vulkan_backend_apply_render_scale` rebuild everything
+  while the game runs. The frame clock thread (the one that drives the FIFO) calls it when the setting changes;
+  it runs under the GCM FIFO lock (`cellGcm_rsx_run_exclusive`), finishes the present in flight, waits for the GPU,
+  has the draw engine release every colour/depth target (`rsx_draw_engine_drop_targets`: surfaces and their feedback
+  copies, depth targets), drops the framebuffers, the scratch depth and the snapshot images built from them,
+  recreates the display image, its depth, the readback buffer and the legacy framebuffer at the new size, and lets
+  the engine's next draws make its targets again at the new scale. Target contents (a frame of history) are lost:
+  at most one odd frame. Stress-tested in the arena with `SARPBC_RENDER_SCALE_CYCLE=9` (steps 100/150/50/200/75/300 %
+  every 9 s, twelve changes in one run: no crash, no unresolved errors, 5905 flips, the match renders correctly at
+  every size) and through the menu (choosing 200% logs `render scale 2.00: display image 2560x1440`).
+- Not done: the screen-space constants the game
   feeds some post passes stay in 1280x720 units (nothing visibly wrong was found; look here first if a post
   effect shows a seam at a scale).
 

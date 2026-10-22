@@ -31,7 +31,7 @@ camera overrides it). **`DepthOfField=false` is harmful**: black outlines appear
 | **Safe area 100 %** | The Screen Size row shows 85 % (`TAProfile.ViewportScreenScalingX/Y`, applied by `TAGameViewportClient.UpdateScreenScaling(x, y)`); the 85 % black frame is visible in every screen. `ScreenSizeMessageBoxActor` is the "adjust your screen" intro page | Set the profile default to 1.0 (data patch in the default object, like `OptionsItems`) and/or call `UpdateScreenScaling(1, 1)` at start; skip the safe-area page. Not yet checked where the 0.85 default comes from |
 | **Language** | `cellSysutil` answers the language from `PS3_LANG` (en/fr/de/es/it...) else the host locale; the install has `COALESCED.INT/.DEU/.ESN/.FRA/.ITA` | A Language row writing `PS3_LANG` for the next start (restart) |
 | **Frame cap choices** (30 / 60 / 120 / unlimited) | `SARPBC_FPS_CAP=<n>` already limits flips (docs/frame-pacing.md); Frame Rate row has two choices today | More choices on the existing row; the cap is on the drain thread (a cap under 60 costs a little) |
-| **Render scale without a restart** | Surfaces are cached by the engine | Invalidate the engine's surface table on change (backend + engine, medium) |
+| **Render scale without a restart** - DONE (patch 0084) | - | - |
 
 ## Medium effort
 

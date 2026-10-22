@@ -135,7 +135,7 @@ std::vector<Row> make_graphics_rows()
         rows.push_back(r);
     }
     {
-        Row r{"Render Scale", "Render Scale (restart to apply)", {}, [] { return settings().render_scale.load(); },
+        Row r{"Render Scale", "Render Scale", {}, [] { return settings().render_scale.load(); },
               [](int i) { settings().render_scale = i; }};
         for (int i = 0; i < sarpbc_gfx::kNumRenderScales; i++)
             r.choices.push_back(std::to_string(sarpbc_gfx::kRenderScalePercent[i]) + "%");

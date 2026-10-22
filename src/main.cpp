@@ -85,7 +85,8 @@ void     sarpbc_fps_overlay_tick(uint64_t clock_ms, unsigned guest_frames);   /*
 #if defined(PS3RECOMP_RSX_VULKAN)
 extern "C" void rsx_vulkan_backend_set_present_unlocked(int unlocked);       /* T062 */
 extern "C" void rsx_vulkan_backend_set_window_size(int w, int h);              /* T063 */
-extern "C" void rsx_vulkan_backend_set_render_scale(float scale);              /* T063 */
+extern "C" void rsx_vulkan_backend_set_render_scale(float scale);              /* T063: before init */
+extern "C" void rsx_vulkan_backend_apply_render_scale(float scale);            /* T063: live */
 extern "C" void rsx_vulkan_backend_set_fullscreen(int on);                      /* Graphics > Fullscreen */
 extern "C" void rsx_vulkan_backend_set_texture_filtering(int trilinear, int anisotropy, float lod_bias);   /* Graphics > Texture rows */
 #endif
@@ -339,6 +340,13 @@ static DWORD WINAPI frame_clock(LPVOID)
     int window_size_applied = -1;
     int fullscreen_applied = -1;
     int texture_applied = -1;
+    int render_scale_applied = sarpbc_gfx::settings().render_scale.load();   /* what the backend started with */
+    /* SARPBC_RENDER_SCALE_CYCLE=<seconds>: a stress test, steps the render scale through 100/150/50/200/75/300 %
+     * every <seconds> so live changes can be exercised during real rendering. */
+    const char* cycle_env = getenv("SARPBC_RENDER_SCALE_CYCLE");
+    const unsigned long long cycle_us = cycle_env ? (unsigned long long)(atof(cycle_env) * 1e6) : 0;
+    unsigned long long next_cycle_us = 0;
+    int cycle_step = 0;
     unsigned long long st_sleep = 0, st_fifo = 0, st_present = 0, st_t0 = now_us(), st_n = 0;
     unsigned st_presents = 0;
     #define FC_TIMED(acc, stmt) do { if (stats) { unsigned long long _t = now_us(); stmt; acc += now_us() - _t; } else { stmt; } } while (0)
@@ -379,6 +387,20 @@ static DWORD WINAPI frame_clock(LPVOID)
 #if defined(PS3RECOMP_RSX_VULKAN)
             const sarpbc_gfx::Filter& flt = sarpbc_gfx::kTextureFilter[tex / 16];
             rsx_vulkan_backend_set_texture_filtering(flt.trilinear, flt.anisotropy, sarpbc_gfx::kTextureLodBias[tex % 16]);
+#endif
+        }
+        /* Render Scale row: live. The backend rebuilds its targets with the FIFO walker excluded (this thread
+         * is the one that drives it, so this is between drains). */
+        if (cycle_us && now_us() >= next_cycle_us) {
+            static const int steps[] = {2, 3, 0, 4, 1, 5};
+            if (next_cycle_us) sarpbc_gfx::settings().render_scale = steps[cycle_step++ % 6];
+            next_cycle_us = now_us() + cycle_us;
+        }
+        const int rs = sarpbc_gfx::settings().render_scale.load(std::memory_order_relaxed);
+        if (rs != render_scale_applied) {
+            render_scale_applied = rs;
+#if defined(PS3RECOMP_RSX_VULKAN)
+            if (rsx_ok) rsx_vulkan_backend_apply_render_scale(sarpbc_gfx::kRenderScalePercent[rs] / 100.0f);
 #endif
         }
         const bool unlocked = sarpbc_gfx::settings().unlock_fps.load(std::memory_order_relaxed) != 0;

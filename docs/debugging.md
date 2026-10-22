@@ -494,3 +494,6 @@ around a run, then `PIL.ImageGrab.grab()` (the GPU is used; fps under Xvfb is lo
 `tools/boot_check.sh` refuses to start with less than 3000 MB free (`SARPBC_MIN_FREE_MB`, 0 = off). A run keeps
 its log and the last `--keep` runs' frames; frame dumps are the full display image, so at a 3x render scale one
 is 25 MB (3840x2160x3 as PPM): when scripting many runs, convert each dump to a small PNG and delete the PPM.
+
+`SARPBC_RENDER_SCALE_CYCLE=<seconds>` steps the render scale through 100/150/50/200/75/300 % every <seconds> (a stress
+test of the live render scale, see graphics-menu.md "Render scale").

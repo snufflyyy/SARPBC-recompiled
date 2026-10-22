@@ -1,0 +1,208 @@
+From 6c3fb49525c8402f183910c3aed9ddb3ea00b622 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Thu, 22 Oct 2026 22:16:18 +0000
+Subject: [PATCH] vulkan: live render scale:
+ rsx_vulkan_backend_apply_render_scale rebuilds the display image and has the
+ draw engine drop its targets (rsx_draw_engine_drop_targets,
+ cellGcm_rsx_run_exclusive)
+
+---
+ libs/video/cellGcmSys.c         |  9 ++++
+ libs/video/rsx_draw_engine.c    | 17 +++++++
+ libs/video/rsx_draw_engine.h    |  5 ++
+ libs/video/rsx_vulkan_backend.c | 84 ++++++++++++++++++++++++++++++---
+ libs/video/rsx_vulkan_backend.h |  5 ++
+ 5 files changed, 113 insertions(+), 7 deletions(-)
+
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 3fbf5bb..58ac46f 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -2010,6 +2010,15 @@ void cellGcm_ref_on_poll(void)
+ 
+ static uint64_t s_ft_sema_t0;          /* PS3_FTRACE: when the walker began waiting on the current acquire */
+ 
++/* Run fn(arg) with the FIFO walker excluded: no command is being decoded or drawn while it runs. For a
++ * host that has to rebuild what the draw engine holds (the Vulkan backend's render scale change). */
++void cellGcm_rsx_run_exclusive(void (*fn)(void*), void* arg)
++{
++    AcquireSRWLockExclusive(&s_gcm_fifo_lock);
++    fn(arg);
++    ReleaseSRWLockExclusive(&s_gcm_fifo_lock);
++}
++
+ void cellGcm_rsx_process_fifo(void)
+ {
+     const uint64_t ft_t0 = PS3_FT_ON() ? ps3_ft_now() : 0;
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index 4113720..559cb38 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -3412,6 +3412,23 @@ void rsx_draw_engine_flush(void)
+         g.be->submit_and_wait(g.be->user, RSX_BE_FLUSH_GUEST_REFERENCE);
+ }
+ 
++void rsx_draw_engine_drop_targets(void)
++{
++    if (!g.ready) return;
++    if (g.be->submit_and_wait) g.be->submit_and_wait(g.be->user, RSX_BE_FLUSH_GUEST_REFERENCE);
++    for (u32 i = 0; i < g.n_surfaces; i++) {
++        if (g.surfaces[i].feedback) g.be->texture_release(g.be->user, g.surfaces[i].feedback);
++        if (g.surfaces[i].handle) g.be->color_target_release(g.be->user, g.surfaces[i].handle);
++    }
++    memset(g.surfaces, 0, sizeof g.surfaces);
++    g.n_surfaces = 0;
++    for (u32 i = 0; i < g.n_zdepths; i++)
++        if (g.zdepths[i].handle) g.be->depth_target_release(g.be->user, g.zdepths[i].handle);
++    memset(g.zdepths, 0, sizeof g.zdepths);
++    g.n_zdepths = 0;
++    g.last_present_surface = 0;
++}
++
+ void rsx_draw_engine_present(void)
+ {
+     /* A host that drives the flip itself gets whichever buffer the guest's
+diff --git a/libs/video/rsx_draw_engine.h b/libs/video/rsx_draw_engine.h
+index 8d62194..65fb492 100644
+--- a/libs/video/rsx_draw_engine.h
++++ b/libs/video/rsx_draw_engine.h
+@@ -273,6 +273,11 @@ void rsx_draw_engine_set_guest_memory(rsx_vertex_guest_ptr_fn reader, void* user
+ int  rsx_draw_engine_init(u32 width, u32 height);
+ void rsx_draw_engine_shutdown(void);
+ 
++/* Release every colour and depth target the engine holds (and their feedback copies). They are made again,
++ * at whatever size the backend then gives them, by the next draw that names them; their contents are lost.
++ * For a host changing a backend's render scale: call it with the FIFO walker excluded and the GPU idle. */
++void rsx_draw_engine_drop_targets(void);
++
+ /* One FIFO method, with its subchannel bits still on: the engine masks them
+  * out itself, as rsx_live_draw_method (6902-6976) does, because a title whose
+  * SPU-built command lists bind NV4097 to another subchannel would otherwise
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index e5cb772..cebf000 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -1193,6 +1193,17 @@ chosen:
+     return 0;
+ }
+ 
++static int vk_create_display_framebuffer(void)
++{
++    VkImageView views[2] = { s_vk.color.view, s_vk.depth.view };
++    VkFramebufferCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
++                                    .renderPass = s_vk.render_pass, .attachmentCount = 2,
++                                    .pAttachments = views, .width = s_vk.width,
++                                    .height = s_vk.height, .layers = 1 };
++    VK_CHECK(pvkCreateFramebuffer(s_vk.device, &fci, NULL, &s_vk.framebuffer), "vkCreateFramebuffer");
++    return 0;
++}
++
+ static int vk_create_render_pass(void)
+ {
+     VkAttachmentDescription att[2] = {
+@@ -1217,13 +1228,7 @@ static int vk_create_render_pass(void)
+                                    .subpassCount = 1, .pSubpasses = &sub };
+     VK_CHECK(pvkCreateRenderPass(s_vk.device, &rci, NULL, &s_vk.render_pass), "vkCreateRenderPass");
+ 
+-    VkImageView views[2] = { s_vk.color.view, s_vk.depth.view };
+-    VkFramebufferCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+-                                    .renderPass = s_vk.render_pass, .attachmentCount = 2,
+-                                    .pAttachments = views, .width = s_vk.width,
+-                                    .height = s_vk.height, .layers = 1 };
+-    VK_CHECK(pvkCreateFramebuffer(s_vk.device, &fci, NULL, &s_vk.framebuffer), "vkCreateFramebuffer");
+-    return 0;
++    return vk_create_display_framebuffer();
+ }
+ 
+ static int vk_create_shader(const uint32_t* code, size_t bytes, VkShaderModule* out)
+@@ -4819,6 +4824,71 @@ void rsx_vulkan_backend_shutdown(void)
+ 
+ /* The window's size is the host's to change (any thread asks, the thread that pumps events does it:
+  * SDL wants window calls there). The swapchain follows on the next present (out-of-date / suboptimal). */
++/* ---- live render scale ------------------------------------------------------------------------
++ * rsx_vulkan_backend_apply_render_scale(): with the FIFO walker excluded (cellGcm_rsx_run_exclusive), finish
++ * the present in flight, wait for the GPU, have the draw engine release its targets, drop what was built
++ * from them (framebuffers, the scratch depth, snapshot images), and recreate the display image, its depth,
++ * the readback buffer and the legacy framebuffer at the new size. The engine's next draws make the targets
++ * again at the new scale; their contents (one frame of history) are lost. */
++extern void cellGcm_rsx_run_exclusive(void (*fn)(void*), void* arg);
++extern void rsx_draw_engine_drop_targets(void);
++
++static int vk_resize_display(u32 w, u32 h)
++{
++    if (s_vk.framebuffer) { pvkDestroyFramebuffer(s_vk.device, s_vk.framebuffer, NULL); s_vk.framebuffer = VK_NULL_HANDLE; }
++    vk_destroy_image(&s_vk.depth);
++    vk_destroy_image(&s_vk.color);
++    vk_destroy_buffer(&s_vk.readback);
++    s_vk.width = w;
++    s_vk.height = h;
++    if (vk_create_image(&s_vk.color, VK_FORMAT_R8G8B8A8_UNORM, w, h,
++                        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
++                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT)) return -1;
++    if (vk_create_image(&s_vk.depth, s_vk.depth_format, w, h,
++                        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
++                        s_vk.depth_aspect)) return -1;
++    if (vk_create_host_buffer(&s_vk.readback, (VkDeviceSize)w * h * 4u, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) return -1;
++    if (vk_create_display_framebuffer()) return -1;
++    if (vk_begin()) return -1;
++    vk_barrier_image(s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
++    vk_barrier_image(s_vk.depth.img, s_vk.depth_aspect, VK_IMAGE_LAYOUT_UNDEFINED);
++    VkClearColorValue black = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } };
++    VkClearDepthStencilValue far_plane = { 1.0f, 0 };
++    VkImageSubresourceRange cr = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
++    VkImageSubresourceRange dr = { s_vk.depth_aspect, 0, 1, 0, 1 };
++    pvkCmdClearColorImage(s_vk.cmd, s_vk.color.img, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &cr);
++    pvkCmdClearDepthStencilImage(s_vk.cmd, s_vk.depth.img, VK_IMAGE_LAYOUT_GENERAL, &far_plane, 1, &dr);
++    return vk_submit_and_wait();
++}
++
++static void vk_apply_render_scale_locked(void* arg)
++{
++    const float scale = *(const float*)arg;
++    if (!s_vk.device) return;
++    pthread_mutex_lock(&s_vk.present_mu);
++    vk_present_complete_locked();
++    pthread_mutex_unlock(&s_vk.present_mu);
++    vk_batch_flush();
++    vk_device_idle();
++    rsx_draw_engine_drop_targets();
++    vk_eng_drop_framebuffers();
++    vk_destroy_image(&s_e2.scratch_depth);
++    s_e2.scratch_w = s_e2.scratch_h = 0;
++    vk_eng_snapshot_pool_drain();
++    s_rscale = scale;
++    const float sc = vk_target_scale(s_vk.lw, s_vk.lh);
++    if (vk_resize_display(vk_sdim(s_vk.lw, sc), vk_sdim(s_vk.lh, sc)))
++        VK_LOG("render scale %.2f: the display image could not be recreated\n", scale);
++    else
++        VK_LOG("render scale %.2f: display image %ux%u\n", scale, s_vk.width, s_vk.height);
++}
++
++void rsx_vulkan_backend_apply_render_scale(float scale)
++{
++    if (!(scale >= 0.25f && scale <= 4.0f) || !s_vk.device) return;
++    cellGcm_rsx_run_exclusive(vk_apply_render_scale_locked, &scale);
++}
++
+ void rsx_vulkan_backend_set_fullscreen(int on)
+ {
+     __atomic_store_n(&s_want_fs, on ? 1 : 0, __ATOMIC_RELEASE);
+diff --git a/libs/video/rsx_vulkan_backend.h b/libs/video/rsx_vulkan_backend.h
+index f16a6f0..d70963a 100644
+--- a/libs/video/rsx_vulkan_backend.h
++++ b/libs/video/rsx_vulkan_backend.h
+@@ -115,6 +115,11 @@ void rsx_vulkan_backend_set_present_unlocked(int unlocked);
+  * speaking guest pixels, the display image and the window blit follow. 1 = off. */
+ void rsx_vulkan_backend_set_render_scale(float scale);
+ 
++/* Change the render scale while running: waits for the GPU with the command walker excluded, rebuilds the
++ * display image and has the draw engine make its targets again at the new size (one frame of target
++ * contents is lost). Call from the thread that drives the frame clock, never from inside a draw. */
++void rsx_vulkan_backend_apply_render_scale(float scale);
++
+ /* Desktop fullscreen on (1) / off (0), at run time or before _init (the window then opens that way);
+  * leaving it restores the last size given to _set_window_size. Applied by the event-pump thread. */
+ void rsx_vulkan_backend_set_fullscreen(int on);
+-- 
+2.47.3
+
