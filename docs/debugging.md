@@ -475,3 +475,16 @@ also hit that breakpoint, so the caller filter is needed.
 **Count threads by what they do:** `gdb -p <pid> -batch -ex 'thread apply all bt 10'`, then group
 the threads by their top 6 frames. Three hundred threads in `spu_lockline_lock` mean the spinning
 PhysX tasks described in the table above.
+
+
+## FPS counter (T064)
+
+A small box in the window's top left corner: `60 FPS  16.7 MS`, the guest's own frame rate and frame time
+(frames the game flipped per second, twice a second). Switch: Options > Graphics > FPS Counter, **F3** in the
+window, or `SARPBC_FPS_OVERLAY=1`; off by default. `src/overrides/fps_overlay.cpp` formats it from the
+frame clock thread; the Vulkan backend (patch 0078, `rsx_vulkan_backend_set_overlay_text`) copies a bitmap
+(`rsx_overlay.h`, a built-in 5x7 font) into each *presented* image with one `vkCmdCopyBufferToImage` in the
+present's own command buffer: no pipeline, no wait, nothing in the guest's surfaces, so the frame dumps
+(`PS3RECOMP_VK_DUMP`) and `boot_check` captures do not contain it. `PS3RECOMP_VK_OVERLAY_DUMP=1` adds it to
+the dumps, to check it headless. Windowed check without a screen: `xvfb-run -s "-screen 0 1280x720x24"`
+around a run, then `PIL.ImageGrab.grab()` (the GPU is used; fps under Xvfb is lower than on a real desktop).

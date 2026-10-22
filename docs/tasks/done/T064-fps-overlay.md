@@ -1,7 +1,7 @@
 # T064: FPS overlay in the top left corner (T064)
 
-Status: open
-Owner: -
+Status: done
+Owner: claude
 Priority: 2
 Touches: patches/ps3recomp/NNNN-*.patch (libs/video/rsx_vulkan_backend.c: overlay drawn onto the presented image), src/main.cpp (toggle, fps source), src/overrides/frame_stats.cpp, config.toml, docs/debugging.md
 Reads: src/overrides/frame_stats.cpp (guest fps counter, T029), docs/frame-pacing.md
@@ -25,3 +25,7 @@ patch exported, docs/debugging.md updated.
 ## Log
 
 ## Log
+- 2026-10-22 19:07 claude: Done 2026-10-22: overlay (patch 0078, rsx_overlay.h font + test), src/overrides/fps_overlay.cpp, F3 toggle in input_kbm.cpp, the Graphics page's FPS Counter row. Verified: headless dump with PS3RECOMP_VK_OVERLAY_DUMP=1 shows '60 FPS 16.7 MS' top left; windowed under Xvfb + the RTX 2070 SUPER, a PIL screen grab shows '36 FPS 28.0 MS' in the real swapchain image. Docs: debugging.md.
+- 2026-10-22 19:08 claude: claimed
+- 2026-10-22 19:08 claude: Done 2026-10-22: overlay (patch 0078, rsx_overlay.h font + test), src/overrides/fps_overlay.cpp, F3 toggle in input_kbm.cpp, the Graphics page's FPS Counter row. Verified: headless dump with PS3RECOMP_VK_OVERLAY_DUMP=1 shows '60 FPS 16.7 MS'; windowed under Xvfb + the RTX 2070 SUPER, a PIL screen grab shows '36 FPS 28.0 MS' in the real swapchain image. Docs: debugging.md.
+- 2026-10-22 19:08 claude: DONE: FPS overlay top left (guest fps and frame time), off by default, F3 / Graphics page / SARPBC_FPS_OVERLAY; patch 0078 + test; verified headless and in an Xvfb window

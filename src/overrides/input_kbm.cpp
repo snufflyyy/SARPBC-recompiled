@@ -74,6 +74,8 @@ extern "C" void sarpbc_input_config(void);   /* src/overrides/input_config.cpp *
 #include <string>
 #include <vector>
 
+#include "graphics_settings.h"
+
 extern "C" {
 /* ps3recomp/libs/input/cellPad.h (patch T008-1); declared here so this file
  * needs none of the runtime's include paths. */
@@ -294,6 +296,12 @@ void parse(int b, const char* list)
  * rsx_vulkan_backend_pump_messages). Returning 0 drops the event. */
 int SDLCALL event_filter(void*, SDL_Event* e)
 {
+    /* F3 toggles the FPS counter (T064); the Graphics page changes the same setting */
+    if (e->type == SDL_KEYDOWN && !e->key.repeat && e->key.keysym.scancode == SDL_SCANCODE_F3) {
+        auto& on = sarpbc_gfx::settings().fps_overlay;
+        on = on.load() ? 0 : 1;
+        sarpbc_gfx::save();
+    }
     if (e->type == SDL_KEYDOWN && e->key.keysym.scancode == SDL_SCANCODE_ESCAPE && s_esc_bound) return 0;
     if (e->type == SDL_MOUSEWHEEL) {
         /* Smooth-scrolling wheels and touchpads report fractions, which

@@ -1,0 +1,332 @@
+From 626912a2f2657f95c7c2d61c951d7315273b0c4e Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Thu, 22 Oct 2026 19:03:32 +0000
+Subject: [PATCH] vulkan: text overlay (FPS counter): built-in 5x7 font, one
+ buffer-to-image copy in the present's command buffer, optional composite into
+ frame dumps (T064)
+
+---
+ libs/video/rsx_overlay.h                      | 109 ++++++++++++++++++
+ libs/video/rsx_vulkan_backend.c               |  89 +++++++++++++-
+ libs/video/rsx_vulkan_backend.h               |   6 +
+ libs/video/tests/test_rsx_overlay.c           |  31 +++++
+ .../tests/test_vulkan_present_readback.c      |   4 +
+ 5 files changed, 237 insertions(+), 2 deletions(-)
+ create mode 100644 libs/video/rsx_overlay.h
+ create mode 100644 libs/video/tests/test_rsx_overlay.c
+
+diff --git a/libs/video/rsx_overlay.h b/libs/video/rsx_overlay.h
+new file mode 100644
+index 0000000..e40b646
+--- /dev/null
++++ b/libs/video/rsx_overlay.h
+@@ -0,0 +1,109 @@
++/*
++ * A tiny text overlay: an opaque RGBA bitmap of a short ASCII string in a built-in 5x7 font
++ * (digits, A-Z, space . : - / % ; lower case is shown as upper case). No game data, no
++ * dependency: the Vulkan backend copies the bitmap into the presented image (an FPS counter).
++ *
++ *   rsx_overlay_render(text, scale, rgba, cap_px, &w, &h)  -> 0 on success
++ *
++ * Each glyph cell is (5 + 1) * scale wide and 7 * scale high; the bitmap has a 4 * scale margin
++ * and a black background, white text (all four channels equal, so the byte order of the
++ * target format does not matter).
++ */
++#ifndef RSX_OVERLAY_H
++#define RSX_OVERLAY_H
++
++#include <stdint.h>
++#include <string.h>
++
++#define RSX_OVERLAY_MAX_CHARS 48
++
++/* Seven rows of five bits, most significant bit on the left. */
++static const struct { char c; uint8_t rows[7]; } rsx_overlay_glyphs[] = {
++    {' ', {0, 0, 0, 0, 0, 0, 0}},
++    {'.', {0, 0, 0, 0, 0, 0x0C, 0x0C}},
++    {':', {0, 0x0C, 0x0C, 0, 0x0C, 0x0C, 0}},
++    {'-', {0, 0, 0, 0x1F, 0, 0, 0}},
++    {'/', {0x01, 0x02, 0x02, 0x04, 0x08, 0x08, 0x10}},
++    {'%', {0x19, 0x1A, 0x02, 0x04, 0x08, 0x0B, 0x13}},
++    {'0', {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}},
++    {'1', {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E}},
++    {'2', {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}},
++    {'3', {0x1E, 0x01, 0x01, 0x0E, 0x01, 0x01, 0x1E}},
++    {'4', {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02}},
++    {'5', {0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E}},
++    {'6', {0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E}},
++    {'7', {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08}},
++    {'8', {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E}},
++    {'9', {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C}},
++    {'A', {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}},
++    {'B', {0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E}},
++    {'C', {0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E}},
++    {'D', {0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E}},
++    {'E', {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F}},
++    {'F', {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10}},
++    {'G', {0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F}},
++    {'H', {0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}},
++    {'I', {0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E}},
++    {'J', {0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C}},
++    {'K', {0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11}},
++    {'L', {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F}},
++    {'M', {0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11}},
++    {'N', {0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11}},
++    {'O', {0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}},
++    {'P', {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10}},
++    {'Q', {0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D}},
++    {'R', {0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11}},
++    {'S', {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E}},
++    {'T', {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04}},
++    {'U', {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}},
++    {'V', {0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04}},
++    {'W', {0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11}},
++    {'X', {0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11}},
++    {'Y', {0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04}},
++    {'Z', {0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F}},
++};
++
++static inline const uint8_t* rsx_overlay_glyph(char c)
++{
++    if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
++    for (unsigned i = 0; i < sizeof rsx_overlay_glyphs / sizeof rsx_overlay_glyphs[0]; i++)
++        if (rsx_overlay_glyphs[i].c == c) return rsx_overlay_glyphs[i].rows;
++    return rsx_overlay_glyphs[0].rows;   /* unknown: a blank */
++}
++
++/* Size of the bitmap for `chars` characters. */
++static inline void rsx_overlay_size(int chars, int scale, int* w, int* h)
++{
++    *w = chars * 6 * scale + 8 * scale - scale;
++    *h = 7 * scale + 8 * scale;
++}
++
++/* Draw text into rgba (capacity cap_px pixels). Returns 0, or -1 when it does not fit. */
++static inline int rsx_overlay_render(const char* text, int scale, uint8_t* rgba, size_t cap_px, int* out_w, int* out_h)
++{
++    int n = (int)strlen(text);
++    if (n > RSX_OVERLAY_MAX_CHARS) n = RSX_OVERLAY_MAX_CHARS;
++    if (scale < 1) scale = 1;
++    int w, h;
++    rsx_overlay_size(n, scale, &w, &h);
++    if ((size_t)w * (size_t)h > cap_px) return -1;
++    for (size_t i = 0; i < (size_t)w * h; i++) { rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = 0; rgba[i * 4 + 3] = 0xFF; }
++    for (int i = 0; i < n; i++) {
++        const uint8_t* g = rsx_overlay_glyph(text[i]);
++        for (int row = 0; row < 7; row++)
++            for (int col = 0; col < 5; col++) {
++                if (!(g[row] & (0x10 >> col))) continue;
++                for (int dy = 0; dy < scale; dy++)
++                    for (int dx = 0; dx < scale; dx++) {
++                        const int x = 4 * scale + (i * 6 + col) * scale + dx, y = 4 * scale + row * scale + dy;
++                        uint8_t* p = rgba + ((size_t)y * w + x) * 4;
++                        p[0] = p[1] = p[2] = 0xFF;
++                    }
++            }
++    }
++    *out_w = w;
++    *out_h = h;
++    return 0;
++}
++
++#endif
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 427edbc..ca7a672 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -51,6 +51,7 @@
+ #include "rsx_fp_decompiler.h"
+ #include "rsx_shader_spirv.h"
+ #include "rsx_draw_engine.h"
++#include "rsx_overlay.h"
+ #include "vulkan/rsx_vk_fallback_vert.spv.h"
+ #include "vulkan/rsx_vk_fallback_frag.spv.h"
+ 
+@@ -2211,6 +2212,80 @@ static void vk_swapchain_lost(void)
+     if (vk_create_swapchain()) vk_window_drop("the swapchain could not be recreated");
+ }
+ 
++/* ---------------------------------------------------------------------------
++ * Text overlay (an FPS counter)
++ *
++ * rsx_vulkan_backend_set_overlay_text() renders a short string into a small RGBA bitmap on the
++ * caller's thread (rsx_overlay.h); the present copies it into the top left of the swapchain
++ * image with one vkCmdCopyBufferToImage in its own command buffer, after the blit: no pipeline,
++ * no extra wait or sync. It is not part of the offscreen target, so frame dumps and the
++ * guest's surfaces never contain it (PS3RECOMP_VK_OVERLAY_DUMP=1 composites it into dumps, to
++ * check it headless).
++ * ------------------------------------------------------------------------- */
++#define VK_OVERLAY_SCALE 2
++#define VK_OVERLAY_MAX_PX (((RSX_OVERLAY_MAX_CHARS * 6 + 8) * VK_OVERLAY_SCALE) * (15 * VK_OVERLAY_SCALE))
++#define VK_OVERLAY_X 8
++#define VK_OVERLAY_Y 8
++static pthread_mutex_t s_overlay_mu = PTHREAD_MUTEX_INITIALIZER;
++static uint8_t s_overlay_px[VK_OVERLAY_MAX_PX * 4];
++static int s_overlay_w, s_overlay_h;          /* 0: no overlay */
++static vk_buffer s_overlay_buf;
++
++void rsx_vulkan_backend_set_overlay_text(const char* text)
++{
++    pthread_mutex_lock(&s_overlay_mu);
++    if (!text || !*text ||
++        rsx_overlay_render(text, VK_OVERLAY_SCALE, s_overlay_px, VK_OVERLAY_MAX_PX, &s_overlay_w, &s_overlay_h))
++        s_overlay_w = s_overlay_h = 0;
++    pthread_mutex_unlock(&s_overlay_mu);
++}
++
++/* Record the overlay's copy into the swapchain image (in TRANSFER_DST layout). 1 if recorded. */
++static int vk_record_overlay(VkCommandBuffer cb, VkImage image, VkExtent2D extent)
++{
++    int w, h;
++    pthread_mutex_lock(&s_overlay_mu);
++    w = s_overlay_w; h = s_overlay_h;
++    if (!w || (u32)w + VK_OVERLAY_X > extent.width || (u32)h + VK_OVERLAY_Y > extent.height) {
++        pthread_mutex_unlock(&s_overlay_mu);
++        return 0;
++    }
++    if (!s_overlay_buf.buf &&
++        vk_create_host_buffer_ex(&s_overlay_buf, (VkDeviceSize)VK_OVERLAY_MAX_PX * 4,
++                                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT, 0)) {
++        s_overlay_w = s_overlay_h = 0;
++        pthread_mutex_unlock(&s_overlay_mu);
++        return 0;
++    }
++    memcpy(s_overlay_buf.ptr, s_overlay_px, (size_t)w * h * 4);
++    pthread_mutex_unlock(&s_overlay_mu);
++    VkBufferImageCopy region = {
++        .bufferOffset = 0, .bufferRowLength = (u32)w, .bufferImageHeight = (u32)h,
++        .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++        .imageOffset = { VK_OVERLAY_X, VK_OVERLAY_Y, 0 }, .imageExtent = { (u32)w, (u32)h, 1 },
++    };
++    pvkCmdCopyBufferToImage(cb, s_overlay_buf.buf, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
++    return 1;
++}
++
++/* PS3RECOMP_VK_OVERLAY_DUMP=1: a malloc'd copy of the overlay bitmap for vk_dump_ppm to draw into
++ * the dump too (to check the overlay headless); NULL otherwise. */
++static uint8_t* vk_overlay_dump_snapshot(int* w, int* h)
++{
++    static int enabled = -1;
++    if (enabled < 0) { const char* e = getenv("PS3RECOMP_VK_OVERLAY_DUMP"); enabled = e && *e && *e != '0'; }
++    uint8_t* px = NULL;
++    *w = *h = 0;
++    if (!enabled) return NULL;
++    pthread_mutex_lock(&s_overlay_mu);
++    if (s_overlay_w && (px = malloc((size_t)s_overlay_w * s_overlay_h * 4))) {
++        memcpy(px, s_overlay_px, (size_t)s_overlay_w * s_overlay_h * 4);
++        *w = s_overlay_w; *h = s_overlay_h;
++    }
++    pthread_mutex_unlock(&s_overlay_mu);
++    return px;
++}
++
+ /* Blit the offscreen target into the next swapchain image and present it. */
+ static void vk_present_window(void)
+ {
+@@ -2251,6 +2326,7 @@ static void vk_present_window(void)
+     pvkCmdBlitImage(cb, s_vk.color.img, VK_IMAGE_LAYOUT_GENERAL,
+                     s_vk.sc_images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                     1, &blit, VK_FILTER_LINEAR);
++    vk_record_overlay(cb, s_vk.sc_images[idx], s_vk.sc_extent);
+     b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+     b.dstAccessMask = 0;
+     b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+@@ -2288,8 +2364,17 @@ static void vk_dump_ppm(const unsigned char* rgba)
+     FILE* f = fopen(s_vk.dump_path, "wb");
+     if (!f) { VK_LOG("cannot open %s for the frame dump\n", s_vk.dump_path); return; }
+     fprintf(f, "P6\n%u %u\n255\n", s_vk.width, s_vk.height);
+-    for (size_t i = 0; i < (size_t)s_vk.width * s_vk.height; i++)
+-        fwrite(rgba + i * 4, 1, 3, f);
++    int ow = 0, oh = 0;
++    uint8_t* opx = vk_overlay_dump_snapshot(&ow, &oh);   /* NULL unless PS3RECOMP_VK_OVERLAY_DUMP=1 */
++    for (size_t i = 0; i < (size_t)s_vk.width * s_vk.height; i++) {
++        const unsigned char* px = rgba + i * 4;
++        if (opx) {
++            const int x = (int)(i % s_vk.width) - VK_OVERLAY_X, y = (int)(i / s_vk.width) - VK_OVERLAY_Y;
++            if (x >= 0 && y >= 0 && x < ow && y < oh) px = opx + ((size_t)y * ow + x) * 4;
++        }
++        fwrite(px, 1, 3, f);
++    }
++    free(opx);
+     fclose(f);
+ }
+ 
+diff --git a/libs/video/rsx_vulkan_backend.h b/libs/video/rsx_vulkan_backend.h
+index 0e31d25..43f232f 100644
+--- a/libs/video/rsx_vulkan_backend.h
++++ b/libs/video/rsx_vulkan_backend.h
+@@ -99,6 +99,12 @@ void rsx_vulkan_backend_present_finish(void);
+  * present as soon as it can without blocking its drain on the GPU. */
+ int  rsx_vulkan_backend_present_ready(void);
+ 
++/* A short text (digits, letters, . : - / %) drawn in the top left corner of the window by every
++ * present from now on, on a black box; NULL or "" removes it. It is copied into the presented
++ * image only, never into the guest's surfaces or the frame dumps (PS3RECOMP_VK_OVERLAY_DUMP=1
++ * adds it to the dumps). Safe from any thread; at most 48 characters. */
++void rsx_vulkan_backend_set_overlay_text(const char* text);
++
+ /* Centre pixel of the last frame a present copied out, as 0xFFRRGGBB, or 0
+  * before the first. Unlike _readback_center(), which on the draw engine path
+  * reads the surface as it is now, this is what was shown. */
+diff --git a/libs/video/tests/test_rsx_overlay.c b/libs/video/tests/test_rsx_overlay.c
+new file mode 100644
+index 0000000..ec14808
+--- /dev/null
++++ b/libs/video/tests/test_rsx_overlay.c
+@@ -0,0 +1,31 @@
++/* rsx_overlay.h: the built-in font draws known glyphs, sizes the bitmap and refuses what does not fit. */
++#include <stdio.h>
++#include "../rsx_overlay.h"
++
++static int fails;
++#define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
++
++static int lit(const uint8_t* px, int w, int x, int y) { return px[((size_t)y * w + x) * 4] == 0xFF; }
++
++int main(void)
++{
++    static uint8_t px[400 * 40 * 4];
++    int w, h;
++    CHECK(rsx_overlay_render("60 FPS", 2, px, sizeof px / 4, &w, &h) == 0);
++    int ew, eh;
++    rsx_overlay_size(6, 2, &ew, &eh);
++    CHECK(w == ew && h == eh && w == 6 * 12 + 14 && h == 30);
++    /* '6' at scale 2: row 0 is 0x06 = 00110: columns 2 and 3 lit, 0 and 4 dark (the margin is 8 px) */
++    CHECK(!lit(px, w, 8 + 0, 8) && !lit(px, w, 8 + 2, 8) && lit(px, w, 8 + 4, 8) && lit(px, w, 8 + 6, 8) && !lit(px, w, 8 + 8, 8));
++    /* the margin and the gap between cells stay black; every pixel is opaque */
++    CHECK(!lit(px, w, 0, 0) && !lit(px, w, 8 + 5 * 2, 8 + 6 * 2));
++    CHECK(px[3] == 0xFF && px[(size_t)(w * h - 1) * 4 + 3] == 0xFF);
++    /* lower case draws as upper case; an unknown character is blank */
++    static uint8_t a[400 * 40 * 4], b[400 * 40 * 4];
++    int w2, h2;
++    CHECK(rsx_overlay_render("fps", 1, a, sizeof a / 4, &w2, &h2) == 0 && rsx_overlay_render("FPS", 1, b, sizeof b / 4, &w2, &h2) == 0);
++    CHECK(memcmp(a, b, (size_t)w2 * h2 * 4) == 0);
++    CHECK(rsx_overlay_render("FPS", 1, a, 10, &w2, &h2) == -1);   /* does not fit */
++    printf(fails ? "test_rsx_overlay: %d failure(s)\n" : "test_rsx_overlay: ok\n", fails);
++    return fails != 0;
++}
+diff --git a/libs/video/tests/test_vulkan_present_readback.c b/libs/video/tests/test_vulkan_present_readback.c
+index 907d545..e75deea 100644
+--- a/libs/video/tests/test_vulkan_present_readback.c
++++ b/libs/video/tests/test_vulkan_present_readback.c
+@@ -8,6 +8,7 @@
+ #include <assert.h>
+ #include <stdint.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <pthread.h>
+ typedef uint32_t u32;
+@@ -71,6 +72,9 @@ static void fake_copy(VkCommandBuffer cmd, VkImage img, VkImageLayout layout,
+                    image + (((u32)region->imageOffset.y + y) * s_vk.width +
+                             (u32)region->imageOffset.x + x) * 4u, 4);
+ }
++#define VK_OVERLAY_X 8
++#define VK_OVERLAY_Y 8
++static uint8_t* vk_overlay_dump_snapshot(int* w, int* h) { *w = *h = 0; return NULL; }   /* no overlay here */
+ #include "present_under_test.inc"
+ 
+ static void expect_region(int full)
+-- 
+2.47.3
+
