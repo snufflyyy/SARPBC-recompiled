@@ -52,11 +52,13 @@ def summary(d):
     s['version'], s['licensee'] = struct.unpack_from('>HH', d, 4)
     s['header_size'] = struct.unpack_from('>I', d, 8)[0]
     s['folder'], p = fstring(d, 12)
+    s['fields_pos'] = p               # flags, then name n/offset, export n/offset, import n/offset
     (s['flags'], s['name_n'], s['name_off'], s['exp_n'], s['exp_off'],
      s['imp_n'], s['imp_off'], s['depends_off']) = struct.unpack_from('>8I', d, p)
     p += 32 + 16                      # + the package GUID
     gen_n = struct.unpack_from('>I', d, p)[0]
-    p += 4 + 12 * gen_n               # generations: exports, names, net objects
+    s['gen_pos'] = p + 4              # {exports, names, net objects} per generation
+    p += 4 + 12 * gen_n
     s['engine'], s['cooker'] = struct.unpack_from('>II', d, p)
     p += 8
     s['compression'], cn = struct.unpack_from('>II', d, p)
@@ -99,6 +101,7 @@ def tables(u, s):
         n, p = fstring(u, p)
         p += 8                        # name flags (u64)
         names.append(n)
+    s['name_table_end'] = p
 
     def nm(i, num=0):
         return names[i] + ('_%d' % (num - 1) if num else '')
@@ -141,11 +144,15 @@ def path_of(i, imps, exps):
 
 
 def find_export(imps, exps, path, cls=None):
-    """1-based index of the export whose full path is `path` (e.g.
-    'MainMenuSceneContainer.GameOptions.NextScene'); optionally of class `cls`."""
-    hits = [i + 1 for i, e in enumerate(exps) if e['name'] == path.rsplit('.', 1)[-1]
-            and path_of(i + 1, imps, exps) == path
+    """Object index of `path` (e.g. 'MainMenuSceneContainer.GameOptions.NextScene'): the
+    1-based export index, else the negative import index (e.g. 'PsyUI.PsyUIListWidget.bValuesAreMarkup');
+    optionally of class `cls`."""
+    tail = path.rsplit('.', 1)[-1]
+    hits = [i + 1 for i, e in enumerate(exps) if e['name'] == tail and path_of(i + 1, imps, exps) == path
             and (cls is None or objname(e['cls'], imps, exps) == cls)]
+    if not hits:
+        hits = [-(i + 1) for i, m in enumerate(imps) if m[3] == tail and path_of(-(i + 1), imps, exps) == path
+                and (cls is None or m[1] == cls)]
     if len(hits) != 1:
         raise KeyError('%s: %d matches' % (path, len(hits)))
     return hits[0]

@@ -95,17 +95,41 @@ below once chosen.
 `TAGameViewportClient.ReApplySystemSettings` (thunk `0xBCA908`) is what the System page's VSync row calls
 after changing a setting; hooking it is the natural "settings changed" signal.
 
-## Design
+## How it works (built and verified 2026-10-22)
 
-1. `tools/graphics_menu_patch.py` (to write) builds the overlay: reads the user's `TAGAME.XXX`, replaces
-   the function bodies below, writes it, the TOC line and a `COALESCED.INT` with two new strings.
-2. Options list: a fourth `OptionsItems` entry (default-properties body replaced) with `StateName
-   'GameOptions'` (reusing the System state) and text from the new INT keys.
-3. `GameOptions.NextScene` / the page's `InitScene` ask the host (bridge) which page to build; the
-   Graphics page re-fills the System list's rows with our labels and choices.
-4. Handlers dispatch to the bridge; the host owns the values (`SARPBC_*` settings, persisted under
-   `gamedata/`), so T062/T063/T064 only have to read them.
+`tools/graphics_menu_patch.py` builds the overlay (`<vfs>/../overlay`, git-ignored; `--ensure` rebuilds only
+when the inputs or the tool changed; `tools/run.sh` and `tools/boot_check.sh` call it and set
+`PS3_VFS_OVERLAY`; `SARPBC_NO_GRAPHICS_MENU=1` turns it off). It patches, by path, in `TAGAME.XXX`:
+
+| What | Change |
+|---|---|
+| `Default__MainMenuSceneContainer` | a fourth `OptionsItems` entry after System (same state, `GameOptions`) |
+| `MainMenuSceneContainer.GameOptions.NextScene` | selected row 1 = Graphics: title `GraphicsOptions`, tells the host (`open:gfx`) |
+| `MidGameMenuActor_SystemOptions.InitScene` | Graphics: clones the instance's VSync row (`new(...)` with a template, so its delegates are bound to this actor) once per host row; System: keeps six rows |
+| `MidGameMenuActor.InitVSync` / `HandleVSync` | the clones' handlers: labels, choices, current value and changes come from the host; the VSync row falls through to the original code (profile, `ReApplySystemSettings`, save) |
+| `MidGameMenuActor.SystemOptions.BeginState` | frame height and position fit the row count |
+| `OptionsMenuItemValue_ToggleList.SetValue/PressedConfirm`, `InitScene` | markup off on the Graphics page (PsyUI text is markup: plain text shows "Invalid Markup Text") |
+| `MidGameMenuActor_SystemOptions.CloseSubScene`, `MidGameMenuActor.InitScene` | `close` / `open:sys` so the pause menu's System page is never left in Graphics mode; both pages now list six rows (VSync moved to Graphics, user 2026-10-22) |
+
+and in `COALESCED.INT`: `[MainMenuSceneContainer] GraphicsOptions/GraphicsOptionsDesc`, `[BackNextWidget] GraphicsOptions`
+(the page title is `?loc:tagame:BackNextWidget:` + `NewTitleName`, a **string** property: a name constant there
+shows no title). The patch uses no new package objects; new names are appended (`pkgwrite.Package.name`).
+
+The host side is `src/overrides/graphics_menu.cpp` (the bridge and the row list) and `graphics_settings.{h,cpp}`
+(values, persisted in `gamedata/graphics.ini`, `$SARPBC_GFX_FILE`). Rows today: Resolution, Render Scale,
+VSync (the game's own), Frame Rate, FPS Counter; the ones that switch something (T062-T064) read
+`sarpbc_gfx::settings()`.
+
+Script gotchas learned: a call node's name is `parts[0]`, its arguments follow (`parts[1]...`); `if` needs the end
+label on the statement after the block; bytecode token 0x12 is the class-static context, 0x19 the object
+context, 0x10 a dynamic-array element, 0x35 a struct member, 0x36 array length, 0x11 `new`
+(Outer, Name, Flags, Class, Template); casts: IntToString 83, StringToInt 74, StringToFloat 76.
+
+Adding a row: append to `make_rows()` in graphics_menu.cpp (at most `MAX_ROWS` = 6 in the patch tool,
+`MAX_CHOICES` = 12 choices); nothing else changes.
 
 ## Status
 
-See the T065 task log. Tools written: `tools/ue3/` (upk, script, dis, props, funcedit, pkgwrite).
+Menu done and verified by pad-scripted boots (Options lists System/Graphics/Profile/Controls; the page opens,
+popups work, choices persist, VSync works, System has six rows). Tools: `tools/ue3/` (upk, script, dis, props,
+funcedit, asm, tree, pkgwrite, coalesced).

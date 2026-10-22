@@ -78,6 +78,7 @@ void     ps3_load_prx_modules(void);
 
 /* src/overrides/: firmware functions the runtime lacks, done for this title. */
 void     sarpbc_register_edgezlib(void);
+void     sarpbc_register_graphics_menu(void);   /* Options > Graphics bridge (T065) */
 void     sarpbc_frame_stats_tick(uint64_t clock_ms, unsigned guest_frames);
 
 /* libs/system/cellGame.c: title id and game type (CATEGORY HG -> HDD) from the
@@ -558,6 +559,7 @@ int main(int argc, char** argv)
     ps3_load_prx_modules();  /* this game's lifted system PRX, if it has any */
     ppu_hle_init();          /* firmware import NID -> HLE handlers */
     sarpbc_register_edgezlib();   /* _cellSpursLFQueuePushBody for Edge zlib */
+    sarpbc_register_graphics_menu();   /* the script bridge's native, and graphics.ini */
     ppu_sysprx_register();   /* boot-critical CRT */
     ppu_fs_register();       /* cellFs over the game directory */
     lv2_init_syscalls();     /* the lv2 syscall table */

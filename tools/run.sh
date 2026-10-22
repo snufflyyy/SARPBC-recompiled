@@ -38,4 +38,8 @@ if [ "$(uname -s)" = Linux ] && [[ "$PS3RECOMP_VK_WINDOW" != 0* ]]; then
     fi
 fi
 
+# shellcheck source=tools/overlay.sh
+. "$ROOT/tools/overlay.sh"
+sarpbc_overlay "$VFS_DIR"   # the Options > Graphics page (T065)
+
 exec "$BUILD_DIR/sarpbc" "$GAME_DIR/EBOOT.elf" "$VFS_DIR" "$@"

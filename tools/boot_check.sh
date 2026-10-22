@@ -186,6 +186,10 @@ cleanup() {
 trap cleanup EXIT
 trap 'echo "boot_check: interrupted" >&2; exit 130' INT TERM
 
+# shellcheck source=tools/overlay.sh
+. "$ROOT/tools/overlay.sh"
+sarpbc_overlay "$VFS_DIR"   # the Options > Graphics page (T065)
+
 T0=$(date +%s.%N)
 timeout -k 5 -s TERM "$LIMIT" "$BUILD_DIR/sarpbc" "$GAME_DIR/EBOOT.elf" "$VFS_DIR" > "$LOG" 2>&1 &
 TPID=$!

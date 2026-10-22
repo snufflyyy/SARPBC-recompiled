@@ -45,6 +45,33 @@ class Package:
         self.u = bytearray(u)
         self.orig_len = len(u)
         self.names, self.imps, self.exps = upk.tables(bytes(u), self.s)
+        self.new_names = []
+        self.header_edits = []
+
+    def name(self, text):
+        """Name table index of text, appending the name when it is new. Appended names make
+        save() write the whole name table again at the end of the image and repoint the summary
+        at it (the tables behind the old one cannot move)."""
+        if text in self.names:
+            return self.names.index(text)
+        self.names.append(text)
+        self.new_names.append(text)
+        return len(self.names) - 1
+
+    def _write_name_table(self):
+        s = self.s
+        old = bytes(self.u[s['name_off']:s['name_table_end']])
+        table = bytearray(old)
+        for t in self.new_names:
+            raw = t.encode('latin-1') + b'\0'
+            table += struct.pack('>i', len(raw)) + raw + struct.pack('>Q', 0x0007001000000000)
+        off = len(self.u)
+        self.u += table
+        fp = s['fields_pos']
+        self.header_edits = [(fp + 4, struct.pack('>II', len(self.names), off)),   # name n, name offset
+                             (s['gen_pos'] + 4, struct.pack('>I', len(self.names)))]   # generation 0: names
+        for pos, b in self.header_edits:
+            self.u[pos:pos + len(b)] = b
 
     def replace_export(self, idx, body):
         e = self.exps[idx - 1]
@@ -54,6 +81,9 @@ class Package:
         e['size'], e['off'] = len(body), off
 
     def save(self):
+        if self.new_names:
+            self._write_name_table()
+            self.new_names = []
         s, d = self.s, self.disk
         chunks = sorted(s['chunks'])
         out_chunks = []        # (uoff, usz, compressed bytes)
@@ -66,6 +96,8 @@ class Package:
             tail = bytes(self.u[self.orig_len:])
             out_chunks.append((self.orig_len, len(tail), compress_chunk(tail)))
         head = bytearray(d[:s['chunk_table_pos'] - 4])      # up to the chunk count
+        for pos, b in self.header_edits:
+            head[pos:pos + len(b)] = b
         head += struct.pack('>I', len(out_chunks))
         table_len = 16 * len(out_chunks)
         source = d[s['summary_end']:s['summary_end'] + 8]

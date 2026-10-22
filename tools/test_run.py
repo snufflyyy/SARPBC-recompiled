@@ -18,7 +18,7 @@ class RunLauncher(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name) / "checkout with spaces"
         (self.root / "tools").mkdir(parents=True)
-        for name in ("run.sh", "tools/run.sh"):
+        for name in ("run.sh", "tools/run.sh", "tools/overlay.sh"):
             shutil.copy2(ROOT / name, self.root / name)
         subprocess.run(["git", "init", "-q", str(self.root)], check=True, capture_output=True)
         self.bd = self.root / "versions/0109/build"
