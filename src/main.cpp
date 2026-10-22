@@ -125,9 +125,21 @@ unsigned cellGcm_flip_request_count(void);
 #if defined(PS3RECOMP_RSX_VULKAN)
 extern "C" int  rsx_vulkan_backend_init(uint32_t w, uint32_t h, const char* title);
 extern "C" void rsx_vulkan_backend_present(void);
+extern "C" void rsx_vulkan_backend_present_begin(void);
+extern "C" void rsx_vulkan_backend_present_finish(void);
+extern "C" int  rsx_vulkan_backend_present_ready(void);
 extern "C" int  rsx_vulkan_backend_pump_messages(void);
 #  define rsx_backend_init    rsx_vulkan_backend_init
 #  define rsx_backend_present rsx_vulkan_backend_present
+/* The present in two halves: the copy out of the flipped surface is submitted
+ * at the flip, and finished (waited for, read back, shown) after the next
+ * drain, while the GPU ran it beside the CPU's work. Presenting whole waited
+ * for the GPU to finish the frame just submitted, in series with the next
+ * drain (T060: the GPU was idle 80% of the time, the clock thread waited). */
+#  define rsx_backend_present_begin  rsx_vulkan_backend_present_begin
+#  define rsx_backend_present_finish rsx_vulkan_backend_present_finish
+#  define rsx_backend_present_ready  rsx_vulkan_backend_present_ready
+#  define RSX_BACKEND_SPLIT_PRESENT 1
 #  define rsx_backend_pump    rsx_vulkan_backend_pump_messages
 #  define RSX_BACKEND_NAME    "Vulkan"
 #elif defined(_WIN32)
@@ -190,8 +202,44 @@ extern "C" unsigned ppu_boot_frames_presented(void)
     return g_frames_presented.load(std::memory_order_acquire);
 }
 
+#ifdef RSX_BACKEND_SPLIT_PRESENT
+static bool g_present_open;     // a present_begin not yet finished; frame-clock thread only
+
+// SARPBC_SPLIT_PRESENT=0 presents whole again (waits for the frame it submitted).
+static bool getenv_split_present()
+{
+    static const bool on = [] { const char* e = getenv("SARPBC_SPLIT_PRESENT"); return !(e && *e == '0'); }();
+    return on;
+}
+
+static void present_finish_pending(void)
+{
+    if (!g_present_open) return;
+    g_present_open = false;
+    rsx_backend_present_finish();
+}
+
+// Finish it now if the GPU is done with the copy; never wait. The drain right after a flip is
+// short (the guest queues the next frame only once the flip is serviced), so a blocking finish
+// there stalled the clock for the GPU's whole frame time.
+static void present_finish_if_ready(void)
+{
+    if (g_present_open && rsx_backend_present_ready()) present_finish_pending();
+}
+#else
+static void present_finish_pending(void) {}
+static void present_finish_if_ready(void) {}
+#endif
+
 static void present_guest_frame(void)
 {
+#ifdef RSX_BACKEND_SPLIT_PRESENT
+    present_finish_pending();   // the previous frame's, if its drain did not already
+    if (getenv_split_present()) {
+        rsx_backend_present_begin();
+        g_present_open = true;
+    } else
+#endif
     rsx_backend_present();
     /* This thread increments and guest threads read: a real atomic, not a
      * volatile, which gives no ordering on arm64 or in the C++ model. */
@@ -300,7 +348,7 @@ static DWORD WINAPI frame_clock(LPVOID)
             /* Drain the FIFO every tick. This is what writes the RSX sync-fence
              * labels the game's per-frame logic blocks on, so it has to keep
              * advancing at 60 Hz even while present() throttles. */
-            if (rsx_ok) FC_TIMED(st_fifo, cellGcm_rsx_process_fifo());
+            if (rsx_ok) { FC_TIMED(st_fifo, cellGcm_rsx_process_fifo()); FC_TIMED(st_present, present_finish_if_ready()); }
             next_tick_x3 += 50000ull;    /* 1/60 s = 16666.67 us = 50000/3 us */
             fired++;
         }
@@ -318,6 +366,7 @@ static DWORD WINAPI frame_clock(LPVOID)
                 next_flip_us = flip_cap_deadline(next_flip_us, cap_interval_us, now_us());
             }
             FC_TIMED(st_fifo, cellGcm_rsx_process_fifo());
+            FC_TIMED(st_present, present_finish_if_ready());   // once its copy has run beside the drains
 
             if (rsx_backend_pump() != 0) {
                 rsx_ok = 0;              /* window closed */
@@ -336,6 +385,7 @@ static DWORD WINAPI frame_clock(LPVOID)
                 last_flip = fc;
                 next_flip_us = flip_cap_deadline(next_flip_us, cap_interval_us, now_us());
             } else if (fc == 0) {
+                present_finish_pending();
                 rsx_backend_present();
             }
         }

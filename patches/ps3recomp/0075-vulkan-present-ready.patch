@@ -1,0 +1,168 @@
+From 9695e9baa041660c304dea41217f6df0666dc90e Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Thu, 22 Oct 2026 16:13:22 +0000
+Subject: [PATCH] vulkan: rsx_vulkan_backend_present_ready() (non-blocking
+ check that a present's copy finished), PS3RECOMP_VK_GPU_TIMES (GPU wall time
+ and idle gap per batch)
+
+A host that presents in two halves (present_begin at the flip, present_finish later) needs to finish
+without blocking its drain on the GPU: present_ready polls the copy's fence with a zero timeout.
+PS3RECOMP_VK_GPU_TIMES=1 stamps the top and bottom of every engine batch and logs, with
+PS3RECOMP_VK_BATCH_STATS, GPU busy time and the idle gaps between batches: it showed SARPBC's arena
+GPU busy 5 ms per frame and idle 77% of the time, so the stall was on the CPU side.
+---
+ libs/video/rsx_vulkan_backend.c | 64 +++++++++++++++++++++++++++++++++
+ libs/video/rsx_vulkan_backend.h |  5 +++
+ 2 files changed, 69 insertions(+)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index fc577e5..5d1481c 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -504,6 +504,18 @@ static struct {
+     struct { u64 ns; u32 pipe, verts, idx, w, h; } top[8];
+ } s_ts = { .on = -1 };
+ 
++/* PS3RECOMP_VK_GPU_TIMES=1: GPU wall time of every batch (a timestamp at the top
++ * of its command buffer and one at the bottom), and the idle gap before it, read
++ * when its context is retired. Tells apart a GPU that is busy (draws, copies,
++ * barriers) from one starved by the CPU. */
++static struct {
++    int on;                         /* -1 unread */
++    VkQueryPool pool;               /* two queries per context */
++    double ns_per_tick;
++    u64 last_end;                   /* previous batch's end, in ticks */
++    u64 busy_ns, gap_ns, batches;
++} s_gt = { .on = -1 };
++
+ static void vk_ts_collect(void)
+ {
+     if (s_ts.on != 1 || !s_ts.n) { s_ts.n = 0; return; }
+@@ -579,6 +591,7 @@ static struct {
+     VkCommandBuffer cmd;
+     VkFence         fence;
+     int             inflight;       /* submitted, fence not yet waited for */
++    int             gt_stamped;     /* PS3RECOMP_VK_GPU_TIMES: its two timestamps are written */
+     vk_grave        grave;          /* released while this context was live */
+     struct { vk_buffer vb, ib, ubo; VkDescriptorPool pool; u32 sets; } saved;   /* while not live */
+ } s_bc[2];
+@@ -615,6 +628,27 @@ static int vk_defer_destroy(void)
+ static u64 s_vk_wait_ns, s_vk_submits;
+ static u64 vk_now_ns(void);
+ 
++static void vk_gt_end(void)
++{
++    if (s_gt.on != 1) return;
++    pvkCmdWriteTimestamp(s_vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_gt.pool, 2 * s_cur + 1);
++    s_bc[s_cur].gt_stamped = 1;
++}
++
++static void vk_gt_collect(u32 c)
++{
++    if (s_gt.on != 1 || !s_bc[c].gt_stamped) return;
++    s_bc[c].gt_stamped = 0;
++    u64 v[2];
++    if (pvkGetQueryPoolResults(s_vk.device, s_gt.pool, 2 * c, 2, sizeof v, v, sizeof(u64),
++                               VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
++    s_gt.busy_ns += (u64)((double)(v[1] - v[0]) * s_gt.ns_per_tick);
++    if (s_gt.last_end && v[0] > s_gt.last_end)
++        s_gt.gap_ns += (u64)((double)(v[0] - s_gt.last_end) * s_gt.ns_per_tick);
++    s_gt.last_end = v[1];
++    s_gt.batches++;
++}
++
+ /* Wait for context `c`'s last submission and recycle what it used. */
+ static void vk_ctx_retire(u32 c)
+ {
+@@ -623,6 +657,7 @@ static void vk_ctx_retire(u32 c)
+         pvkWaitForFences(s_vk.device, 1, &s_bc[c].fence, VK_TRUE, UINT64_MAX);
+         s_vk_wait_ns += vk_now_ns() - t0;
+         s_bc[c].inflight = 0;
++        vk_gt_collect(c);
+         VkDescriptorPool pool = c == s_cur ? s_batch.pool : s_bc[c].saved.pool;
+         u32* sets = c == s_cur ? &s_batch.sets : &s_bc[c].saved.sets;
+         if (*sets) { pvkResetDescriptorPool(s_vk.device, pool, 0); *sets = 0; }
+@@ -686,7 +721,9 @@ static int vk_batch_flush(void)
+     if (s_batch.open) {
+         s_batch.open = 0;
+         if (s_batch.pass_fb) { pvkCmdEndRenderPass(s_vk.cmd); s_batch.pass_fb = VK_NULL_HANDLE; }
++        vk_gt_end();
+         rc = vk_submit_and_wait();
++        vk_gt_collect(s_cur);
+         vk_ts_collect();
+         s_batch.vb_off = s_batch.ib_off = s_batch.ubo_off = 0;
+         s_batch.vs_at = s_batch.ps_at = VK_BATCH_NONE;
+@@ -707,6 +744,7 @@ static int vk_batch_flush_async(void)
+     if (s_ts.on == 1 || !vk_async_ready()) return vk_batch_flush();
+     s_batch.open = 0;
+     if (s_batch.pass_fb) { pvkCmdEndRenderPass(s_vk.cmd); s_batch.pass_fb = VK_NULL_HANDLE; }
++    vk_gt_end();
+     VK_CHECK(pvkEndCommandBuffer(s_vk.cmd), "vkEndCommandBuffer");
+     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                         .commandBufferCount = 1, .pCommandBuffers = &s_vk.cmd };
+@@ -2689,6 +2727,21 @@ static int vk_batch_open(void)
+         }
+     }
+     if (s_ts.on == 1) { pvkCmdResetQueryPool(s_vk.cmd, s_ts.pool, 0, 2 * VK_BATCH_SETS); s_ts.n = 0; }
++    if (s_gt.on < 0) {
++        const char* e = getenv("PS3RECOMP_VK_GPU_TIMES");
++        s_gt.on = e && *e && *e != '0';
++        if (s_gt.on) {
++            VkPhysicalDeviceProperties pp; pvkGetPhysicalDeviceProperties(s_vk.phys, &pp);
++            s_gt.ns_per_tick = pp.limits.timestampPeriod;
++            VkQueryPoolCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
++                                          .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 4 };
++            if (pvkCreateQueryPool(s_vk.device, &qci, NULL, &s_gt.pool) != VK_SUCCESS) s_gt.on = 0;
++        }
++    }
++    if (s_gt.on == 1) {
++        pvkCmdResetQueryPool(s_vk.cmd, s_gt.pool, 2 * s_cur, 2);
++        pvkCmdWriteTimestamp(s_vk.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, s_gt.pool, 2 * s_cur);
++    }
+     return 0;
+ }
+ 
+@@ -4164,6 +4217,10 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+                    (unsigned long long)s_batch.draws, (unsigned long long)s_batch.flushes,
+                    s_batch.flushes ? (double)s_batch.draws / (double)s_batch.flushes : 0.0,
+                    (unsigned long long)s_vk_submits, (double)s_vk_wait_ns / 1e6);
++        if (on && s_gt.on == 1 && (s_batch.draws % 5000u) == 0)
++            VK_LOG("engine: GPU busy %.0f ms over %llu batches (%.2f ms each), idle between them %.0f ms\n",
++                   (double)s_gt.busy_ns / 1e6, (unsigned long long)s_gt.batches,
++                   s_gt.batches ? (double)s_gt.busy_ns / 1e6 / (double)s_gt.batches : 0.0, (double)s_gt.gap_ns / 1e6);
+     }
+ }
+ 
+@@ -4473,6 +4530,13 @@ void rsx_vulkan_backend_present_begin(void)
+     s_vk.present_split = 0;
+ }
+ 
++int rsx_vulkan_backend_present_ready(void)
++{
++    if (!s_vk.device) return 1;
++    if (!__atomic_load_n(&s_vk.present_inflight, __ATOMIC_ACQUIRE) || !s_vk.present_fence) return 1;
++    return pvkWaitForFences(s_vk.device, 1, &s_vk.present_fence, VK_TRUE, 0) == VK_SUCCESS;
++}
++
+ void rsx_vulkan_backend_present_finish(void)
+ {
+     if (!s_vk.device) return;
+diff --git a/libs/video/rsx_vulkan_backend.h b/libs/video/rsx_vulkan_backend.h
+index 788b986..0e31d25 100644
+--- a/libs/video/rsx_vulkan_backend.h
++++ b/libs/video/rsx_vulkan_backend.h
+@@ -94,6 +94,11 @@ void rsx_vulkan_backend_present(void);
+ void rsx_vulkan_backend_present_begin(void);
+ void rsx_vulkan_backend_present_finish(void);
+ 
++/* Nonzero when _present_finish() would not wait: no present is in flight, or
++ * the GPU has finished the copy of the last one. For a host that finishes a
++ * present as soon as it can without blocking its drain on the GPU. */
++int  rsx_vulkan_backend_present_ready(void);
++
+ /* Centre pixel of the last frame a present copied out, as 0xFFRRGGBB, or 0
+  * before the first. Unlike _readback_center(), which on the draw engine path
+  * reads the surface as it is now, this is what was shown. */
+-- 
+2.47.3
+

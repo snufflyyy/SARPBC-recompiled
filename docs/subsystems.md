@@ -238,8 +238,29 @@ behaviour):
 | + snapshot in the batch | **47-48** | **1.4 s** |
 
 Menus ran 55-60 fps in the same run. Captures (menu and arena, shadow under the car) are unchanged.
-Remaining waits: texture creation and uploads (`vk_begin` + `vk_submit_and_wait`), the present's
-`vk_present_complete_locked` (GPU at most one frame behind, by design).
+Remaining waits: texture creation and uploads (`vk_begin` + `vk_submit_and_wait`).
+
+**The present was the next stall (patch 0075 + `src/main.cpp`).** With the GPU waits gone, gdb samples
+put 15 of 40 frame-clock samples in `vk_present_complete_locked`: `rsx_vulkan_backend_present()` is
+`_present_begin()` + `_present_finish()`, so the clock waited for the batch and copy it had just
+submitted, in series with the next drain. `PS3RECOMP_VK_GPU_TIMES=1` (with `PS3RECOMP_VK_BATCH_STATS=1`)
+showed why that was not the GPU's fault: **GPU busy 5.0 ms per batch (~5.5 ms a frame), idle 99 s of
+130 s**. The frame clock now calls `_present_begin()` at the flip and finishes the present after a later
+drain, only once `rsx_vulkan_backend_present_ready()` (a zero-timeout fence poll) says the copy is done;
+the next flip finishes a still-open present first. A blocking finish right after the flip does not
+help: the drain there is short (the guest queues the next frame only once the flip is serviced), so it
+waited the GPU's whole frame time. `SARPBC_SPLIT_PRESENT=0` presents whole again.
+
+| 130 s arena run (`PS3_VERBOSE=0`) | guest fps (steady) | frame clock per 5 s: fifo / present |
+|---|---|---|
+| after async batches | 47-50 | 3.2 s / 1.56 s (finish waiting) |
+| + split present, polled finish | **55-60** (the 60 Hz clock) | 4.2 s / 0.13 s |
+
+**GPU power state (this machine, not fixed here).** `nvidia-smi` during the arena run: P8, SM 405 MHz
+of 2115, memory 405 MHz of 7001, PCIe Gen 1 x4, 32% utilisation: the driver does not leave its idle
+state for this bursty load, so every GPU job runs at a fifth of the clock. `nvidia-smi -lgc` is denied
+(no permission) and not ours to change; if the user wants the headroom, "prefer maximum performance"
+(PowerMizer / `nvidia-smi -pm 1` with locked clocks) on their side would make the GPU part cheaper still.
 
 ### Arena flip-callback stall (T044, 2026-10-20)
 

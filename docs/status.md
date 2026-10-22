@@ -3,7 +3,18 @@
 Living document. Update "Resume here", the phase table and the log at the end of each
 work session. Newest log entry first. Use absolute dates.
 
-## Resume here (updated 2026-10-21)
+## Resume here (updated 2026-10-22)
+
+**Performance (user, 2026-10-22: "focus on performance"; T060, patches 0074/0075 + `src/main.cpp`):**
+the arena went from 38-40 to **55-60 guest fps** (the 60 Hz clock), menus 55-60. Three things
+overlapped the CPU and the GPU: double-buffered engine batches that submit without waiting, deferred
+destruction of released images/framebuffers, the depth snapshot recorded in the batch, and a split
+present polled with `rsx_vulkan_backend_present_ready()` (details and numbers: subsystems.md "Async
+batches"). The GPU was busy only ~5 ms a frame; on this machine it also sits at P8/405 MHz (not
+ours to change). The 30 fps goal is met with room; what is left on the CPU side is the draw
+engine's vertex fetch/remap and texture hashing (dod3-reuse "Port next" 9). Verified: 330 s with
+pad input through the round end and the results screen, no alerts; `tools/verify.sh` OK.
+
 
 **Current work (user, 2026-10-21):** T058 is merged and verified; pi stopped
 at the user's request. Prepared flips execute at their FIFO
@@ -64,7 +75,7 @@ Player menu. Root `analysis/boot_check/20261021-200728-2049532/`. The preceding
 300 s arena/results/return-menu verification is logged below. Frame-time
 breakdowns and historical measurements: subsystems.md "Menu frame rate".
 
-**Integrated patch stack:** 72 patch files (90 commits) on upstream `749182e`
+**Integrated patch stack:** 75 patch files on upstream `749182e`
 (v0.16.0, T043), including T052 and Claude's later audio/shadow/port work.
 Current full gate: 102 scripts, 98 passed / 4 explicit skips / 0 failures/timeouts;
 the nested SDL/Vulkan suites are included (T048).
@@ -133,6 +144,18 @@ match with input over time, arena audio and frame-rate measurement.
   POSIX boot scaffold gets this UE3 title to the menus on Linux.
 
 ## Log
+
+### 2026-10-22: async Vulkan batches and split present (T060, claude)
+
+- Arena 38-40 to 55-60 fps (menus 55-60). Stack sampling (gdb, `bt 30`) showed the frame-clock thread
+  46% in `vk_submit_and_wait`; `PS3RECOMP_VK_BATCH_STATS` 41 s of GPU waits per 130 s. Patch 0074: two
+  batch contexts (submit without waiting), graveyard for released images/framebuffers, depth snapshot
+  recorded in the batch (waits 41 s to 1.4 s, 39 to 48 fps). Patch 0075 + `src/main.cpp`: split present
+  polled for completion (present time 1.5 s to 0.13 s per 5 s, 48 to 57 fps), and `PS3RECOMP_VK_GPU_TIMES`
+  (GPU busy 5 ms/frame, idle 77%). `SARPBC_SPLIT_PRESENT=0`, `PS3RECOMP_VK_ASYNC=0` restore the old paths.
+- Also committed pi's pending 0073 (`PS3_NET_HOSTMAP`/`PS3_NET_SANDBOX`, T015 groundwork; T015 stays blocked).
+- Environment finding: the GPU stays at P8, SM/memory 405 MHz, PCIe Gen 1 x4 during the run; `nvidia-smi -lgc` is
+  not permitted. Documented in subsystems.md, nothing changed.
 
 ### 2026-10-21: shadow fix, ports, queue emptied (T054/T021/T005/T009/T031/T055/T057/T059, claude)
 

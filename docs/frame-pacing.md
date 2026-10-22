@@ -19,7 +19,7 @@ and wait on GCM labels/flips the clock services. `g_frames_presented` counts pre
 | Screen | Guest frames/s | Frame clock per 5 s |
 |---|---|---|
 | Main menu / Single Player | ~54 | idle about a third of gdb samples (T040 session); not re-measured with the counters |
-| Arena (New Game) | 36-38 (47-48 after T060's async batches, see subsystems.md) | sleep 0.3 s, **fifo 4.3 s**, present 0.1-0.8 s (before T060) |
+| Arena (New Game) | 36-38 (55-60 after T060's async batches and split present, see subsystems.md) | sleep 0.3 s, **fifo 4.3 s**, present 0.1-0.8 s (before T060) |
 
 - In the arena the clock thread is **87% busy draining the FIFO** (decoding draws, uploads,
   Vulkan recording). Pacing is not the limit there: the RSX-to-Vulkan work is. A cap at 30
@@ -53,7 +53,7 @@ finding it would need a pattern search of the lift, not done.
    per-draw CPU costs in `rsx_draw_engine.c` / `rsx_vulkan_backend.c` (patches 0053-0056 took
    the obvious ones). Next suspects: descriptor writes per draw, shader/pipeline lookups,
    the texture upload path. Profile with `PS3RECOMP_VK_DRAW_TIMES=1`.
-2. **Split drain and present onto two threads** if (1) stalls: the drain is not tied to the
+2. ~~Split drain and present~~ (done differently by T060: async batches and a split present on the same thread, subsystems.md "Async batches"). Original note: split drain and present onto two threads if (1) stalls: the drain is not tied to the
    vblank deadline, and `vk_batch_flush` waits on the GPU while the clock cannot tick.
 3. **Frame cap (30/60)** as an option (`config.toml`), implemented in the clock by letting
    `present` skip ticks, not by touching the guest's tick rate: nothing to do until the arena
