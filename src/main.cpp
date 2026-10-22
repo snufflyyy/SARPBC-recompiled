@@ -46,6 +46,7 @@
 #include <string.h>
 #include <atomic>
 #include <string>
+#include "overrides/graphics_settings.h"
 #ifndef _WIN32
 #include <sys/mman.h>
 #endif
@@ -81,6 +82,9 @@ void     sarpbc_register_edgezlib(void);
 void     sarpbc_register_graphics_menu(void);   /* Options > Graphics bridge (T065) */
 void     sarpbc_frame_stats_tick(uint64_t clock_ms, unsigned guest_frames);
 void     sarpbc_fps_overlay_tick(uint64_t clock_ms, unsigned guest_frames);   /* T064 */
+#if defined(PS3RECOMP_RSX_VULKAN)
+extern "C" void rsx_vulkan_backend_set_present_unlocked(int unlocked);       /* T062 */
+#endif
 
 /* libs/system/cellGame.c: title id and game type (CATEGORY HG -> HDD) from the
  * install's PARAM.SFO. Without it cellGame answers "disc game BLES00000", and
@@ -320,6 +324,7 @@ static DWORD WINAPI frame_clock(LPVOID)
     /* The vblank deadline is a fractional 60 Hz on the monotonic clock
      * (16666.67 us, kept in 1/3 us): a fixed 16 ms step ran at 62.5 Hz. */
     unsigned long long next_tick_x3 = now_us() * 3ull;
+    bool tick_unlocked = false;
     unsigned long long st_sleep = 0, st_fifo = 0, st_present = 0, st_t0 = now_us(), st_n = 0;
     unsigned st_presents = 0;
     #define FC_TIMED(acc, stmt) do { if (stats) { unsigned long long _t = now_us(); stmt; acc += now_us() - _t; } else { stmt; } } while (0)
@@ -333,6 +338,19 @@ static DWORD WINAPI frame_clock(LPVOID)
         }
         st_n++;
         const unsigned long long now_x3 = now_us() * 3ull;
+        /* T062: unlocked (Options > Graphics > Frame Rate, SARPBC_UNLOCK_FPS=1) the vblank ticks
+         * at 1 kHz instead of 60 Hz, so a flip completes as soon as its frame is drained and the
+         * guest is no longer held to 16.7 ms. UE3's own limit is lifted in the engine INI by the
+         * overlay (tools/graphics_menu_patch.py), which needs a restart. */
+        const bool unlocked = sarpbc_gfx::settings().unlock_fps.load(std::memory_order_relaxed) != 0;
+        if (unlocked != tick_unlocked) {
+            tick_unlocked = unlocked;
+            next_tick_x3 = now_x3;
+#if defined(PS3RECOMP_RSX_VULKAN)
+            rsx_vulkan_backend_set_present_unlocked(unlocked);   /* MAILBOX/IMMEDIATE instead of FIFO in a window */
+#endif
+        }
+        const unsigned long long tick_step_x3 = unlocked ? 3000ull : 50000ull;   /* 1 ms : 1/60 s, in 1/3 us */
 
         int fired = 0;
         while ((long long)(now_x3 - next_tick_x3) >= 0 && fired < 240) {
@@ -351,7 +369,7 @@ static DWORD WINAPI frame_clock(LPVOID)
              * labels the game's per-frame logic blocks on, so it has to keep
              * advancing at 60 Hz even while present() throttles. */
             if (rsx_ok) { FC_TIMED(st_fifo, cellGcm_rsx_process_fifo()); FC_TIMED(st_present, present_finish_if_ready()); }
-            next_tick_x3 += 50000ull;    /* 1/60 s = 16666.67 us = 50000/3 us */
+            next_tick_x3 += tick_step_x3;    /* 1/60 s = 16666.67 us = 50000/3 us */
             fired++;
         }
         if (fired >= 240) next_tick_x3 = now_x3;   /* fell too far behind -- resync */

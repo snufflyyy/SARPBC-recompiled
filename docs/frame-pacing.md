@@ -75,3 +75,26 @@ review, Wikipedia, RPCS3 forum threads) found no frame-rate figure for the PS3 g
 deadline of whole 1/n s intervals, on the drain thread (completing flips on the vblank tick does
 NOT slow the guest: it is bound by the drain, not by vsync). Arena, cap 30: 27.6 guest fps
 (under the cap: the deadline wait stalls the drain, so work does not overlap); no cap: 34.1.
+
+## Unlocked frame rate (T062, 2026-10-22)
+
+`SARPBC_UNLOCK_FPS=1`, or Options > Graphics > Frame Rate > Unlocked (saved as `unlock_fps = 1` in
+`gamedata/graphics.ini`; the page says "restart to apply"). Two limits were in the way and both are lifted,
+only while the setting is on (default behaviour is byte-identical: no INI in the overlay, a 60 Hz tick):
+
+1. **UE3's own limit.** `[Engine.GameEngine] MaxSmoothedFrameRate=60` in `PS3-TAEngine.ini` (inside
+   `COALESCED.INI`) is what `GetMaxTickRate` returns with `bSmoothFrameRate=TRUE`: the engine sleeps to hold
+   it and clamps its frame time to it. `tools/graphics_menu_patch.py` writes the overlay's copy of
+   `COALESCED.INI` with 1000 (and its `PS3TOC.TXT` line). This needed no address of `GetMaxTickRate`
+   (still unnamed in the EBOOT) and no hook. The engine reads the INI at start-up: a restart applies it.
+2. **The 60 Hz vblank tick** (`frame_clock` in `src/main.cpp`): flips complete on the tick, which capped
+   the arena at the tick rate once T061 made the drain cheaper. Unlocked, the tick runs at 1 kHz
+   (the setting is read live; the clock re-syncs when it changes).
+
+Measured (01.09, RTX 2070 SUPER at P8, `boot_check --scenario arena`, `[frame-stats]`): the arena goes from
+~58 guest fps locked to **~85-90 unlocked** (menus 100-150); the clock thread is the limit again (drain +
+present per frame). Game speed: UE3 advances by real delta time and the INI's smoothing clamp (22-1000 fps)
+no longer slows it, so it is not fast-forwarded. In a window the present mode becomes MAILBOX (else
+IMMEDIATE) instead of FIFO (patch 0079, `rsx_vulkan_backend_set_present_unlocked`; the swapchain is
+recreated when the setting changes, checked under Xvfb) so the display refresh does not cap it either; **not measured against a wall clock** (no in-game
+timer reachable from the arena scenario): check with the match clock when a real match is played.

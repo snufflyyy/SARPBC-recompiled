@@ -140,7 +140,7 @@ std::vector<Row> make_rows()
         rows.push_back(r);
     }
     rows.push_back({"VSync", "VSync", {"Enabled", "Disabled"}, [] { return 0; }, [](int) {}});
-    rows.push_back({"Frame Rate", "Frame Rate", {"Game default", "Unlocked"},
+    rows.push_back({"Frame Rate", "Frame Rate (restart to apply)", {"Game default", "Unlocked"},
                     [] { return settings().unlock_fps.load(); }, [](int i) { settings().unlock_fps = i; }});
     rows.push_back({"FPS Counter", "FPS Counter", {"Off", "On"},
                     [] { return settings().fps_overlay.load(); }, [](int i) { settings().fps_overlay = i; }});

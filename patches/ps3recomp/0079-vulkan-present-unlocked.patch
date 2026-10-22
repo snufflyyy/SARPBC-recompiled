@@ -1,0 +1,97 @@
+From 284cce0ad0682846a80c44226a0994bf3ab3afe2 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Thu, 22 Oct 2026 19:13:36 +0000
+Subject: [PATCH] vulkan: rsx_vulkan_backend_set_present_unlocked:
+ MAILBOX/IMMEDIATE present mode instead of FIFO, swapchain recreated on change
+ (T062)
+
+---
+ libs/video/rsx_vulkan_backend.c | 32 ++++++++++++++++++++++++++++++--
+ libs/video/rsx_vulkan_backend.h |  5 +++++
+ 2 files changed, 35 insertions(+), 2 deletions(-)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index ca7a672..5ddfab3 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -110,7 +110,8 @@
+  * headless run never depends on a driver that can present. */
+ #define VK_WSI_INSTANCE_FNS(X) \
+     X(vkDestroySurfaceKHR) X(vkGetPhysicalDeviceSurfaceSupportKHR) \
+-    X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) X(vkGetPhysicalDeviceSurfaceFormatsKHR)
++    X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) X(vkGetPhysicalDeviceSurfaceFormatsKHR) \
++    X(vkGetPhysicalDeviceSurfacePresentModesKHR)
+ #define VK_WSI_DEVICE_FNS(X) \
+     X(vkCreateSwapchainKHR) X(vkDestroySwapchainKHR) X(vkGetSwapchainImagesKHR) \
+     X(vkAcquireNextImageKHR) X(vkQueuePresentKHR)
+@@ -2127,8 +2128,30 @@ static int vk_choose_surface_format(VkSurfaceFormatKHR* chosen)
+     return -1;
+ }
+ 
++/* Present mode: FIFO (vsync, every driver has it) unless the host asked for an unlocked
++ * frame rate (rsx_vulkan_backend_set_present_unlocked): then MAILBOX, else IMMEDIATE, else FIFO. */
++static int s_present_unlocked;
++static int s_swapchain_unlocked;     /* what the current swapchain was made for */
++
++static VkPresentModeKHR vk_choose_present_mode(void)
++{
++    if (!s_present_unlocked) return VK_PRESENT_MODE_FIFO_KHR;
++    VkPresentModeKHR modes[16];
++    u32 n = 16;
++    if (pvkGetPhysicalDeviceSurfacePresentModesKHR(s_vk.phys, s_vk.surface, &n, modes) < 0) return VK_PRESENT_MODE_FIFO_KHR;
++    for (u32 i = 0; i < n; i++) if (modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) return VK_PRESENT_MODE_MAILBOX_KHR;
++    for (u32 i = 0; i < n; i++) if (modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR) return VK_PRESENT_MODE_IMMEDIATE_KHR;
++    return VK_PRESENT_MODE_FIFO_KHR;
++}
++
++void rsx_vulkan_backend_set_present_unlocked(int unlocked)
++{
++    __atomic_store_n(&s_present_unlocked, unlocked ? 1 : 0, __ATOMIC_RELEASE);
++}
++
+ static int vk_create_swapchain(void)
+ {
++    s_swapchain_unlocked = __atomic_load_n(&s_present_unlocked, __ATOMIC_ACQUIRE);
+     VkSurfaceCapabilitiesKHR caps;
+     VK_CHECK(pvkGetPhysicalDeviceSurfaceCapabilitiesKHR(s_vk.phys, s_vk.surface, &caps),
+              "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
+@@ -2176,7 +2199,7 @@ static int vk_create_swapchain(void)
+         .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+         .preTransform = caps.currentTransform, .compositeAlpha = alpha,
+-        .presentMode = VK_PRESENT_MODE_FIFO_KHR,   /* the one mode every driver has */
++        .presentMode = vk_choose_present_mode(),
+         .clipped = VK_TRUE, .oldSwapchain = old,
+     };
+     VkSwapchainKHR sc = VK_NULL_HANDLE;
+@@ -2290,6 +2313,11 @@ static uint8_t* vk_overlay_dump_snapshot(int* w, int* h)
+ static void vk_present_window(void)
+ {
+     if (!s_vk.windowed || !s_vk.swapchain) return;
++    /* the host switched between a locked and an unlocked frame rate: a new swapchain, new mode */
++    if (s_swapchain_unlocked != __atomic_load_n(&s_present_unlocked, __ATOMIC_ACQUIRE)) {
++        vk_swapchain_lost();
++        if (!s_vk.swapchain) return;
++    }
+ 
+     u32 idx = 0;
+     VkResult r = pvkAcquireNextImageKHR(s_vk.device, s_vk.swapchain, UINT64_MAX,
+diff --git a/libs/video/rsx_vulkan_backend.h b/libs/video/rsx_vulkan_backend.h
+index 43f232f..35d08d6 100644
+--- a/libs/video/rsx_vulkan_backend.h
++++ b/libs/video/rsx_vulkan_backend.h
+@@ -105,6 +105,11 @@ int  rsx_vulkan_backend_present_ready(void);
+  * adds it to the dumps). Safe from any thread; at most 48 characters. */
+ void rsx_vulkan_backend_set_overlay_text(const char* text);
+ 
++/* Window presents: 0 (default) vsync'd (FIFO), 1 unlocked (MAILBOX, else IMMEDIATE, else FIFO), so
++ * the window no longer holds the frame rate to the display's refresh. Applies from the next
++ * present (the swapchain is recreated); no effect headless. Safe from any thread. */
++void rsx_vulkan_backend_set_present_unlocked(int unlocked);
++
+ /* Centre pixel of the last frame a present copied out, as 0xFFRRGGBB, or 0
+  * before the first. Unlike _readback_center(), which on the draw engine path
+  * reads the surface as it is now, this is what was shown. */
+-- 
+2.47.3
+

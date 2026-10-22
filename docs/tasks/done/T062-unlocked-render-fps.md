@@ -1,7 +1,7 @@
 # T062: Unlocked render fps: run past the 60 Hz frame clock (T062)
 
-Status: open
-Owner: -
+Status: done
+Owner: claude
 Priority: 3
 Touches: src/main.cpp (frame_clock), src/overrides/ (new frame_rate.cpp if GetMaxTickRate is replaced), config.toml, docs/frame-pacing.md
 Reads: docs/frame-pacing.md (whole file), docs/dod3-reuse.md Port next 6 (even presents, GetMaxTickRate), docs/subsystems.md "Async batches"
@@ -26,3 +26,6 @@ docs/frame-pacing.md, tests and lint pass. Depends on T061 for headroom (CPU dra
 ## Log
 
 ## Log
+- 2026-10-22 19:13 claude: claimed
+- 2026-10-22 19:13 claude: Unlocked: INI MaxSmoothedFrameRate 60 -> 1000 via the overlay (restart) + 1 kHz vblank tick (live). Arena ~58 -> ~85-90 guest fps, menus 100-150 (boot_check --scenario arena, SARPBC_UNLOCK_FPS=1). GetMaxTickRate address not needed. Game speed vs wall clock not measured.
+- 2026-10-22 19:14 claude: DONE: Unlocked fps: INI MaxSmoothedFrameRate 1000 via overlay (restart) + 1 kHz vblank (live) + MAILBOX/IMMEDIATE window present (patch 0079). Arena ~58 -> ~85-90 guest fps, menus 100-150. Default unchanged. Open: game speed against a wall clock not measured; MAILBOX only checked for swapchain recreation (Xvfb).

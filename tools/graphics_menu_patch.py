@@ -22,6 +22,8 @@ from ue3 import asm, coalesced, dis, funcedit, pkgwrite, props, upk   # noqa: E4
 REL = 'game/NPUB30035/USRDIR/SARB/TAGAME'
 TOC_TAGAME = '\\cookedps3\\tagame.xxx'
 TOC_INT = '\\localization\\coalesced.int'
+TOC_INI = '\\config\\battleball\\ps3\\cooked\\coalesced.ini'
+INI_REL = 'CONFIG/BATTLEBALL/PS3/COOKED/COALESCED.INI'
 
 GRAPHICS_TEXT = 'Graphics'
 GRAPHICS_DESC = 'Change the resolution, frame rate and other video options.'
@@ -42,6 +44,36 @@ def patch_coalesced(path):
             e[1] = coalesced.section_add(e[1], 'BackNextWidget', ['GraphicsOptions="%s"' % GRAPHICS_TITLE])
             return coalesced.dump(entries)
     raise KeyError('TAGame.int')
+
+
+def unlock_fps_wanted():
+    """T062: SARPBC_UNLOCK_FPS=1, else unlock_fps = 1 in graphics.ini (the Graphics page writes it)."""
+    env = os.environ.get('SARPBC_UNLOCK_FPS')
+    if env is not None:
+        return env.strip() not in ('', '0')
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.environ.get('SARPBC_GFX_FILE') or os.path.join(root, 'gamedata', 'graphics.ini')
+    try:
+        for line in open(path):
+            k, _, v = line.partition('=')
+            if k.strip() == 'unlock_fps':
+                return v.strip() == '1'
+    except OSError:
+        pass
+    return False
+
+
+def patch_engine_ini(path):
+    """UE3 sleeps to hold [Engine.GameEngine] MaxSmoothedFrameRate (60) and clamps its frame time
+    to it: lift it so the game can run past 60 (T062)."""
+    entries = coalesced.load(open(path, 'rb').read())
+    for e in entries:
+        if e[0].rstrip('\0').lower().endswith('\\ps3-taengine.ini'):
+            if 'MaxSmoothedFrameRate=60' not in e[1]:
+                raise KeyError('MaxSmoothedFrameRate=60')
+            e[1] = e[1].replace('MaxSmoothedFrameRate=60', 'MaxSmoothedFrameRate=1000')
+            return coalesced.dump(entries)
+    raise KeyError('PS3-TAEngine.ini')
 
 
 def add_options_item(pkg):
@@ -311,7 +343,8 @@ def stamp(vfs):
     import hashlib
     h = hashlib.sha1()
     src = os.path.join(vfs, 'dev_hdd0', REL)
-    for rel in ('COOKEDPS3/TAGAME.XXX', 'LOCALIZATION/COALESCED.INT', 'PS3TOC.TXT'):
+    h.update(b'unlock=%d\n' % unlock_fps_wanted())
+    for rel in ('COOKEDPS3/TAGAME.XXX', 'LOCALIZATION/COALESCED.INT', INI_REL, 'PS3TOC.TXT'):
         st = os.stat(os.path.join(src, rel))
         h.update(('%s %d %d\n' % (rel, st.st_size, int(st.st_mtime))).encode())
     here = os.path.dirname(os.path.abspath(__file__))
@@ -348,8 +381,16 @@ def main(argv):
     toc = open(os.path.join(src, 'PS3TOC.TXT'), 'rb').read().decode('latin-1')
     toc = pkgwrite.toc_set(toc, TOC_TAGAME, len(tagame))
     toc = pkgwrite.toc_set(toc, TOC_INT, len(ini))
-    for rel, data in (('COOKEDPS3/TAGAME.XXX', tagame), ('LOCALIZATION/COALESCED.INT', ini),
-                      ('PS3TOC.TXT', toc.encode('latin-1'))):
+    files = [('COOKEDPS3/TAGAME.XXX', tagame), ('LOCALIZATION/COALESCED.INT', ini)]
+    if unlock_fps_wanted():
+        engine_ini = patch_engine_ini(os.path.join(src, INI_REL))
+        toc = pkgwrite.toc_set(toc, TOC_INI, len(engine_ini))
+        files.append((INI_REL, engine_ini))
+    else:   # an overlay built earlier with the setting on must not keep its file
+        stale = os.path.join(dst, INI_REL)
+        if os.path.exists(stale):
+            os.remove(stale)
+    for rel, data in files + [('PS3TOC.TXT', toc.encode('latin-1'))]:
         path = os.path.join(dst, rel)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         open(path, 'wb').write(data)
