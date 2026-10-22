@@ -1,0 +1,28 @@
+From b4f501fe3bef3ba2795da120716dc8fe31de92cb Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Thu, 22 Oct 2026 18:29:42 +0000
+Subject: [PATCH] ppu_fs: PS3_VFS_OVERLAY also applies to /dev_hdd0 paths (the
+ PS3_HDD0_ROOT branch returned before the overlay)
+
+An HDD (PSN) title keeps every file under /dev_hdd0, so the overlay never reached its packages.
+---
+ runtime/ppu/ppu_fs.cpp | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
+index 19465d4..94269fb 100644
+--- a/runtime/ppu/ppu_fs.cpp
++++ b/runtime/ppu/ppu_fs.cpp
+@@ -140,6 +140,9 @@ static void host_path(char* out, size_t cap, const char* guest)
+     if (hdd0_root && strncmp(guest, "/dev_hdd0/", 10) == 0) {
+         snprintf(out, cap, "%s/%s", hdd0_root, guest + 10);
+         for (char* p = out; *p; p++) if (*p == '\\') *p = '/';
++        /* PS3_VFS_OVERLAY applies here too: an HDD (PSN) title keeps every file
++         * under /dev_hdd0, and this branch used to return before the overlay. */
++        ps3_vfs_ps3game_fallback(out, cap);
+         return;
+     }
+ 
+-- 
+2.47.3
+

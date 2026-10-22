@@ -1,7 +1,7 @@
 # T065: Native-feeling Graphics screen in the game's Options menu (T065)
 
-Status: open
-Owner: -
+Status: claimed
+Owner: claude
 Priority: 5
 Touches: src/overrides/ (new graphics_menu.cpp: hooks keyed by guest address/NID), config.toml, docs/unreal-engine-3.md, new docs/graphics-menu.md
 Reads: docs/unreal-engine-3.md, docs/subsystems.md (video/menus), tasks T062 (unlocked fps), T063 (resolution), T064 (fps overlay)
@@ -32,3 +32,5 @@ docs/graphics-menu.md; no game data tracked; lint passes.
 ## Log
 
 ## Log
+- 2026-10-22 18:10 claude: claimed
+- 2026-10-22 18:36 claude: Options screen = UnrealScript states in TAGAME.XXX (PsyUI), not Scaleform. Route (b): patch script/default-property bodies in the player's package, served by PS3_VFS_OVERLAY (needed patch 0077: ppu_fs HDD0 branch skipped the overlay). tools/ue3 reads/writes v539 packages; tools/graphics_menu_patch.py builds the overlay. Verified 2026-10-22 by pad-scripted boot: Options now lists System/Graphics/Profile/Controls with our INT text (Graphics opens the System page for now). Natives: all exec thunks are in a name table near file off 0x1247000; Helpers.FindLocalizedPropertyValue(Object,string)->string (thunk 0xBBCC58) is never called from script = the bridge. FFrame: Object +8, Code +0xC, GNatives 0x12D17B8, GMalloc 0x123CF30 (Realloc vtable+8, Free +0xC). Design and format notes: docs/graphics-menu.md

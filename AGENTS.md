@@ -136,6 +136,7 @@ Details and every flag: [docs/pipeline.md](docs/pipeline.md).
 | [docs/online.md](docs/online.md) | Offline behaviour: what the title calls, the Play Online failure path, split screen |
 | [docs/upstream.md](docs/upstream.md) | Offering our ps3recomp patches upstream: grouped PR drafts (nothing filed; ask the user first) |
 | [docs/workflow.md](docs/workflow.md) | Before any work: task board, claiming, worktrees, locks, merging, **pausing and resuming** |
+| [docs/graphics-menu.md](docs/graphics-menu.md) | The game's menus (PsyUI, UnrealScript states), UE3 package format v539, patching packages, the Graphics page (T065) |
 | [docs/hle-coverage.md](docs/hle-coverage.md) | Which firmware imports have HLE handlers (stub/impl), named NIDs, ranked gaps (`tools/hle_coverage.py`) |
 
 ## Working conventions

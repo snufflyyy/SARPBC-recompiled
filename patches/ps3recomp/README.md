@@ -179,6 +179,7 @@ numbers:
 | `0074-vulkan-async-batches.patch` | T060: engine batches submit without waiting (two contexts), deferred destroy of released images/framebuffers, depth snapshot recorded in the batch; arena 39 to 48 fps, GPU waits 41 s to 1.4 s per 130 s; PS3RECOMP_VK_ASYNC=0 disables | generic, offer upstream |
 | `0075-vulkan-present-ready.patch` | T060: rsx_vulkan_backend_present_ready() non-blocking poll for split presents; PS3RECOMP_VK_GPU_TIMES per-batch GPU busy/idle diagnostic | generic, offer upstream |
 | `0076-draw-vertex-cache.patch` | T061: decoded-vertex cache keyed by attribute-span bytes (+ rsx_draw_backend.geometry_hint, Vulkan id lookup), hashed texture lookup, 4-lane texture content hash; arena FIFO drain 15 to 7.4 ms/frame; RSX_DRAW_CACHE=0/CHECK/STATS, PS3RECOMP_VK_GEO_CHECK | generic, offer upstream |
+| `0077-ppu-fs-hdd0-overlay.patch` | T065: PS3_VFS_OVERLAY reaches /dev_hdd0 paths in ppu_fs (the HDD0 branch returned before it) | generic, offer upstream |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `tools/export_patch.sh <slug> "<description>" ["<upstream status>"]` (next free number, the README row,
