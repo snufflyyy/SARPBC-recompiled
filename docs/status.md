@@ -15,6 +15,13 @@ ours to change). The 30 fps goal is met with room; what is left on the CPU side 
 engine's vertex fetch/remap and texture hashing (dod3-reuse "Port next" 9). Verified: 330 s with
 pad input through the round end and the results screen, no alerts; `tools/verify.sh` OK.
 
+**T061 (same day, patch 0076): the FIFO drain went from ~15 to 7.4 ms a frame** with a decoded-vertex cache
+(keyed by the bytes of each attribute span; 0 mismatches over 2.3M hits in `RSX_DRAW_CACHE_CHECK`), geometry ids
+so the Vulkan backend skips re-hashing, and a hashed texture lookup (subsystems.md "Draw-engine CPU"). The arena
+is now clock-capped at 60 fps with the clock idle over half the time. **Queue (user, 2026-10-22):** T062
+unlocked render fps, T063 resolution/render scale, T064 FPS overlay (top left), T065 a native-looking
+"Graphics" screen in the game's Options menu (next to System, Profile) exposing them; T015 stays blocked.
+
 
 **Current work (user, 2026-10-21):** T058 is merged and verified; pi stopped
 at the user's request. Prepared flips execute at their FIFO
@@ -75,7 +82,7 @@ Player menu. Root `analysis/boot_check/20261021-200728-2049532/`. The preceding
 300 s arena/results/return-menu verification is logged below. Frame-time
 breakdowns and historical measurements: subsystems.md "Menu frame rate".
 
-**Integrated patch stack:** 75 patch files on upstream `749182e`
+**Integrated patch stack:** 76 patch files on upstream `749182e`
 (v0.16.0, T043), including T052 and Claude's later audio/shadow/port work.
 Current full gate: 102 scripts, 98 passed / 4 explicit skips / 0 failures/timeouts;
 the nested SDL/Vulkan suites are included (T048).
@@ -144,6 +151,13 @@ match with input over time, arena audio and frame-rate measurement.
   POSIX boot scaffold gets this UE3 title to the menus on Linux.
 
 ## Log
+
+### 2026-10-22: draw-engine CPU: vertex cache, geometry ids (T061, claude)
+
+- Drain per frame 15 to 7.4 ms (arena 130 s): decoded-vertex cache in `rsx_draw_engine.c` (0076), `geometry_hint`
+  so the Vulkan backend finds geometry by id, texture lookup index, 4-lane content hash. Verified with
+  `RSX_DRAW_CACHE_CHECK` / `PS3RECOMP_VK_GEO_CHECK` (0 mismatches), a new `test_vertex_cache`, lint --tests 98/0,
+  330 s through the results screen. Added tasks T062-T065 (unlocked fps, resolution, FPS overlay, Options > Graphics).
 
 ### 2026-10-22: async Vulkan batches and split present (T060, claude)
 

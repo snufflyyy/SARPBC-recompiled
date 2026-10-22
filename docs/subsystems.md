@@ -262,6 +262,43 @@ state for this bursty load, so every GPU job runs at a fifth of the clock. `nvid
 (no permission) and not ours to change; if the user wants the headroom, "prefer maximum performance"
 (PowerMizer / `nvidia-smi -pm 1` with locked clocks) on their side would make the GPU part cheaper still.
 
+### Draw-engine CPU: decoded-vertex cache and geometry ids (T061, 2026-10-22, patch 0076)
+
+With the GPU waits gone (T060) the arena was bound by the FIFO drain: ~15 ms of every frame on the clock
+thread. gdb samples of that thread (70 drain samples): `vk_geo_get` 17%, vertex fetch/decode 26%, remap
+build 13%, texture hashing ~7%, the rest `sink_end` itself. Where it went per draw is now measurable:
+`RSX_DRAW_CACHE_STATS=1` prints microseconds per draw (refs / key / decode on a miss / textures / indices /
+backend draw).
+
+- **Decoded-vertex cache** (`rsx_draw_engine.c`, `vc_*`). UE3 draws the same static meshes every frame and the
+  decode is a pure function of the reference list, the attribute formats and the bytes of each attribute's
+  span (the fetch plan's `stable_base`..`stable_last`). The key is a 128-bit hash of exactly those (interleaved
+  attributes share one hashed span), so a hit returns the decoded vertices and the occurrence map without the
+  remap or the fetch, and no write-watch (mprotect) is needed: the bytes themselves are hashed, at memory
+  speed instead of decode speed. Not cached: inline/immediate vertices, frequency-divided attributes, an
+  attribute without one contiguous span, draws of 8 refs or fewer (~35% of draws in the arena; they are
+  cheap). 96 MB arena, 8192 slots, reset when full. Arena run: 1.05M hits, 29K misses, **0 mismatches**
+  with `RSX_DRAW_CACHE_CHECK=1` (decodes anyway on every hit and compares). `RSX_DRAW_CACHE=0` turns it off.
+- **Geometry ids**: a hit gives the backend an id for the immutable entry (new optional
+  `rsx_draw_backend.geometry_hint`; the rebuilt index list gets one too when no restart cut split it), and the
+  Vulkan backend finds its VRAM copy by id (`s_geo_id`) instead of hashing the vertices and indices again
+  (`PS3RECOMP_VK_GEO_CHECK=1` re-hashes and compares: 0 mismatches). Backend draw 9.4 to 3.8 us per draw.
+- **Texture binds**: a hashed index over `g.textures[]` replaces a linear scan of up to 1024 entries per bind
+  (nine field compares each), and the full content hash runs four independent lanes instead of one FNV chain
+  (~2 GB/s). Textures 5.6 to 4.5 us per draw; what is left there is the sparse per-frame check and the
+  sampler/descriptor work.
+
+| 130 s arena run | drain per frame (clock thread) | clock idle | guest fps |
+|---|---|---|---|
+| after T060 | ~15 ms | 6% | 55-60 |
+| + vertex cache | 9.6 ms | 40% | 60 (cap) |
+| + ids, texture index | **7.4 ms** | 53% | 60 (cap) |
+
+Per draw now (all draws, ~280 a frame): refs 5.5 us (the index scan: `dc_push_ref` per index), key 3.4,
+textures 4.5, indices 0.8, backend 3.8. Ideas not done: hash the raw index bytes and take min/max from them to
+skip building the ref list on a hit; a cached rebuilt index buffer; texture write-watch (needs a safe
+`mprotect` story, see Port next 9). The arena is clock-capped at 60 here, so the next fps gain is T062.
+
 ### Arena flip-callback stall (T044, 2026-10-20)
 
 After the slab-service repair lets the challenge package load, a 140 s boot

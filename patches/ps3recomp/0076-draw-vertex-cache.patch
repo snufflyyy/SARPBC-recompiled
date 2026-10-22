@@ -1,0 +1,748 @@
+From 3f011dd1dc51d9a4fd76ff53526fb4b144aa6ce9 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Thu, 22 Oct 2026 17:43:14 +0000
+Subject: [PATCH] draw engine: decoded-vertex cache keyed by the bytes of each
+ attribute span, geometry ids for the backend, hashed texture lookup, 4-lane
+ texture content hash
+
+dc_fetch decoded every draw's vertices (ref list, remap, per-attribute big-endian conversion) and the Vulkan
+backend hashed the result again: ~40% of the FIFO walker's CPU in SARPBC's arena. The decode is a pure function of
+the reference list, the attribute formats and the bytes of each attribute's span, so a 128-bit hash of exactly
+those keys a cache of decoded vertices and occurrence maps (RSX_DRAW_CACHE=0 off, RSX_DRAW_CACHE_CHECK=1
+re-decodes every hit and compares, RSX_DRAW_CACHE_STATS=1 logs hit rates and per-draw microseconds). A hit hands
+the backend an immutable entry plus ids (new optional rsx_draw_backend.geometry_hint); the Vulkan backend finds
+its VRAM copy by id without hashing (PS3RECOMP_VK_GEO_CHECK=1 verifies). Texture binds look up through a hash
+index instead of scanning up to 1024 entries, and the full content hash uses four lanes. Arena drain 15 to 7.4
+ms a frame; 1M+ cache hits with 0 mismatches. Test: test_vertex_cache in test_rsx_draw_engine.c.
+---
+ libs/video/rsx_draw_engine.c            | 382 ++++++++++++++++++++++--
+ libs/video/rsx_draw_engine.h            |   6 +
+ libs/video/rsx_vulkan_backend.c         |  57 +++-
+ libs/video/tests/test_rsx_draw_engine.c |  62 ++++
+ 4 files changed, 480 insertions(+), 27 deletions(-)
+
+diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
+index c002af7..4113720 100644
+--- a/libs/video/rsx_draw_engine.c
++++ b/libs/video/rsx_draw_engine.c
+@@ -157,6 +157,8 @@ static struct {
+     u32 n_zdepths;
+     eng_texture textures[ENG_MAX_TEXTURES];
+     u32 n_textures;
++    u16 tex_idx[4096];          /* open-addressed index into textures[] (entry + 1), see eng_texture_find */
++    u32 tex_idx_inserts;
+     eng_pipeline pipelines[ENG_MAX_PIPELINES];
+     u32 n_pipelines;
+     eng_display_buffer display_buffers[8];
+@@ -204,6 +206,11 @@ static struct {
+     u8* verts;
+     u64 verts_cap;
+     u32 n_verts;
++    /* Where this draw's decoded vertices and occurrence map are: dc.verts and
++     * ref_remap, or an entry of the decoded-vertex cache (NULL until fetched). */
++    const u8* out_verts;
++    const u32* out_occ;
++    u64 out_id;                 /* identity of out_verts (a cache entry), or 0 */
+ 
+     /* Canonical ATTR0..15 float4 snapshots for register-based vertices.
+      * Bounded separately from compact GPU staging; never fetch stale arrays. */
+@@ -971,22 +978,18 @@ static void eng_deswizzle_3d_slice(u8* dst, const u8* src, u32 w, u32 h, u32 d,
+ /* One hash per cached texture per presented frame. Word-at-a-time FNV over
+  * the whole span is deliberately cheap: this is a mutation detector, not a
+  * content id (rsx_live_draw.c:2002-2026). */
++static void vc_hash_range(const u8* p, size_t n, u64* o0, u64* o1);
+ static u64 eng_texture_content_hash(u32 location, u32 offset, u32 span,
+                                     int* readable)
+ {
+     const u8* src = span ? eng_guest_ptr(NULL, location, offset, span) : NULL;
+     if (!src) { *readable = 0; return 0; }
+-    u64 hash = 1469598103934665603ull;
+-    u32 i = 0;
+-    for (; i + 8 <= span; i += 8) {
+-        u64 word;
+-        memcpy(&word, src + i, sizeof(word));
+-        hash ^= word;
+-        hash *= 1099511628211ull;
+-    }
+-    for (; i < span; i++) { hash ^= src[i]; hash *= 1099511628211ull; }
++    /* Four independent lanes (the one-multiply-per-word FNV chain this was
++     * runs at ~2 GB/s; this is memory-bound). Only ever compared with itself. */
++    u64 h0, h1;
++    vc_hash_range(src, span, &h0, &h1);
+     *readable = 1;
+-    return hash;
++    return h0 ^ h1;
+ }
+ 
+ /* The cheap per-frame change check: 64 bytes out of every 2 KB, plus the
+@@ -1173,6 +1176,63 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+  * cache full evicts the least recently used entry rather than returning
+  * nothing: returning white "made the recovered orphanage render as flat
+  * green/black geometry" (rsx_live_draw.c:2326-2334). */
++/* The cached-texture lookup. A bind used to scan all (up to 1024) entries of
++ * g.textures, comparing nine fields each: a few microseconds per bind and
++ * several binds a draw. The index maps a key hash to an entry; an entry that
++ * was replaced just stops matching, so nothing is ever removed, and the table
++ * is rebuilt from the live entries when it has taken too many inserts. */
++#define ENG_TEXIDX 4096u
++static u32 eng_texture_key_hash(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
++                                u32 pitch, u32 remap, int cube, u32 depth)
++{
++    u64 x = ((u64)location << 32) | offset;
++    x = (x ^ ((u64)fmt << 40 ^ (u64)w << 20 ^ h)) * 0x9E3779B97F4A7C15ull;
++    x = (x ^ (x >> 29) ^ ((u64)pitch << 32 | remap)) * 0xBF58476D1CE4E5B9ull;
++    x = (x ^ (x >> 32) ^ ((u64)depth << 1 | (u64)(cube != 0))) * 0x94D049BB133111EBull;
++    return (u32)(x >> 32);
++}
++
++static int eng_texture_matches(const eng_texture* e, u32 location, u32 offset, u32 fmt, u32 w, u32 h,
++                               u32 pitch, u32 remap, int cube, u32 depth)
++{
++    return e->location == location && e->offset == offset && e->format == fmt &&
++           e->width == w && e->height == h && e->pitch == pitch && e->remap == remap &&
++           e->cubemap == (u32)(cube != 0) && e->depth == depth;
++}
++
++static int eng_texture_find(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
++                            u32 pitch, u32 remap, int cube, u32 depth)
++{
++    for (u32 p = eng_texture_key_hash(location, offset, fmt, w, h, pitch, remap, cube, depth) & (ENG_TEXIDX - 1u);
++         g.tex_idx[p]; p = (p + 1u) & (ENG_TEXIDX - 1u)) {
++        const u32 i = (u32)g.tex_idx[p] - 1u;
++        if (i < g.n_textures && eng_texture_matches(&g.textures[i], location, offset, fmt, w, h, pitch, remap, cube, depth))
++            return (int)i;
++    }
++    return -1;
++}
++
++static void eng_texture_index_put(u32 i)
++{
++    const eng_texture* e = &g.textures[i];
++    u32 p = eng_texture_key_hash(e->location, e->offset, e->format, e->width, e->height, e->pitch,
++                                 e->remap, (int)e->cubemap, e->depth) & (ENG_TEXIDX - 1u);
++    while (g.tex_idx[p]) p = (p + 1u) & (ENG_TEXIDX - 1u);
++    g.tex_idx[p] = (u16)(i + 1u);
++    g.tex_idx_inserts++;
++}
++
++static void eng_texture_index_add(u32 i)
++{
++    if (g.tex_idx_inserts >= ENG_TEXIDX / 2u) {
++        memset(g.tex_idx, 0, sizeof g.tex_idx);
++        g.tex_idx_inserts = 0;
++        for (u32 k = 0; k < g.n_textures; k++)
++            if (k != i) eng_texture_index_put(k);
++    }
++    eng_texture_index_put(i);
++}
++
+ static u32 eng_texture_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+                             u32 levels, u32 pitch, int cube, u32 remap, u32 depth)
+ {
+@@ -1182,13 +1242,9 @@ static u32 eng_texture_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+                                : eng_texture_span(fmt, w, h, levels, pitch, cube);
+     if (!span) return 0;
+ 
+-    for (u32 i = 0; i < g.n_textures; i++) {
+-        eng_texture* e = &g.textures[i];
+-        if (e->location != location || e->offset != offset ||
+-            e->format != fmt || e->width != w || e->height != h ||
+-            e->pitch != pitch || e->remap != remap ||
+-            e->cubemap != (u32)(cube != 0) || e->depth != depth)
+-            continue;
++    const int found = eng_texture_find(location, offset, fmt, w, h, pitch, remap, cube, depth);
++    if (found >= 0) {
++        eng_texture* e = &g.textures[found];
+         if (e->handle && e->last_hash_frame != g.frames) {
+             /* Every cached texture used to be hashed in full every frame;
+              * in a big scene that is hundreds of MB a second for the few
+@@ -1246,7 +1302,7 @@ static u32 eng_texture_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+     e.handle = eng_texture_upload(location, offset, fmt, w, h, levels, pitch,
+                                   cube, remap, depth);
+     if (e.handle && evicted) g.be->texture_release(g.be->user, evicted);
+-    if (e.handle || !evicted) g.textures[index] = e;
++    if (e.handle || !evicted) { g.textures[index] = e; eng_texture_index_add(index); }
+     return e.handle;
+ }
+ 
+@@ -1876,6 +1932,9 @@ static void dc_reset(void)
+     dc.n_arr = dc.n_idx = dc.n_packets = 0;
+     dc.n_refs = dc.n_source_refs = dc.n_verts = dc.n_cuts = 0;
+     dc.refs_remapped = 0;
++    dc.out_verts = NULL;
++    dc.out_occ = NULL;
++    dc.out_id = 0;
+     dc.fetch_ok = 1;
+     dc.inl = NULL;
+     dc.inl_bytes = 0;
+@@ -1922,12 +1981,205 @@ static int dc_reserve_indices(u32 count)
+     return 1;
+ }
+ 
++/* ---- decoded-vertex cache ------------------------------------------------
++ * A UE3 frame draws the same static meshes every frame, and decoding them
++ * (the ref list, the remap, every attribute converted from big-endian guest
++ * formats) was ~40% of the FIFO walker's CPU in SARPBC's arena (T061). The
++ * decode is a pure function of the reference list, the attribute formats and
++ * the bytes of each attribute's span (the plan's stable_base .. stable_last),
++ * so a 128-bit hash of exactly those is a safe key: a hit hands back the
++ * decoded vertices and the occurrence map without redoing any of it. No
++ * write-watch is needed because the bytes themselves are hashed (memory
++ * bandwidth, not decode work). Not cached: inline/immediate vertices, frequency-divided
++ * attributes, and any attribute without one contiguous span (those fall back to
++ * per-element guest reads that are not part of the key).
++ * RSX_DRAW_CACHE=0 turns it off; RSX_DRAW_CACHE_CHECK=1 decodes anyway on every
++ * hit and reports a mismatch; RSX_DRAW_CACHE_STATS=1 logs hit rates. */
++#define ENG_VC_BYTES (96u << 20)
++#define ENG_VC_SLOTS 8192u                    /* power of two */
++static struct {
++    int off;                                  /* -1 unread, 1 off */
++    int check, stats;
++    u8* arena;
++    u64 used;
++    u32 live;
++    struct { u64 h0, h1; u64 at, serial; u32 n_verts, n_occ; u8 remapped, used; } slot[ENG_VC_SLOTS];
++    u64 serial;
++    u64 hits, misses, skipped, mismatches, resets;
++    u64 t_refs, t_key, t_fetch, t_tex, t_idx, t_draw, t_all;   /* ns, RSX_DRAW_CACHE_STATS */
++    u64 why_small, why_inline, why_span;           /* uncacheable: <= 8 refs, inline stream, no span */
++} vc = { .off = -1 };
++
++static u64 vc_ns(void)
++{
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (u64)ts.tv_sec * 1000000000ull + (u64)ts.tv_nsec;
++}
++#define VC_T0(v) u64 v = vc.stats ? vc_ns() : 0
++#define VC_T1(v, acc) do { if (vc.stats) vc.acc += vc_ns() - (v); } while (0)
++
++static u64 vc_mix(u64 x)
++{
++    x ^= x >> 33; x *= 0xFF51AFD7ED558CCDull;
++    x ^= x >> 33; x *= 0xC4CEB9FE1A85EC53ull;
++    return x ^ (x >> 33);
++}
++
++/* 128-bit hash of a byte range, four independent lanes so it runs at memory
++ * speed (a single multiply chain was latency-bound). */
++static void vc_hash_range(const u8* p, size_t n, u64* o0, u64* o1)
++{
++    u64 a = 0x9E3779B97F4A7C15ull ^ n, b = 0xC2B2AE3D27D4EB4Full + n;
++    u64 c = 0x165667B19E3779F9ull, d = 0x27D4EB2F165667C5ull;
++    size_t i = 0;
++    for (; i + 32u <= n; i += 32u) {
++        u64 x0, x1, x2, x3;
++        memcpy(&x0, p + i, 8); memcpy(&x1, p + i + 8, 8);
++        memcpy(&x2, p + i + 16, 8); memcpy(&x3, p + i + 24, 8);
++        a = (a ^ x0) * 0x87C37B91114253D5ull; a ^= a >> 31;
++        b = (b ^ x1) * 0x4CF5AD432745937Full; b ^= b >> 29;
++        c = (c ^ x2) * 0x9E3779B185EBCA87ull; c ^= c >> 27;
++        d = (d ^ x3) * 0xC2B2AE3D27D4EB4Full; d ^= d >> 32;
++    }
++    u8 tail[32] = {0};
++    memcpy(tail, p + i, n - i);
++    u64 t[4];
++    memcpy(t, tail, 32);
++    a = (a ^ t[0]) * 0x87C37B91114253D5ull;
++    b = (b ^ t[1]) * 0x4CF5AD432745937Full;
++    c = (c ^ t[2]) * 0x9E3779B185EBCA87ull;
++    d = (d ^ t[3]) * 0xC2B2AE3D27D4EB4Full;
++    *o0 = vc_mix(a ^ (c << 17 | c >> 47)) ^ vc_mix(b + d);
++    *o1 = vc_mix(b ^ (d << 23 | d >> 41)) + vc_mix(a + c * 3u);
++}
++
++static void vc_mixin(u64* k0, u64* k1, u64 v)
++{
++    *k0 = vc_mix(*k0 ^ (v + 0x9E3779B97F4A7C15ull));
++    *k1 = vc_mix(*k1 + v * 0xBF58476D1CE4E5B9ull + (*k0 >> 7));
++}
++
++typedef struct { const u8* lo; const u8* hi; } vc_range;
++
++/* The key of one draw's decode; 0 when it cannot be cached. */
++static int vc_key(const rsx_vertex_fetch_plan* plan, const rsx_vertex_layout_plan* layout,
++                  int allow_remap, const rsx_vertex_ref* refs, u32 n, u64* k0, u64* k1)
++{
++    /* The divider mask only changes attributes with frequency > 1, refused below. */
++    if (plan->inline_data) return 0;
++    vc_range rg[RSX_DSP_NUM_VERTEX_ATTR];
++    u32 nr = 0;
++    *k0 = 0x1234567887654321ull; *k1 = 0x0F1E2D3C4B5A6978ull;
++    vc_mixin(k0, k1, layout->mask);
++    vc_mixin(k0, k1, ((u64)layout->stride << 32) | ((u64)layout->count << 8) | (allow_remap ? 1u : 0u));
++    vc_mixin(k0, k1, n);
++    for (u32 slot = 0; slot < layout->count; slot++) {
++        const u32 attr = layout->attrs[slot];
++        const rsx_vertex_fetch_attr* f = &plan->attr[attr];
++        vc_mixin(k0, k1, ((u64)attr << 48) | ((u64)f->desc.type << 32) | ((u64)f->desc.size << 16) |
++                         (u64)f->desc.frequency);
++        vc_mixin(k0, k1, ((u64)f->stride << 32) | f->elem_size);
++        if (!f->desc.type || !f->desc.size) {          /* disabled: its default value */
++            u32 w[4];
++            memcpy(w, f->default_value, 16);
++            vc_mixin(k0, k1, ((u64)w[0] << 32) | w[1]);
++            vc_mixin(k0, k1, ((u64)w[2] << 32) | w[3]);
++            continue;
++        }
++        if (!f->stable_base || f->desc.frequency > 1 || !f->elem_size) return 0;
++        rg[nr].lo = f->stable_base;
++        rg[nr].hi = f->stable_base + (u64)(f->stable_last - f->stable_first) * f->stride + f->elem_size;
++        nr++;
++    }
++    /* Interleaved attributes share one span: hash each byte once. */
++    for (u32 i = 1; i < nr; i++) {
++        const vc_range r = rg[i];
++        u32 j = i;
++        for (; j > 0 && rg[j - 1].lo > r.lo; j--) rg[j] = rg[j - 1];
++        rg[j] = r;
++    }
++    u32 m = 0;
++    for (u32 i = 0; i < nr; i++) {
++        if (m && rg[i].lo <= rg[m - 1].hi) {
++            if (rg[i].hi > rg[m - 1].hi) rg[m - 1].hi = rg[i].hi;
++        } else {
++            rg[m++] = rg[i];
++        }
++    }
++    for (u32 i = 0; i < m; i++) {
++        u64 h0, h1;
++        vc_hash_range(rg[i].lo, (size_t)(rg[i].hi - rg[i].lo), &h0, &h1);
++        vc_mixin(k0, k1, h0); vc_mixin(k0, k1, h1);
++    }
++    u64 h0, h1;
++    vc_hash_range((const u8*)refs, (size_t)n * sizeof(*refs), &h0, &h1);
++    vc_mixin(k0, k1, h0); vc_mixin(k0, k1, h1);
++    return 1;
++}
++
++static int vc_enabled(void)
++{
++    if (vc.off < 0) {
++        const char* e = getenv("RSX_DRAW_CACHE");
++        vc.off = (e && *e == '0') ? 1 : 0;
++        const char* c = getenv("RSX_DRAW_CACHE_CHECK");
++        vc.check = c && *c && *c != '0';
++        const char* st = getenv("RSX_DRAW_CACHE_STATS");
++        vc.stats = st && *st && *st != '0';
++    }
++    if (vc.off) return 0;
++    if (!vc.arena) {
++        vc.arena = (u8*)malloc(ENG_VC_BYTES);
++        if (!vc.arena) { vc.off = 1; return 0; }
++    }
++    return 1;
++}
++
++static int vc_find(u64 k0, u64 k1)
++{
++    for (u32 i = (u32)k0 & (ENG_VC_SLOTS - 1u); vc.slot[i].used; i = (i + 1u) & (ENG_VC_SLOTS - 1u))
++        if (vc.slot[i].h0 == k0 && vc.slot[i].h1 == k1) return (int)i;
++    return -1;
++}
++
++static u64 vc_align16(u64 v) { return (v + 15u) & ~15ull; }
++
++static const u32* vc_entry_occ(int i, u32 stride)
++{
++    return vc.slot[i].remapped
++        ? (const u32*)(vc.arena + vc.slot[i].at + vc_align16((u64)vc.slot[i].n_verts * stride)) : NULL;
++}
++
++static void vc_insert(u64 k0, u64 k1, const u8* verts, u32 n_verts, u32 stride,
++                      const u32* occ, u32 n_occ)
++{
++    const u64 vbytes = vc_align16((u64)n_verts * stride);
++    const u64 bytes = vbytes + (u64)n_occ * 4u;
++    if (!bytes || bytes > ENG_VC_BYTES / 4u) return;
++    if (vc.used + bytes > ENG_VC_BYTES || vc.live >= ENG_VC_SLOTS / 4u * 3u) {
++        memset(vc.slot, 0, sizeof vc.slot);
++        vc.used = 0; vc.live = 0; vc.resets++;
++    }
++    u32 i = (u32)k0 & (ENG_VC_SLOTS - 1u);
++    while (vc.slot[i].used) i = (i + 1u) & (ENG_VC_SLOTS - 1u);
++    memcpy(vc.arena + vc.used, verts, (size_t)n_verts * stride);
++    if (n_occ) memcpy(vc.arena + vc.used + vbytes, occ, (size_t)n_occ * 4u);
++    vc.slot[i].h0 = k0; vc.slot[i].h1 = k1; vc.slot[i].at = vc.used;
++    vc.slot[i].serial = ++vc.serial;
++    vc.slot[i].n_verts = n_verts; vc.slot[i].n_occ = n_occ;
++    vc.slot[i].remapped = n_occ != 0; vc.slot[i].used = 1;
++    vc.used += bytes; vc.live++;
++}
++
+ /* Turn this group's batches into a reference list, recording a CUT rather
+  * than fetching a phantom vertex wherever the restart sentinel appears, then
+  * collapse repeated references and fetch each unique vertex once.
+  * rsx_live_draw.c's fetch_batches_hoisted (4165-4292). */
+ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+ {
++    vc_enabled();                       /* reads the env once, before the first timer */
++    VC_T0(t_refs0);
+     if (dc.n_immediate) {
+         dc.n_source_refs = dc.n_immediate;
+         if (!dc_reserve_verts((u64)dc.n_immediate * layout->stride)) {
+@@ -1984,6 +2236,54 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+     if (!dc.fetch_ok) return;
+ 
+     dc.n_source_refs = dc.n_refs;
++    VC_T1(t_refs0, t_refs);
++    VC_T0(t_key0);
++    dc.layout = *layout;
++    rsx_vertex_fetch_plan_init(&dc.fetch_plan, &g.rsx, layout, eng_guest_ptr, NULL);
++    rsx_vertex_fetch_plan_set_inline(&dc.fetch_plan, &g.rsx, dc.inl, dc.inl_bytes);
++    /* The spans are those of the source references; remapping only drops
++     * duplicates, so they are the same ones the unique prefix gives. */
++    rsx_vertex_fetch_plan_prepare(&dc.fetch_plan, dc.refs, dc.n_refs);
++
++    u64 vk0 = 0, vk1 = 0;
++    int cacheable = 0;
++    if (dc.n_refs <= 8u || !layout->stride) vc.why_small++;
++    else if (!vc_enabled()) vc.why_small++;
++    else if (dc.fetch_plan.inline_data) vc.why_inline++;
++    else if (!(cacheable = vc_key(&dc.fetch_plan, layout, allow_remap, dc.refs, dc.n_refs, &vk0, &vk1))) vc.why_span++;
++    int hit = cacheable ? vc_find(vk0, vk1) : -1;
++    VC_T1(t_key0, t_key);
++    if (hit >= 0) {
++        vc.hits++;
++        if (!vc.check) {
++            dc.out_verts = vc.arena + vc.slot[hit].at;
++            dc.out_occ = vc_entry_occ(hit, layout->stride);
++            dc.out_id = vc.slot[hit].serial;
++            dc.refs_remapped = vc.slot[hit].remapped;
++            dc.n_refs = dc.n_verts = vc.slot[hit].n_verts;
++            return;
++        }
++    } else if (cacheable) {
++        vc.misses++;
++    } else {
++        vc.skipped++;
++    }
++    if (vc.stats && ((vc.hits + vc.misses + vc.skipped) % 20000u) == 0) {
++        const double n = (double)(vc.hits + vc.misses + vc.skipped);
++        fprintf(stderr, "[rsx engine] per draw us: sink_end %.1f = refs %.1f + key %.1f + decode(miss) %.1f + textures %.1f + indices %.1f + backend draw %.1f\n",
++                (double)vc.t_all / 1e3 / n, (double)vc.t_refs / 1e3 / n, (double)vc.t_key / 1e3 / n,
++                (double)vc.t_fetch / 1e3 / n, (double)vc.t_tex / 1e3 / n, (double)vc.t_idx / 1e3 / n,
++                (double)vc.t_draw / 1e3 / n);
++    }
++    if (vc.stats && ((vc.hits + vc.misses + vc.skipped) % 20000u) == 0)
++        fprintf(stderr, "[rsx engine] draw cache: %llu hits, %llu misses, %llu uncacheable (%llu small, %llu inline, %llu no span), %llu resets, %llu MB used\n",
++                (unsigned long long)vc.hits, (unsigned long long)vc.misses,
++                (unsigned long long)vc.skipped, (unsigned long long)vc.why_small,
++                (unsigned long long)vc.why_inline, (unsigned long long)vc.why_span,
++                (unsigned long long)vc.resets,
++                (unsigned long long)(vc.used >> 20));
++
++    VC_T0(t_fetch0);
+     /* Only a topology this engine rebuilds through an index buffer may share
+      * repeated references. A line strip or a point list is drawn in the order
+      * it arrived, so collapsing duplicates would reorder it. */
+@@ -1995,10 +2295,6 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+         }
+     }
+ 
+-    dc.layout = *layout;
+-    rsx_vertex_fetch_plan_init(&dc.fetch_plan, &g.rsx, layout, eng_guest_ptr, NULL);
+-    rsx_vertex_fetch_plan_set_inline(&dc.fetch_plan, &g.rsx, dc.inl, dc.inl_bytes);
+-    rsx_vertex_fetch_plan_prepare(&dc.fetch_plan, dc.refs, dc.n_refs);
+     if (!dc_reserve_verts((u64)dc.n_refs * layout->stride)) {
+         dc.fetch_ok = 0;
+         return;
+@@ -2008,6 +2304,21 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+         return;
+     }
+     dc.n_verts = dc.n_refs;
++    VC_T1(t_fetch0, t_fetch);
++    const u32* occ = dc.refs_remapped ? dc.ref_remap.occurrence_to_unique : NULL;
++    if (hit >= 0) {                                  /* RSX_DRAW_CACHE_CHECK */
++        if (vc.slot[hit].n_verts != dc.n_verts ||
++            vc.slot[hit].remapped != (dc.refs_remapped ? 1u : 0u) ||
++            memcmp(vc.arena + vc.slot[hit].at, dc.verts, (size_t)dc.n_verts * layout->stride) ||
++            (occ && memcmp(vc_entry_occ(hit, layout->stride), occ, (size_t)dc.n_source_refs * 4u))) {
++            if (vc.mismatches++ < 8)
++                fprintf(stderr, "[rsx engine] draw cache MISMATCH on a hit (%u verts, stride %u)\n",
++                        dc.n_verts, layout->stride);
++        }
++    } else if (cacheable) {
++        vc_insert(vk0, vk1, dc.verts, dc.n_verts, layout->stride, occ,
++                  occ ? dc.n_source_refs : 0u);
++    }
+ }
+ 
+ /* ---- sink ---------------------------------------------------------------- */
+@@ -2635,10 +2946,18 @@ static void pd_present(u32 presented)
+     }
+ }
+ 
++static void sink_end_inner(const rsx_dispatch* r);
+ static void sink_end(void* user, const rsx_dispatch* r)
+ {
+     (void)user; (void)r;
+     if (!g.ready || !dc.n_packets || !dc.fetch_ok) return;
++    VC_T0(t_all0);
++    sink_end_inner(r);
++    VC_T1(t_all0, t_all);
++}
++
++static void sink_end_inner(const rsx_dispatch* r)
++{
+     /* Mixed geometry sources have no defined concatenation here. Reject the
+      * whole group instead of drawing partial/misordered geometry. */
+     if (dc.n_immediate && (dc.n_arr || dc.n_idx || dc.inl_bytes ||
+@@ -2717,19 +3036,23 @@ static void sink_end(void* user, const rsx_dispatch* r)
+     memset(samplers, 0, sizeof samplers);
+     memset(vtextures, 0, sizeof vtextures);
+     memset(vsamplers, 0, sizeof vsamplers);
++    VC_T0(t_tex0);
+     const u32 tex_mask = sink_bind_textures(targets, n_targets, zslot, tex_used,
+                                             textures, samplers);
++    VC_T1(t_tex0, t_tex);
+     if (tex_mask == ENG_INVALID) return;
+     const u32 vtex_mask = sink_bind_vertex_textures(eng_vtex_mask(), vtextures,
+                                                     vsamplers);
+ 
++    VC_T0(t_idx0);
+     if (indexed) {
+         if (!dc_reserve_indices(n_draw)) return;
+         rsx_draw_engine_write_topology_indices(
+             prim, dc.n_source_refs, dc.cuts, dc.n_cuts,
+-            dc.refs_remapped ? dc.ref_remap.occurrence_to_unique : NULL,
++            dc.refs_remapped ? (dc.out_occ ? dc.out_occ : dc.ref_remap.occurrence_to_unique) : NULL,
+             g.indices);
+     }
++    VC_T1(t_idx0, t_idx);
+ 
+     /* The transform constant block, then the viewport epilogue the vertex
+      * program's tail multiplies by: RSX window coordinates mapped into the
+@@ -2830,8 +3153,18 @@ static void sink_end(void* user, const rsx_dispatch* r)
+     }
+ 
+     const u32 uploaded = indexed ? dc.n_verts : n_draw;
+-    g.be->draw(g.be->user, topology, dc.verts, uploaded, layout.stride,
++    VC_T0(t_draw0);
++    if (g.be->geometry_hint) {
++        /* Cached decode: the vertices are that entry's. The rebuilt index
++         * list is a function of the entry, the primitive and the draw's
++         * length when no restart cut split it. */
++        const u64 vid = dc.out_id, iid = (dc.out_id && indexed && !dc.n_cuts)
++            ? ((dc.out_id << 8) ^ ((u64)prim * 0x9E3779B97F4A7C15ull) ^ ((u64)n_draw << 40) ^ 1u) | 1u : 0;
++        g.be->geometry_hint(g.be->user, vid, iid);
++    }
++    g.be->draw(g.be->user, topology, dc.out_verts ? dc.out_verts : dc.verts, uploaded, layout.stride,
+                indexed ? g.indices : NULL, indexed ? n_draw : 0);
++    VC_T1(t_draw0, t_draw);
+     /* Counted only when the draw ran the guest's OWN programs, which is what
+      * the test hook means: a draw through the built-in pair is a draw, not
+      * evidence that the decompile-translate-compile path worked. */
+@@ -3038,6 +3371,7 @@ void rsx_draw_engine_shutdown(void)
+ 
+     rsx_draw_engine_set_guest_memory(NULL, NULL);
+     free(dc.refs); free(dc.cuts); free(dc.verts); free(dc.immediate);
++    free(vc.arena); vc.arena = NULL; vc.used = vc.live = 0; memset(vc.slot, 0, sizeof vc.slot);
+     rsx_vertex_remap_destroy(&dc.ref_remap);
+     memset(&dc, 0, sizeof dc);
+     free(g.tex_staging); free(g.vp_cb); free(g.fp_cb); free(g.indices);
+diff --git a/libs/video/rsx_draw_engine.h b/libs/video/rsx_draw_engine.h
+index 4dec1d6..8d62194 100644
+--- a/libs/video/rsx_draw_engine.h
++++ b/libs/video/rsx_draw_engine.h
+@@ -201,6 +201,12 @@ typedef struct rsx_draw_backend {
+      * (rsx_be_render_state.depth_bounds_test); a backend that leaves this
+      * NULL draws as if the test were off. */
+     void (*set_depth_bounds)(void* user, float min, float max);
++    /* Optional: called just before draw() with identities for its `vertices`
++     * and `indices` arrays (0 = unknown). Equal non-zero ids mean equal bytes
++     * (the engine's decoded-vertex cache hands out the same entry for the
++     * same geometry), so a backend that keeps its own copy by content may skip
++     * hashing. Ids are never reused; they apply to the next draw() only. */
++    void (*geometry_hint)(void* user, u64 vertices_id, u64 indices_id);
+     /* One draw. `indices` is NULL for a non-indexed one. Everything the
+      * hardware has and the host does not -- quads, quad strips, fans,
+      * polygons -- has already been expanded into a triangle list by the time
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 5d1481c..427edbc 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -3972,7 +3972,55 @@ static int vk_geo_usable(VkDeviceSize bytes)
+ 
+ /* The offset in s_geo.buf of a copy of `data`. A full cache flushes the
+  * batch and starts over, which bumps s_geo.gen. */
+-static void vk_geo_get(const void* data, VkDeviceSize bytes, VkDeviceSize align, VkDeviceSize* at)
++/* Identities the engine gave the next draw's arrays (rsx_draw_backend.geometry_hint):
++ * an id seen before, with the same byte count and cache generation, is the
++ * same copy in s_geo.buf, found without hashing the data. */
++static void vk_geo_get_hashed(const void* data, VkDeviceSize bytes, VkDeviceSize align, VkDeviceSize* at);
++#define VK_GEO_IDS 2048u
++static struct { u64 vid, iid; } s_geo_hint;
++static struct { u64 id, bytes; u32 gen; VkDeviceSize at; u64 h0; } s_geo_id[VK_GEO_IDS];
++
++static int vk_geo_check(void)
++{
++    static int check = -1;
++    if (check < 0) { const char* e = getenv("PS3RECOMP_VK_GEO_CHECK"); check = e && *e && *e != '0'; }
++    return check;
++}
++
++static void vk_eng_geometry_hint(void* user, u64 vid, u64 iid)
++{
++    (void)user;
++    s_geo_hint.vid = vid; s_geo_hint.iid = iid;
++}
++
++static void vk_geo_get(const void* data, VkDeviceSize bytes, VkDeviceSize align, VkDeviceSize* at, u64 id)
++{
++    if (id) {
++        const u32 k = (u32)(vk_geo_mix(id) & (VK_GEO_IDS - 1u));
++        if (s_geo_id[k].id == id && s_geo_id[k].bytes == bytes && s_geo_id[k].gen == s_geo.gen) {
++            *at = s_geo_id[k].at;
++            if (vk_geo_check()) {   /* PS3RECOMP_VK_GEO_CHECK=1: hash the data again, compare with the first sight */
++                u64 h0, h1;
++                vk_geo_hash((const u8*)data, (size_t)bytes, &h0, &h1);
++                if (h0 != s_geo_id[k].h0) {
++                    static unsigned bad;
++                    if (bad++ < 8) VK_LOG("geometry hint MISMATCH (id %llu, %llu bytes)\n", (unsigned long long)id, (unsigned long long)bytes);
++                }
++            }
++            return;
++        }
++    }
++    vk_geo_get_hashed(data, bytes, align, at);
++    if (id) {
++        const u32 k = (u32)(vk_geo_mix(id) & (VK_GEO_IDS - 1u));
++        u64 h0 = 0, h1;
++        if (vk_geo_check()) vk_geo_hash((const u8*)data, (size_t)bytes, &h0, &h1);
++        s_geo_id[k].id = id; s_geo_id[k].bytes = bytes; s_geo_id[k].gen = s_geo.gen; s_geo_id[k].at = *at;
++        s_geo_id[k].h0 = h0;
++    }
++}
++
++static void vk_geo_get_hashed(const void* data, VkDeviceSize bytes, VkDeviceSize align, VkDeviceSize* at)
+ {
+     u64 h0, h1;
+     vk_geo_hash((const u8*)data, (size_t)bytes, &h0, &h1);
+@@ -4058,10 +4106,12 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+     const int cached = vk_geo_usable(vbytes + ibytes);
+     if (cached) {
+         u32 gen;
++        const u64 vid = s_geo_hint.vid, iid = s_geo_hint.iid;
++        s_geo_hint.vid = s_geo_hint.iid = 0;
+         do {
+-            vk_geo_get(vertices, vbytes, 16u, &vb_off);
++            vk_geo_get(vertices, vbytes, 16u, &vb_off, vid);
+             gen = s_geo.gen;
+-            if (ibytes) vk_geo_get(indices, ibytes, 4u, &ib_off);
++            if (ibytes) vk_geo_get(indices, ibytes, 4u, &ib_off, iid);
+         } while (s_geo.gen != gen);
+         vbuf = ibuf = s_geo.buf.buf;
+     }
+@@ -4251,6 +4301,7 @@ static const rsx_draw_backend s_vk_engine_backend = {
+     .set_scissor          = vk_eng_set_scissor,
+     .set_stencil_ref      = vk_eng_set_stencil_ref,
+     .set_depth_bounds     = vk_eng_set_depth_bounds,
++    .geometry_hint        = vk_eng_geometry_hint,
+     .draw                 = vk_eng_draw,
+     .clear_color          = vk_eng_clear_color,
+     .clear_depth_stencil  = vk_eng_clear_depth_stencil,
+diff --git a/libs/video/tests/test_rsx_draw_engine.c b/libs/video/tests/test_rsx_draw_engine.c
+index 9958615..e0da347 100644
+--- a/libs/video/tests/test_rsx_draw_engine.c
++++ b/libs/video/tests/test_rsx_draw_engine.c
+@@ -88,6 +88,7 @@ typedef struct {
+     float captured_vertices[16][64];
+     u32 captured_indices[24];
+     float draw_first_vertex[4];   /* ATTR0 of the first vertex handed over */
++    u64 hint_vid, hint_iid;       /* geometry_hint before the last draw */
+     rsx_topology draw_topology;
+     u32 scissor[4];
+     u32 stencil_ref;
+@@ -229,6 +230,12 @@ static void stub_depth_bounds(void* u, float lo, float hi)
+     stub.n_depth_bounds++;
+ }
+ 
++static void stub_hint(void* u, u64 vid, u64 iid)
++{
++    (void)u;
++    stub.hint_vid = vid; stub.hint_iid = iid;
++}
++
+ static void stub_draw(void* u, rsx_topology topology, const void* verts,
+                       u32 count, u32 stride, const u32* indices,
+                       u32 index_count)
+@@ -348,6 +355,7 @@ static const rsx_draw_backend g_stub_backend = {
+     .set_scissor = stub_scissor,
+     .set_stencil_ref = stub_stencil_ref,
+     .set_depth_bounds = stub_depth_bounds,
++    .geometry_hint = stub_hint,
+     .draw = stub_draw,
+     .clear_color = stub_clear_color,
+     .clear_depth_stencil = stub_clear_ds,
+@@ -1050,6 +1058,59 @@ static void test_indexed_draws(void)
+     engine_down();
+ }
+ 
++/* ---- decoded-vertex cache ------------------------------------------------
++ * The same geometry drawn again must reach the backend byte for byte as the
++ * first time (with the same non-zero geometry ids, so it can skip hashing),
++ * and a change to the guest's vertex bytes must never be served stale. */
++static void test_vertex_cache(void)
++{
++    printf("-- decoded-vertex cache\n");
++    engine_up();
++    u8* v = vm_base + VTX_OFFSET;
++    for (u32 i = 0; i < 12u * 4u; i++) {                    /* 12 distinct float4 vertices */
++        const float f = 1.0f + (float)i;
++        u32 w; memcpy(&w, &f, 4);
++        v[i * 4 + 0] = (u8)(w >> 24); v[i * 4 + 1] = (u8)(w >> 16);
++        v[i * 4 + 2] = (u8)(w >> 8);  v[i * 4 + 3] = (u8)w;
++    }
++    #define STRIP12() do { m(M_BEGIN_END, RSX_PRIMITIVE_TRIANGLE_STRIP); \
++                           m(M_DRAW_ARRAYS, 0u | ((12u - 1u) << 24)); m(M_BEGIN_END, 0u); } while (0)
++    STRIP12();
++    const u32 nd = stub.n_draw;
++    float first_v[16][64]; u32 first_i[24];
++    memcpy(first_v, stub.captured_vertices, sizeof first_v);
++    memcpy(first_i, stub.captured_indices, sizeof first_i);
++    const u32 first_nverts = stub.draw_vertices, first_nidx = stub.draw_indices;
++    CHECK(nd > 0 && first_nverts == 12 && first_nidx == 30, "first draw: %u verts, %u indices", first_nverts, first_nidx);
++    CHECK(stub.hint_vid == 0, "a first sighting carries no geometry id");
++
++    STRIP12();
++    CHECK(stub.n_draw == nd + 1 && stub.draw_vertices == first_nverts && stub.draw_indices == first_nidx,
++          "the repeat draws the same counts");
++    CHECK(!memcmp(first_v, stub.captured_vertices, sizeof first_v) &&
++          !memcmp(first_i, stub.captured_indices, sizeof first_i),
++          "the repeat hands the backend the same vertex and index bytes");
++    CHECK(stub.hint_vid != 0 && stub.hint_iid != 0, "the repeat carries geometry ids (%llu, %llu)",
++          (unsigned long long)stub.hint_vid, (unsigned long long)stub.hint_iid);
++    const u64 vid = stub.hint_vid;
++
++    STRIP12();
++    CHECK(stub.hint_vid == vid, "the same entry keeps its id");
++
++    /* One vertex rewritten in guest memory: the next draw must see it. */
++    v[11 * 16 + 3] ^= 0x40;                                  /* changes vertex 11's x */
++    STRIP12();
++    CHECK(memcmp(first_v[11], stub.captured_vertices[11], sizeof first_v[11]) != 0,
++          "a changed guest vertex is not served from the cache");
++    CHECK(stub.hint_vid != vid, "a changed draw gets a different geometry id");
++    float changed[64]; memcpy(changed, stub.captured_vertices[11], sizeof changed);
++    STRIP12();
++    CHECK(!memcmp(changed, stub.captured_vertices[11], sizeof changed) && stub.hint_vid != 0,
++          "and the new bytes are cached in turn");
++    #undef STRIP12
++    engine_down();
++}
++
+ /* ---- 7. the guest scissor ------------------------------------------------ */
+ 
+ static void test_scissor(void)
+@@ -1679,6 +1740,7 @@ int main(void)
+     test_pipeline_key();
+     test_restart_expansion();
+     test_indexed_draws();
++    test_vertex_cache();
+     test_scissor();
+     test_readback();
+     test_custom_guest_mapping();
+-- 
+2.47.3
+
