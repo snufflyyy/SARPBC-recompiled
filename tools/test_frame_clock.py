@@ -84,7 +84,7 @@ static void sarpbc_frame_stats_tick(unsigned long long, unsigned frames) {
     stats_frames = frames;
 }
 static void sarpbc_fps_overlay_tick(unsigned long long, unsigned) {}
-namespace sarpbc_gfx { struct S { std::atomic<int> unlock_fps{0}; std::atomic<int> window_size{0}; }; struct Sz { int w, h; }; [[maybe_unused]] static const Sz kWindowSizes[] = {{1280, 720}}; static S& settings() { static S s; return s; } }
+namespace sarpbc_gfx { struct S { std::atomic<int> unlock_fps{0}; std::atomic<int> window_size{0}; std::atomic<int> fullscreen{0}; }; struct Sz { int w, h; }; [[maybe_unused]] static const Sz kWindowSizes[] = {{1280, 720}}; static S& settings() { static S s; return s; } }
 ''' + source[start:end] + r'''
 int main(int argc, char** argv) {
     assert(argc == 2);

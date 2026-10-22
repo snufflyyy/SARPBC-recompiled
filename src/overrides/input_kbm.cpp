@@ -296,6 +296,12 @@ void parse(int b, const char* list)
  * rsx_vulkan_backend_pump_messages). Returning 0 drops the event. */
 int SDLCALL event_filter(void*, SDL_Event* e)
 {
+    /* F11 toggles fullscreen (the Graphics page changes the same setting) */
+    if (e->type == SDL_KEYDOWN && !e->key.repeat && e->key.keysym.scancode == SDL_SCANCODE_F11) {
+        auto& fs = sarpbc_gfx::settings().fullscreen;
+        fs = fs.load() ? 0 : 1;
+        sarpbc_gfx::save();
+    }
     /* F3 toggles the FPS counter (T064); the Graphics page changes the same setting */
     if (e->type == SDL_KEYDOWN && !e->key.repeat && e->key.keysym.scancode == SDL_SCANCODE_F3) {
         auto& on = sarpbc_gfx::settings().fps_overlay;

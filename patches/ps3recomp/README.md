@@ -184,6 +184,7 @@ numbers:
 | `0079-vulkan-present-unlocked.patch` | T062: window present mode MAILBOX/IMMEDIATE when the host asks for an unlocked frame rate | generic, offer upstream |
 | `0080-vulkan-window-size.patch` | T063: set the window size at run time (applied on the event-pump thread, recentred) | generic, offer upstream |
 | `0081-vulkan-render-scale.patch` | T063: internal render scale: scaled colour/depth targets, the engine keeps speaking guest pixels | generic, offer upstream |
+| `0082-vulkan-fullscreen.patch` | Fullscreen toggle at run time (applied on the event-pump thread, logged) | generic, offer upstream |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `tools/export_patch.sh <slug> "<description>" ["<upstream status>"]` (next free number, the README row,

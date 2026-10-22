@@ -5,7 +5,7 @@
  * ($SARPBC_GFX_FILE, else gamedata/graphics.ini), read once at start.
  *
  * Environment variables set before the run win for the session (SARPBC_UNLOCK_FPS,
- * SARPBC_FPS_OVERLAY, SARPBC_WINDOW_SIZE=WxH, SARPBC_RENDER_SCALE=<percent>): they are the same switches
+ * SARPBC_FPS_OVERLAY, SARPBC_FULLSCREEN, SARPBC_WINDOW_SIZE=WxH, SARPBC_RENDER_SCALE=<percent>): they are the same switches
  * the tasks document; the page shows and changes the effective value.
  */
 #pragma once
@@ -17,6 +17,7 @@ struct Settings {
     std::atomic<int> unlock_fps{0};    // 0 the game's own 60 Hz clock, 1 uncapped (T062)
     std::atomic<int> fps_overlay{0};   // 0 off, 1 on (T064)
     std::atomic<int> window_size{0};   // index into kWindowSizes (T063)
+    std::atomic<int> fullscreen{0};    // 0 windowed, 1 desktop fullscreen; live (F11, the page)
     std::atomic<int> render_scale{2};  // index into kRenderScalePercent: 2 = 100% (T063; at start)
 };
 

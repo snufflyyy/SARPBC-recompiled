@@ -117,8 +117,8 @@ shows no title). The patch uses no new package objects; new names are appended (
 
 The host side is `src/overrides/graphics_menu.cpp` (the bridge and the row list) and `graphics_settings.{h,cpp}`
 (values, persisted in `gamedata/graphics.ini`, `$SARPBC_GFX_FILE`). Rows today: Resolution (the window's
-size; the frame is scaled to it, patch 0080), VSync (the game's own), Frame Rate (T062, restart to apply),
-FPS Counter (T064); the ones that switch something (T062-T064) read
+size; the frame is scaled to it, patch 0080), Render Scale (T063, restart), Fullscreen (live), VSync (the game's
+own), Frame Rate (T062, restart to apply), FPS Counter (T064); the ones that switch something (T062-T064) read
 `sarpbc_gfx::settings()`.
 
 Script gotchas learned: a call node's name is `parts[0]`, its arguments follow (`parts[1]...`); `if` needs the end
@@ -126,7 +126,7 @@ label on the statement after the block; bytecode token 0x12 is the class-static 
 context, 0x10 a dynamic-array element, 0x35 a struct member, 0x36 array length, 0x11 `new`
 (Outer, Name, Flags, Class, Template); casts: IntToString 83, StringToInt 74, StringToFloat 76.
 
-Adding a row: append to `make_rows()` in graphics_menu.cpp (at most `MAX_ROWS` = 6 in the patch tool,
+Adding a row: append to `make_rows()` in graphics_menu.cpp (at most `MAX_ROWS` = 8 in the patch tool; rows 6+ clone row 0,
 `MAX_CHOICES` = 12 choices); nothing else changes.
 
 ## Status
@@ -159,3 +159,8 @@ scale is done in the Vulkan backend (patch 0081, `rsx_vulkan_backend_set_render_
 - Not done: changing it at run time (surfaces are cached by the engine), and the screen-space constants the game
   feeds some post passes stay in 1280x720 units (nothing visibly wrong was found; look here first if a post
   effect shows a seam at a scale).
+
+Fullscreen (row 3, live, `SARPBC_FULLSCREEN=1`, **F11**): desktop fullscreen through SDL (patch 0082); leaving it
+restores the Resolution size. The setting, the row and the call were checked; the window itself could not be (the
+only X server here, Xvfb, has no window manager, so SDL cannot honour the request): a failure is logged
+(`[RSX vulkan] fullscreen on failed: ...`).

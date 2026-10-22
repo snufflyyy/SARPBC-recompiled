@@ -1,0 +1,100 @@
+From 99353e1c355954b5be60cbc344f08de23623b5f6 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Thu, 22 Oct 2026 20:43:53 +0000
+Subject: [PATCH] vulkan: rsx_vulkan_backend_set_fullscreen (desktop fullscreen
+ at run time; leaving restores the window size)
+
+---
+ libs/video/rsx_vulkan_backend.c | 32 +++++++++++++++++++++++++++++---
+ libs/video/rsx_vulkan_backend.h |  4 ++++
+ 2 files changed, 33 insertions(+), 3 deletions(-)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 62f6788..948a7da 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -2058,6 +2058,9 @@ static void vk_window_drop(const char* why)
+ }
+ 
+ static int s_want_win_w, s_want_win_h;   /* the host's window size request (see rsx_vulkan_backend_set_window_size) */
++static int s_last_win_w, s_last_win_h;   /* the last size asked for: what leaving fullscreen goes back to */
++static int s_want_fs = -1;               /* the host's fullscreen request: -1 none, 0 windowed, 1 desktop fullscreen */
++static int s_is_fs;
+ static void vk_window_open(const char* title)
+ {
+     if (!vk_env_on("PS3RECOMP_VK_WINDOW")) return;
+@@ -2069,9 +2072,12 @@ static void vk_window_open(const char* title)
+      * guest's canvas; the display image behind it may be larger (render scale). */
+     int win_w = __atomic_load_n(&s_want_win_w, __ATOMIC_ACQUIRE), win_h = __atomic_load_n(&s_want_win_h, __ATOMIC_RELAXED);
+     if (!win_w) { win_w = (int)s_vk.lw; win_h = (int)s_vk.lh; }
+-    else __atomic_store_n(&s_want_win_w, 0, __ATOMIC_RELAXED);
++    else { __atomic_store_n(&s_want_win_w, 0, __ATOMIC_RELAXED); s_last_win_w = win_w; s_last_win_h = win_h; }
+     Uint32 flags = SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN;
+-    if (vk_env_on("PS3RECOMP_VK_FULLSCREEN")) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
++    int want_fs = __atomic_load_n(&s_want_fs, __ATOMIC_ACQUIRE);
++    if (want_fs < 0) want_fs = vk_env_on("PS3RECOMP_VK_FULLSCREEN");
++    else __atomic_store_n(&s_want_fs, -1, __ATOMIC_RELAXED);
++    if (want_fs) { flags |= SDL_WINDOW_FULLSCREEN_DESKTOP; s_is_fs = 1; }
+     s_vk.window = SDL_CreateWindow(title && title[0] ? title : "ps3recomp",
+                                    SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                                    win_w, win_h, flags);
+@@ -4789,6 +4795,11 @@ void rsx_vulkan_backend_shutdown(void)
+ 
+ /* The window's size is the host's to change (any thread asks, the thread that pumps events does it:
+  * SDL wants window calls there). The swapchain follows on the next present (out-of-date / suboptimal). */
++void rsx_vulkan_backend_set_fullscreen(int on)
++{
++    __atomic_store_n(&s_want_fs, on ? 1 : 0, __ATOMIC_RELEASE);
++}
++
+ void rsx_vulkan_backend_set_window_size(int w, int h)
+ {
+     if (w < 16 || h < 16 || w > 16384 || h > 16384) return;
+@@ -4801,13 +4812,28 @@ int rsx_vulkan_backend_pump_messages(void)
+     if (!s_vk.windowed) return 0;
+     const int ww = __atomic_exchange_n(&s_want_win_w, 0, __ATOMIC_ACQUIRE), wh = __atomic_load_n(&s_want_win_h, __ATOMIC_RELAXED);
+     if (ww && s_vk.window) {
++        s_last_win_w = ww; s_last_win_h = wh;
+         int cw = 0, ch = 0;
+         SDL_GetWindowSize(s_vk.window, &cw, &ch);
+-        if (cw != ww || ch != wh) {
++        if (!s_is_fs && (cw != ww || ch != wh)) {
+             SDL_SetWindowSize(s_vk.window, ww, wh);
+             SDL_SetWindowPosition(s_vk.window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+         }
+     }
++    const int fs = __atomic_exchange_n(&s_want_fs, -1, __ATOMIC_ACQUIRE);
++    if (fs >= 0 && s_vk.window && fs != s_is_fs) {
++        /* desktop fullscreen keeps the desktop's mode (no mode switch); leaving it returns to the
++         * last size the host asked for. The swapchain follows (out-of-date / suboptimal). */
++        if (SDL_SetWindowFullscreen(s_vk.window, fs ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) != 0)
++            VK_LOG("fullscreen %s failed: %s\n", fs ? "on" : "off", SDL_GetError());
++        else
++            VK_LOG("fullscreen %s\n", fs ? "on" : "off");
++        s_is_fs = fs;
++        if (!fs && s_last_win_w) {
++            SDL_SetWindowSize(s_vk.window, s_last_win_w, s_last_win_h);
++            SDL_SetWindowPosition(s_vk.window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
++        }
++    }
+     int quit = 0;
+     SDL_Event e;
+     while (SDL_PollEvent(&e)) {
+diff --git a/libs/video/rsx_vulkan_backend.h b/libs/video/rsx_vulkan_backend.h
+index 623be42..efca64e 100644
+--- a/libs/video/rsx_vulkan_backend.h
++++ b/libs/video/rsx_vulkan_backend.h
+@@ -115,6 +115,10 @@ void rsx_vulkan_backend_set_present_unlocked(int unlocked);
+  * speaking guest pixels, the display image and the window blit follow. 1 = off. */
+ void rsx_vulkan_backend_set_render_scale(float scale);
+ 
++/* Desktop fullscreen on (1) / off (0), at run time or before _init (the window then opens that way);
++ * leaving it restores the last size given to _set_window_size. Applied by the event-pump thread. */
++void rsx_vulkan_backend_set_fullscreen(int on);
++
+ /* Resize the window (windowed runs; the frame is scaled to it by the present's blit). Takes effect
+  * the next time the event pump runs; any thread may ask. */
+ void rsx_vulkan_backend_set_window_size(int w, int h);
+-- 
+2.47.3
+

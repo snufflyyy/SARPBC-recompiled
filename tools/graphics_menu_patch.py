@@ -28,7 +28,7 @@ INI_REL = 'CONFIG/BATTLEBALL/PS3/COOKED/COALESCED.INI'
 GRAPHICS_TEXT = 'Graphics'
 GRAPHICS_DESC = 'Change the resolution, frame rate and other video options.'
 GRAPHICS_TITLE = 'Graphics Options'
-MAX_ROWS = 6        # rows the page can show: it clones the VSync row (template) for each
+MAX_ROWS = 8        # rows the page can show: rows 0-5 clone the instance's VSync row, later ones clone row 0
 MAX_CHOICES = 12    # choices a row can offer
 SYSTEM_ROWS = 6     # rows the System page keeps (VSync moved to the Graphics page)
 
@@ -192,10 +192,12 @@ class Patcher:
         template = a.smember(ITEM_OBJ, STRUCT, a.elem(asm.clone(items), a.i(6)))
         rows = Seq()
         for k in range(MAX_ROWS):
+            # rows 6 and up: element 6 is overwritten by then, so clone the first new row instead
+            tpl = template if k < 6 else a.smember(ITEM_OBJ, STRUCT, a.elem(asm.clone(items), a.i(0)))
             then = [
                 a.let(a.smember(ITEM_TEXT, STRUCT, a.elem(asm.clone(items), a.i(k))), self.bridge('label:%d' % k)),
                 a.let(a.smember(ITEM_OBJ, STRUCT, a.elem(asm.clone(items), a.i(k))),
-                      a.new(TOGGLE, asm.clone(template))),
+                      a.new(TOGGLE, asm.clone(tpl))),
             ]
             rows.block(a.if_(a.native('Greater_IntInt', self.toint('rows'), a.i(k)), then))
         rows.stmt(a.let(a.length(asm.clone(items)), self.toint('rows')))

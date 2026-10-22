@@ -86,6 +86,7 @@ void     sarpbc_fps_overlay_tick(uint64_t clock_ms, unsigned guest_frames);   /*
 extern "C" void rsx_vulkan_backend_set_present_unlocked(int unlocked);       /* T062 */
 extern "C" void rsx_vulkan_backend_set_window_size(int w, int h);              /* T063 */
 extern "C" void rsx_vulkan_backend_set_render_scale(float scale);              /* T063 */
+extern "C" void rsx_vulkan_backend_set_fullscreen(int on);                      /* Graphics > Fullscreen */
 #endif
 
 /* libs/system/cellGame.c: title id and game type (CATEGORY HG -> HDD) from the
@@ -286,6 +287,7 @@ static DWORD WINAPI frame_clock(LPVOID)
     rsx_vulkan_backend_set_render_scale(sarpbc_gfx::kRenderScalePercent[sarpbc_gfx::settings().render_scale.load()] / 100.0f);
     rsx_vulkan_backend_set_window_size(sarpbc_gfx::kWindowSizes[sarpbc_gfx::settings().window_size.load()].w,
                                        sarpbc_gfx::kWindowSizes[sarpbc_gfx::settings().window_size.load()].h);
+    rsx_vulkan_backend_set_fullscreen(sarpbc_gfx::settings().fullscreen.load());   /* the window opens that way */
 #endif
     int rsx_ok = (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, title) == 0);
     fprintf(stderr, "[rsx] %s backend init %s\n", RSX_BACKEND_NAME,
@@ -334,6 +336,7 @@ static DWORD WINAPI frame_clock(LPVOID)
     unsigned long long next_tick_x3 = now_us() * 3ull;
     bool tick_unlocked = false;
     int window_size_applied = -1;
+    int fullscreen_applied = -1;
     unsigned long long st_sleep = 0, st_fifo = 0, st_present = 0, st_t0 = now_us(), st_n = 0;
     unsigned st_presents = 0;
     #define FC_TIMED(acc, stmt) do { if (stats) { unsigned long long _t = now_us(); stmt; acc += now_us() - _t; } else { stmt; } } while (0)
@@ -357,6 +360,13 @@ static DWORD WINAPI frame_clock(LPVOID)
             window_size_applied = ws;
 #if defined(PS3RECOMP_RSX_VULKAN)
             rsx_vulkan_backend_set_window_size(sarpbc_gfx::kWindowSizes[ws].w, sarpbc_gfx::kWindowSizes[ws].h);
+#endif
+        }
+        const int fs = sarpbc_gfx::settings().fullscreen.load(std::memory_order_relaxed);
+        if (fs != fullscreen_applied) {
+            fullscreen_applied = fs;
+#if defined(PS3RECOMP_RSX_VULKAN)
+            rsx_vulkan_backend_set_fullscreen(fs);   /* live: F11 and the Graphics page */
 #endif
         }
         const bool unlocked = sarpbc_gfx::settings().unlock_fps.load(std::memory_order_relaxed) != 0;
