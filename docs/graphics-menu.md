@@ -118,7 +118,8 @@ shows no title). The patch uses no new package objects; new names are appended (
 The host side is `src/overrides/graphics_menu.cpp` (the bridge and the row list) and `graphics_settings.{h,cpp}`
 (values, persisted in `gamedata/graphics.ini`, `$SARPBC_GFX_FILE`). Rows today: Resolution (the window's
 size; the frame is scaled to it, patch 0080), Render Scale (T063, restart), Fullscreen (live), VSync (the game's
-own), Frame Rate (T062, restart to apply), FPS Counter (T064); the ones that switch something (T062-T064) read
+own), Frame Rate (T062, restart to apply), FPS Counter (T064), Texture Quality / Texture Filtering / Brightness
+(restart: they edit the engine INI in the overlay, `engine_settings()` / `patch_engine_ini()` in the patch tool); the ones that switch something (T062-T064) read
 `sarpbc_gfx::settings()`.
 
 Script gotchas learned: a call node's name is `parts[0]`, its arguments follow (`parts[1]...`); `if` needs the end
@@ -164,3 +165,20 @@ Fullscreen (row 3, live, `SARPBC_FULLSCREEN=1`, **F11**): desktop fullscreen thr
 restores the Resolution size. The setting, the row and the call were checked; the window itself could not be (the
 only X server here, Xvfb, has no window manager, so SDL cannot honour the request): a failure is logged
 (`[RSX vulkan] fullscreen on failed: ...`).
+
+## Engine-INI options and Skip Intro (2026-10-22)
+
+- **Texture Quality** Low/Default/High = `LODBias` +3/0/-1 on every `TEXTUREGROUP_*`; **Texture Filtering**
+  Default/Anisotropic 8x/16x/Trilinear 16x = `MaxAnisotropy` (4 in the four `[SystemSettings*]`) and `Trilinear`;
+  **Brightness** Darker..Brighter = `[Engine.Client] DisplayGamma` 1.8/2.0/2.2/2.5/2.8 (lower is darker: luma 61 at 1.6
+  against 88 at 2.2). All apply at the next start (`graphics.ini` keys `texture_quality`, `texture_filter`,
+  `brightness`; env `SARPBC_TEXTURE_QUALITY/_FILTER`, `SARPBC_BRIGHTNESS`, indexes); the overlay rebuilds when they
+  change (the stamp includes them) and ships no INI at all when everything is default. The choice tables live in
+  `graphics_settings.h` (names) and `tools/graphics_menu_patch.py` (values): keep them in step.
+  Tested in the arena: High + Trilinear 16x + Brighter is sharper and brighter (luma 109); Low (+1) was
+  indistinguishable from Default, so Low is +3, a modest softening: the LOD bias is a weak lever here.
+- **Skip Intro** is on **Options > System** (not Graphics), as its seventh row (the slot VSync left: same component
+  and handlers, whose non-Graphics branch now talks to the host: `intro:get`, `intro:set:J`), label from the new INT
+  key `[MidGameMenuActor] SkipIntroStr`. `IntroSceneContainer.InitScene` asks the host (`skipintro`) and runs the
+  statements the game's own `-nosplash` check runs (`CloseScene(); return`). Measured: Loading -> profile screen at
+  4 s instead of ~33 s. `SARPBC_SKIP_INTRO=1` sets it for a run. The System page is back to its seven-row frame.

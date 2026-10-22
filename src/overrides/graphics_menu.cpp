@@ -15,6 +15,8 @@
  *   nvals:K         number of choices    val:K:J    choice J's text
  *   get:K           the current choice   set:K:J    choose J (returns the choice now in force)
  *   frame:h|y       the page frame's height and screen position for this many rows
+ *   skipintro       "1" when the intro screens are to be skipped (IntroSceneContainer.InitScene)
+ *   intro:get|set:J the System page's Skip Intro row (index 0 = Enabled, 1 = Disabled, like the VSync row it reuses)
  *   isvsync:K       "1" when row K is VSync: the game's own setting (TAProfile.bUseVSync), which the
  *                   patched script keeps reading and writing itself, so the host only lists it
  *
@@ -144,8 +146,22 @@ std::vector<Row> make_rows()
     rows.push_back({"VSync", "VSync", {"Enabled", "Disabled"}, [] { return 0; }, [](int) {}});
     rows.push_back({"Frame Rate", "Frame Rate (restart to apply)", {"Game default", "Unlocked"},
                     [] { return settings().unlock_fps.load(); }, [](int i) { settings().unlock_fps = i; }});
+    auto names = [](const char* const* n, int count) {
+        std::vector<std::string> v;
+        for (int i = 0; i < count; i++) v.push_back(n[i]);
+        return v;
+    };
     rows.push_back({"FPS Counter", "FPS Counter", {"Off", "On"},
                     [] { return settings().fps_overlay.load(); }, [](int i) { settings().fps_overlay = i; }});
+    rows.push_back({"Texture Quality", "Texture Quality (restart to apply)",
+                    names(sarpbc_gfx::kTextureQualityNames, sarpbc_gfx::kNumTextureQuality),
+                    [] { return settings().texture_quality.load(); }, [](int i) { settings().texture_quality = i; }});
+    rows.push_back({"Texture Filtering", "Texture Filtering (restart to apply)",
+                    names(sarpbc_gfx::kTextureFilterNames, sarpbc_gfx::kNumTextureFilter),
+                    [] { return settings().texture_filter.load(); }, [](int i) { settings().texture_filter = i; }});
+    rows.push_back({"Brightness", "Brightness (restart to apply)",
+                    names(sarpbc_gfx::kBrightnessNames, sarpbc_gfx::kNumBrightness),
+                    [] { return settings().brightness.load(); }, [](int i) { settings().brightness = i; }});
     return rows;
 }
 
@@ -176,6 +192,14 @@ std::string command(const std::string& cmd)
     if (cmd == "open:gfx") { s_gfx_page = true; return ""; }
     if (cmd == "open:sys" || cmd == "close") { s_gfx_page = false; return ""; }
     if (cmd == "rows") return std::to_string(n);
+    if (cmd == "skipintro") return settings().skip_intro.load() ? "1" : "0";
+    if (cmd == "intro:get") return settings().skip_intro.load() ? "0" : "1";   // Enabled = 0
+    if (!strncmp(c, "intro:set:", 10)) {
+        settings().skip_intro = atoi(c + 10) == 0 ? 1 : 0;
+        sarpbc_gfx::save();
+        fprintf(stderr, "[gfx] Skip Intro -> %s\n", settings().skip_intro.load() ? "Enabled" : "Disabled");
+        return "";
+    }
     if (!strncmp(c, "isvsync:", 8)) return atoi(c + 8) == kVsyncRow ? "1" : "0";
     // 64 + 64 per row of frame, centred: the System page (7 rows) is 512 high at 0.2777, the
     // Profile page (3 rows) 256 at 0.3888 (MidGameMenuActor SystemOptions/ProfileOptions BeginState)

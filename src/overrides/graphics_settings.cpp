@@ -26,6 +26,10 @@ static void apply(const char* key, int v)
     Settings& s = settings();
     if (!strcmp(key, "unlock_fps")) s.unlock_fps = clamp(v, 0, 1);
     else if (!strcmp(key, "fps_overlay")) s.fps_overlay = clamp(v, 0, 1);
+    else if (!strcmp(key, "texture_quality")) s.texture_quality = clamp(v, 0, kNumTextureQuality - 1);
+    else if (!strcmp(key, "texture_filter")) s.texture_filter = clamp(v, 0, kNumTextureFilter - 1);
+    else if (!strcmp(key, "brightness")) s.brightness = clamp(v, 0, kNumBrightness - 1);
+    else if (!strcmp(key, "skip_intro")) s.skip_intro = clamp(v, 0, 1);
     else if (!strcmp(key, "fullscreen")) s.fullscreen = clamp(v, 0, 1);
     else if (!strcmp(key, "window_size")) s.window_size = clamp(v, 0, kNumWindowSizes - 1);
     else if (!strcmp(key, "render_scale")) s.render_scale = clamp(v, 0, kNumRenderScales - 1);
@@ -46,6 +50,10 @@ void load()
     if (const char* e = getenv("SARPBC_UNLOCK_FPS")) apply("unlock_fps", atoi(e));
     if (const char* e = getenv("SARPBC_FPS_OVERLAY")) apply("fps_overlay", atoi(e));
     if (const char* e = getenv("SARPBC_FULLSCREEN")) apply("fullscreen", atoi(e));
+    if (const char* e = getenv("SARPBC_TEXTURE_QUALITY")) apply("texture_quality", atoi(e));
+    if (const char* e = getenv("SARPBC_TEXTURE_FILTER")) apply("texture_filter", atoi(e));
+    if (const char* e = getenv("SARPBC_BRIGHTNESS")) apply("brightness", atoi(e));
+    if (const char* e = getenv("SARPBC_SKIP_INTRO")) apply("skip_intro", atoi(e));
     if (const char* e = getenv("SARPBC_RENDER_SCALE")) {
         const int pct = atoi(e);
         for (int i = 0; i < kNumRenderScales; i++)
@@ -64,8 +72,9 @@ void save()
     Settings& s = settings();
     FILE* f = fopen(path(), "w");
     if (!f) return;
-    fprintf(f, "unlock_fps = %d\nfps_overlay = %d\nwindow_size = %d\nrender_scale = %d\nfullscreen = %d\n", s.unlock_fps.load(),
-            s.fps_overlay.load(), s.window_size.load(), s.render_scale.load(), s.fullscreen.load());
+    fprintf(f, "unlock_fps = %d\nfps_overlay = %d\nwindow_size = %d\nrender_scale = %d\nfullscreen = %d\ntexture_quality = %d\ntexture_filter = %d\nbrightness = %d\nskip_intro = %d\n",
+            s.unlock_fps.load(), s.fps_overlay.load(), s.window_size.load(), s.render_scale.load(), s.fullscreen.load(),
+            s.texture_quality.load(), s.texture_filter.load(), s.brightness.load(), s.skip_intro.load());
     fclose(f);
 }
 

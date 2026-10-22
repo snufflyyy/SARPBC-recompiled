@@ -91,5 +91,42 @@ class ChunkTest(unittest.TestCase):
             pkgwrite.toc_set(toc, '\\none.xxx', 1)
 
 
+class EngineIniTest(unittest.TestCase):
+    INI = ('[Engine.GameEngine]\r\nMaxSmoothedFrameRate=60\r\n[SystemSettings]\r\nMaxAnisotropy=4\r\nTrilinear=false\r\n'
+           'TEXTUREGROUP_World=(MinLODSize=128,MaxLODSize=1024,LODBias=0)\r\n'
+           'TEXTUREGROUP_UI=(MinLODSize=128,MaxLODSize=1024, LODBias=0)\r\n[Engine.Client]\r\nDisplayGamma=2.2\r\n')
+
+    def patched(self, **env):
+        import tempfile
+        import graphics_menu_patch as g
+        raw = coalesced.dump([['..\\PS3-TAEngine.ini\0', self.INI + '\0', False, False]])
+        saved = {k: os.environ.pop(k, None) for k in list(g.ENV.values()) + ['SARPBC_GFX_FILE']}
+        os.environ['SARPBC_GFX_FILE'] = '/nonexistent/graphics.ini'
+        os.environ.update(env)
+        try:
+            with tempfile.NamedTemporaryFile() as f:
+                f.write(raw)
+                f.flush()
+                self.assertEqual(g.engine_ini_wanted(), bool(env))
+                return coalesced.load(g.patch_engine_ini(f.name)) if env else None
+        finally:
+            for k in list(g.ENV.values()) + ['SARPBC_GFX_FILE']:
+                os.environ.pop(k, None)
+                if saved.get(k) is not None:
+                    os.environ[k] = saved[k]
+
+    def test_defaults_ship_no_ini(self):
+        self.assertIsNone(self.patched())
+
+    def test_settings_edit_the_ini(self):
+        t = self.patched(SARPBC_UNLOCK_FPS='1', SARPBC_TEXTURE_QUALITY='2', SARPBC_TEXTURE_FILTER='3',
+                     SARPBC_BRIGHTNESS='4')[0][1]
+        for want in ('MaxSmoothedFrameRate=1000', 'MaxAnisotropy=16', 'Trilinear=true', 'DisplayGamma=2.800000',
+                     'LODBias=-1)'):
+            self.assertIn(want, t)
+        self.assertEqual(t.count('LODBias=-1'), 2)
+        self.assertNotIn('LODBias=0', t)
+
+
 if __name__ == '__main__':
     unittest.main()

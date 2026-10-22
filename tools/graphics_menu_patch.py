@@ -28,9 +28,10 @@ INI_REL = 'CONFIG/BATTLEBALL/PS3/COOKED/COALESCED.INI'
 GRAPHICS_TEXT = 'Graphics'
 GRAPHICS_DESC = 'Change the resolution, frame rate and other video options.'
 GRAPHICS_TITLE = 'Graphics Options'
-MAX_ROWS = 8        # rows the page can show: rows 0-5 clone the instance's VSync row, later ones clone row 0
+SKIP_INTRO_TEXT = 'Skip Intro'
+MAX_ROWS = 10       # rows the page can show: rows 0-5 clone the instance's VSync row, later ones clone row 0
 MAX_CHOICES = 12    # choices a row can offer
-SYSTEM_ROWS = 6     # rows the System page keeps (VSync moved to the Graphics page)
+
 
 
 def patch_coalesced(path):
@@ -41,37 +42,86 @@ def patch_coalesced(path):
                 'GraphicsOptions="%s"' % GRAPHICS_TEXT,
                 'GraphicsOptionsDesc="%s"' % GRAPHICS_DESC,
             ])
+            e[1] = coalesced.section_add(e[1], 'MidGameMenuActor', ['SkipIntroStr="%s"' % SKIP_INTRO_TEXT])
             e[1] = coalesced.section_add(e[1], 'BackNextWidget', ['GraphicsOptions="%s"' % GRAPHICS_TITLE])
             return coalesced.dump(entries)
     raise KeyError('TAGame.int')
 
 
-def unlock_fps_wanted():
-    """T062: SARPBC_UNLOCK_FPS=1, else unlock_fps = 1 in graphics.ini (the Graphics page writes it)."""
-    env = os.environ.get('SARPBC_UNLOCK_FPS')
-    if env is not None:
-        return env.strip() not in ('', '0')
+# Engine-INI settings (graphics.ini keys / SARPBC_* indexes; the choice tables mirror graphics_settings.h).
+TEXTURE_LOD_BIAS = (3, 0, -1)                       # Low, Default, High (+3 softens modestly, tested)
+TEXTURE_FILTER = ((4, False), (8, False), (16, False), (16, True))   # (MaxAnisotropy, Trilinear)
+BRIGHTNESS_GAMMA = ('1.800000', '2.000000', '2.200000', '2.500000', '2.800000')
+DEFAULTS = {'unlock_fps': 0, 'texture_quality': 1, 'texture_filter': 0, 'brightness': 2}
+ENV = {'unlock_fps': 'SARPBC_UNLOCK_FPS', 'texture_quality': 'SARPBC_TEXTURE_QUALITY',
+       'texture_filter': 'SARPBC_TEXTURE_FILTER', 'brightness': 'SARPBC_BRIGHTNESS'}
+
+
+def engine_settings():
+    """The settings that live in the engine INI: graphics.ini (the Graphics page writes it), the
+    SARPBC_* environment switches winning."""
+    vals = dict(DEFAULTS)
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     path = os.environ.get('SARPBC_GFX_FILE') or os.path.join(root, 'gamedata', 'graphics.ini')
     try:
         for line in open(path):
             k, _, v = line.partition('=')
-            if k.strip() == 'unlock_fps':
-                return v.strip() == '1'
+            if k.strip() in vals and v.strip().lstrip('-').isdigit():
+                vals[k.strip()] = int(v)
     except OSError:
         pass
-    return False
+    for k, name in ENV.items():
+        e = os.environ.get(name)
+        if e is not None and e.strip().lstrip('-').isdigit():
+            vals[k] = int(e)
+    vals['texture_quality'] = min(max(vals['texture_quality'], 0), len(TEXTURE_LOD_BIAS) - 1)
+    vals['texture_filter'] = min(max(vals['texture_filter'], 0), len(TEXTURE_FILTER) - 1)
+    vals['brightness'] = min(max(vals['brightness'], 0), len(BRIGHTNESS_GAMMA) - 1)
+    vals['unlock_fps'] = 1 if vals['unlock_fps'] else 0
+    return vals
+
+
+def unlock_fps_wanted():
+    return engine_settings()['unlock_fps'] == 1
+
+
+def engine_ini_wanted():
+    return engine_settings() != DEFAULTS
 
 
 def patch_engine_ini(path):
-    """UE3 sleeps to hold [Engine.GameEngine] MaxSmoothedFrameRate (60) and clamps its frame time
-    to it: lift it so the game can run past 60 (T062)."""
+    """Edit PS3-TAEngine.ini, inside COALESCED.INI, for the settings that live there:
+    - unlocked fps (T062): UE3 sleeps to hold [Engine.GameEngine] MaxSmoothedFrameRate (60) and clamps
+      its frame time to it: 1000;
+    - texture quality: the LODBias of every TEXTUREGROUP_* (+1 low, -1 high);
+    - texture filtering: MaxAnisotropy (4 in the game's four [SystemSettings*]) and Trilinear;
+    - brightness: [Engine.Client] DisplayGamma (2.2; lower is darker, tested)."""
+    import re
+    cfg = engine_settings()
     entries = coalesced.load(open(path, 'rb').read())
     for e in entries:
         if e[0].rstrip('\0').lower().endswith('\\ps3-taengine.ini'):
-            if 'MaxSmoothedFrameRate=60' not in e[1]:
-                raise KeyError('MaxSmoothedFrameRate=60')
-            e[1] = e[1].replace('MaxSmoothedFrameRate=60', 'MaxSmoothedFrameRate=1000')
+            t = e[1]
+            if cfg['unlock_fps']:
+                if 'MaxSmoothedFrameRate=60' not in t:
+                    raise KeyError('MaxSmoothedFrameRate=60')
+                t = t.replace('MaxSmoothedFrameRate=60', 'MaxSmoothedFrameRate=1000')
+            bias = TEXTURE_LOD_BIAS[cfg['texture_quality']]
+            if bias:
+                t, n = re.subn(r'^(TEXTUREGROUP_[A-Za-z0-9_]+=\(.*?)LODBias=-?\d+', r'\g<1>LODBias=%d' % bias, t, flags=re.M)
+                if not n:
+                    raise KeyError('TEXTUREGROUP LODBias')
+            aniso, trilinear = TEXTURE_FILTER[cfg['texture_filter']]
+            if (aniso, trilinear) != TEXTURE_FILTER[0]:
+                t, n = re.subn(r'^MaxAnisotropy=\d+', 'MaxAnisotropy=%d' % aniso, t, flags=re.M)
+                t, m = re.subn(r'^Trilinear=\w+', 'Trilinear=%s' % ('true' if trilinear else 'false'), t, flags=re.M)
+                if not n or not m:
+                    raise KeyError('MaxAnisotropy/Trilinear')
+            if cfg['brightness'] != DEFAULTS['brightness']:
+                t, n = re.subn(r'^DisplayGamma=[\d.]+', 'DisplayGamma=%s' % BRIGHTNESS_GAMMA[cfg['brightness']], t, flags=re.M)
+                if not n:
+                    raise KeyError('DisplayGamma')
+            e[1] = t
             return coalesced.dump(entries)
     raise KeyError('PS3-TAEngine.ini')
 
@@ -202,15 +252,17 @@ class Patcher:
             rows.block(a.if_(a.native('Greater_IntInt', self.toint('rows'), a.i(k)), then))
         rows.stmt(a.let(a.length(asm.clone(items)), self.toint('rows')))
         seq = Seq()
-        seq.block(a.if_(self.is_gfx(), list(rows), [self.drop_vsync()]))
+        seq.block(a.if_(self.is_gfx(), list(rows), [self.skip_intro_row()]))
         seq.finish(st[0])
         f.stmts = list(seq) + st
         self.done(idx, f)
 
-    def drop_vsync(self):
-        """VSync moved to the Graphics page: the System page lists only its first six rows."""
+    def skip_intro_row(self):
+        """VSync moved to the Graphics page; the System page's seventh row, built from the same
+        component and handlers, is now Skip Intro (the handlers' non-Graphics branch)."""
         a = self.a
-        return a.let(a.length(a.inst(ITEMS)), a.i(SYSTEM_ROWS))
+        return a.let(a.smember(ITEM_TEXT, STRUCT, a.elem(a.inst(ITEMS), a.i(6))),
+                     a.s('?loc:tagame:midgamemenuactor:SkipIntroStr'))
 
     # -- the VSync row's handlers: the template of every Graphics row ---------------------
     def row_handlers(self):
@@ -238,7 +290,18 @@ class Patcher:
         seq = Seq()
         seq.block(a.if_(self.is_gfx(), list(then)))
         seq.finish(st[0])
-        f.stmts = list(seq) + st
+        # System page, seventh row: Skip Intro (Enabled = 0), through the host. First, so the
+        # Graphics block's end label lands on the original code after it.
+        intro = Seq()
+        intro.stmt(asm.clone(st[0]))                                  # Title = ItemText
+        sv = asm.clone(st[1])
+        sv.parts[-1][1].parts[1] = ('e', self.toint('intro:get'))
+        intro.stmt(sv)
+        intro.stmt(a.ret())
+        seq2 = Seq()
+        seq2.block(a.if_(a.native('Not_PreBool', self.is_gfx()), list(intro)))
+        seq2.finish(seq[0])
+        f.stmts = list(seq2) + list(seq) + st
         self.done(idx, f)
 
         handle = NS + 'HandleVSync'
@@ -259,7 +322,16 @@ class Patcher:
         seq.block(a.if_(self.is_gfx(), list(then)))
         seq.finish(st[0])
         st[0].label = (st[0].label or []) + then.pending      # the inner end falls out of the block too
-        f.stmts = list(seq) + st
+        # System page, seventh row: Skip Intro. First; it returns, the Graphics block is skipped.
+        intro = Seq()
+        sv2 = asm.clone(st[0])                                # Item.SetValue(ChosenIndex)
+        intro.stmt(sv2)
+        intro.stmt(self.bridge('intro:set:', self.istr(a.loc(handle + '.ChosenIndex'))))
+        intro.stmt(a.ret())
+        seq2 = Seq()
+        seq2.block(a.if_(a.native('Not_PreBool', self.is_gfx()), list(intro)))
+        seq2.finish(seq[0])
+        f.stmts = list(seq2) + list(seq) + st
         self.done(idx, f)
 
     # -- SystemOptions.BeginState: the frame fits the rows ---------------------------------
@@ -268,12 +340,12 @@ class Patcher:
         idx, f = self.func(NS + 'SystemOptions.BeginState')
         gfx_h = lambda: a.cast(asm.CAST_STRING_TO_FLOAT, self.bridge('frame:h'))   # noqa: E731
         gfx_y = lambda: a.cast(asm.CAST_STRING_TO_FLOAT, self.bridge('frame:y'))   # noqa: E731
-        # six rows on the System page now: 64 + 64 x 6 high, centred (the Profile page's formula)
-        for text, make, six in (('self.OptionsFrame.self.StretchSize.Value.Y = 512f', gfx_h, 448.0),
-                                ('self.OptionsFrame.self.ScreenSize.Value.Y = 512f', gfx_h, 448.0),
-                                ('self.OptionsFrame.self.ScreenPosition.Value.Y = 0.2777f', gfx_y, 0.3056)):
+        # the System page keeps its seven-row frame (512, 0.2777); the Graphics page sizes it to its rows
+        for text, make in (('self.OptionsFrame.self.StretchSize.Value.Y = 512f', gfx_h),
+                           ('self.OptionsFrame.self.ScreenSize.Value.Y = 512f', gfx_h),
+                           ('self.OptionsFrame.self.ScreenPosition.Value.Y = 0.2777f', gfx_y)):
             n = f.stmts[a.find(f.stmts, text)]
-            n.parts[-1] = ('e', a.cond(self.is_gfx(), make(), a.f(six)))
+            n.parts[-1] = ('e', a.cond(self.is_gfx(), make(), n.parts[-1][1]))
         self.done(idx, f)
 
     # -- literal text: the page's strings are not ?loc: markup ------------------------------
@@ -319,6 +391,21 @@ class Patcher:
         except KeyError:
             return False
 
+    # -- IntroSceneContainer.InitScene: Skip Intro -----------------------------------------------
+    def intro(self):
+        """The game closes the intro scene at once when the command line has -nosplash; the same
+        two statements run when the host says to skip (the System page's Skip Intro row)."""
+        a = self.a
+        idx, f = self.func('IntroSceneContainer.InitScene')
+        st = f.stmts
+        close = asm.clone(st[a.find(st, 'CloseScene()')])
+        ret = asm.clone(st[a.find(st, 'return nothing', 2)[0]])
+        seq = Seq()
+        seq.block(a.if_(a.native('EqualEqual_StrStr', self.bridge('skipintro'), a.s('1')), [close, ret]))
+        seq.finish(st[1])
+        f.stmts = st[:1] + list(seq) + st[1:]
+        self.done(idx, f)
+
     # -- leaving the page, and the pause menu's own System page -----------------------------
     def reset(self):
         a = self.a
@@ -327,7 +414,7 @@ class Patcher:
         self.done(idx, f)
         idx, f = self.func(NS + 'InitScene')
         at = a.find(f.stmts, 'InitOptionsItems(self.SystemOptionsMenuList, self.SystemOptionsMenuItems)')
-        f.stmts.insert(at, self.drop_vsync())
+        f.stmts.insert(at, self.skip_intro_row())
         f.stmts.insert(0, self.bridge('open:sys'))
         self.done(idx, f)
 
@@ -338,6 +425,7 @@ class Patcher:
         self.frame()
         self.reset()
         self.no_markup()
+        self.intro()
 
 
 def stamp(vfs):
@@ -345,7 +433,7 @@ def stamp(vfs):
     import hashlib
     h = hashlib.sha1()
     src = os.path.join(vfs, 'dev_hdd0', REL)
-    h.update(b'unlock=%d\n' % unlock_fps_wanted())
+    h.update(repr(sorted(engine_settings().items())).encode())
     for rel in ('COOKEDPS3/TAGAME.XXX', 'LOCALIZATION/COALESCED.INT', INI_REL, 'PS3TOC.TXT'):
         st = os.stat(os.path.join(src, rel))
         h.update(('%s %d %d\n' % (rel, st.st_size, int(st.st_mtime))).encode())
@@ -384,7 +472,7 @@ def main(argv):
     toc = pkgwrite.toc_set(toc, TOC_TAGAME, len(tagame))
     toc = pkgwrite.toc_set(toc, TOC_INT, len(ini))
     files = [('COOKEDPS3/TAGAME.XXX', tagame), ('LOCALIZATION/COALESCED.INT', ini)]
-    if unlock_fps_wanted():
+    if engine_ini_wanted():
         engine_ini = patch_engine_ini(os.path.join(src, INI_REL))
         toc = pkgwrite.toc_set(toc, TOC_INI, len(engine_ini))
         files.append((INI_REL, engine_ini))

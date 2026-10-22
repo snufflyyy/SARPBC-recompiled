@@ -7,7 +7,7 @@ the runtime but not yet tried. The engine INI is `PS3-TAEngine.ini` inside `COAL
 (`tools/graphics_menu_patch.py`, see `patch_engine_ini`) already rewrites it for the unlocked frame rate, so an INI
 value costs one line plus a menu row, and applies at the next start.
 
-## Tested: work through the INI (easy)
+## Tested: work through the INI (easy) - done 2026-10-22: Texture Quality, Texture Filtering, Brightness rows (graphics-menu.md)
 
 | Idea | How | Result |
 |---|---|---|
@@ -27,7 +27,7 @@ camera overrides it). **`DepthOfField=false` is harmful**: black outlines appear
 
 | Idea | Evidence | Plan |
 |---|---|---|
-| **Skip the intro** (Loading, ESRB, Powered by Unreal, Psyonix) | `IntroSceneContainer.InitScene` starts with `if (EngineShare.ParseCommandlineParam('nosplash')) { CloseScene(); return; }`: the game has a built-in `-nosplash` | Either put `-nosplash` on the guest's command line, or replace that condition by `true` with `tools/ue3/asm.py` (one statement). Row: "Skip intro" |
+| **Skip the intro** - DONE (System page, row 7) (Loading, ESRB, Powered by Unreal, Psyonix) | `IntroSceneContainer.InitScene` starts with `if (EngineShare.ParseCommandlineParam('nosplash')) { CloseScene(); return; }`: the game has a built-in `-nosplash` | Either put `-nosplash` on the guest's command line, or replace that condition by `true` with `tools/ue3/asm.py` (one statement). Row: "Skip intro" |
 | **Safe area 100 %** | The Screen Size row shows 85 % (`TAProfile.ViewportScreenScalingX/Y`, applied by `TAGameViewportClient.UpdateScreenScaling(x, y)`); the 85 % black frame is visible in every screen. `ScreenSizeMessageBoxActor` is the "adjust your screen" intro page | Set the profile default to 1.0 (data patch in the default object, like `OptionsItems`) and/or call `UpdateScreenScaling(1, 1)` at start; skip the safe-area page. Not yet checked where the 0.85 default comes from |
 | **Language** | `cellSysutil` answers the language from `PS3_LANG` (en/fr/de/es/it...) else the host locale; the install has `COALESCED.INT/.DEU/.ESN/.FRA/.ITA` | A Language row writing `PS3_LANG` for the next start (restart) |
 | **Frame cap choices** (30 / 60 / 120 / unlimited) | `SARPBC_FPS_CAP=<n>` already limits flips (docs/frame-pacing.md); Frame Rate row has two choices today | More choices on the existing row; the cap is on the drain thread (a cap under 60 costs a little) |
