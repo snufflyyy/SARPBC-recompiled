@@ -125,18 +125,11 @@ std::vector<Row> make_rows()
 {
     std::vector<Row> rows;
     {
-        Row r{"Resolution", "Resolution", {}, [] { return settings().window_size.load(); },
+        Row r{"Resolution", "Window Size", {}, [] { return settings().window_size.load(); },
               [](int i) { settings().window_size = i; }};
         for (int i = 0; i < sarpbc_gfx::kNumWindowSizes; i++)
             r.choices.push_back(std::to_string(sarpbc_gfx::kWindowSizes[i].w) + " x " +
                                 std::to_string(sarpbc_gfx::kWindowSizes[i].h));
-        rows.push_back(r);
-    }
-    {
-        Row r{"Render Scale", "Render Scale", {}, [] { return settings().render_scale.load(); },
-              [](int i) { settings().render_scale = i; }};
-        for (int i = 0; i < sarpbc_gfx::kNumRenderScales; i++)
-            r.choices.push_back(std::to_string(sarpbc_gfx::kRenderScalePercent[i]) + "%");
         rows.push_back(r);
     }
     rows.push_back({"VSync", "VSync", {"Enabled", "Disabled"}, [] { return 0; }, [](int) {}});
@@ -154,7 +147,7 @@ const std::vector<Row>& rows()
 }
 
 bool s_gfx_page = false;
-constexpr int kVsyncRow = 2;   // after Resolution and Render Scale (make_rows)
+constexpr int kVsyncRow = 1;   // after Resolution (make_rows)
 
 bool parse_int(const char*& p, int& out)
 {

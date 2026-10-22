@@ -84,6 +84,7 @@ void     sarpbc_frame_stats_tick(uint64_t clock_ms, unsigned guest_frames);
 void     sarpbc_fps_overlay_tick(uint64_t clock_ms, unsigned guest_frames);   /* T064 */
 #if defined(PS3RECOMP_RSX_VULKAN)
 extern "C" void rsx_vulkan_backend_set_present_unlocked(int unlocked);       /* T062 */
+extern "C" void rsx_vulkan_backend_set_window_size(int w, int h);              /* T063 */
 #endif
 
 /* libs/system/cellGame.c: title id and game type (CATEGORY HG -> HDD) from the
@@ -325,6 +326,7 @@ static DWORD WINAPI frame_clock(LPVOID)
      * (16666.67 us, kept in 1/3 us): a fixed 16 ms step ran at 62.5 Hz. */
     unsigned long long next_tick_x3 = now_us() * 3ull;
     bool tick_unlocked = false;
+    int window_size_applied = -1;
     unsigned long long st_sleep = 0, st_fifo = 0, st_present = 0, st_t0 = now_us(), st_n = 0;
     unsigned st_presents = 0;
     #define FC_TIMED(acc, stmt) do { if (stats) { unsigned long long _t = now_us(); stmt; acc += now_us() - _t; } else { stmt; } } while (0)
@@ -342,6 +344,14 @@ static DWORD WINAPI frame_clock(LPVOID)
          * at 1 kHz instead of 60 Hz, so a flip completes as soon as its frame is drained and the
          * guest is no longer held to 16.7 ms. UE3's own limit is lifted in the engine INI by the
          * overlay (tools/graphics_menu_patch.py), which needs a restart. */
+        /* T063: Options > Graphics > Resolution is the window's size: the frame is scaled to it */
+        const int ws = sarpbc_gfx::settings().window_size.load(std::memory_order_relaxed);
+        if (ws != window_size_applied) {
+            window_size_applied = ws;
+#if defined(PS3RECOMP_RSX_VULKAN)
+            rsx_vulkan_backend_set_window_size(sarpbc_gfx::kWindowSizes[ws].w, sarpbc_gfx::kWindowSizes[ws].h);
+#endif
+        }
         const bool unlocked = sarpbc_gfx::settings().unlock_fps.load(std::memory_order_relaxed) != 0;
         if (unlocked != tick_unlocked) {
             tick_unlocked = unlocked;

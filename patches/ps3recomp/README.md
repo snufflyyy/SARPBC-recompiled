@@ -182,6 +182,7 @@ numbers:
 | `0077-ppu-fs-hdd0-overlay.patch` | T065: PS3_VFS_OVERLAY reaches /dev_hdd0 paths in ppu_fs (the HDD0 branch returned before it) | generic, offer upstream |
 | `0078-vulkan-text-overlay.patch` | T064: rsx_vulkan_backend_set_overlay_text, a text overlay copied into the presented image (rsx_overlay.h font, test) | generic, offer upstream |
 | `0079-vulkan-present-unlocked.patch` | T062: window present mode MAILBOX/IMMEDIATE when the host asks for an unlocked frame rate | generic, offer upstream |
+| `0080-vulkan-window-size.patch` | T063: set the window size at run time (applied on the event-pump thread, recentred) | generic, offer upstream |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `tools/export_patch.sh <slug> "<description>" ["<upstream status>"]` (next free number, the README row,

@@ -23,3 +23,6 @@ broken shadows/HUD/post effects, fps cost measured (GPU is at P8 here: note it),
 ## Log
 
 ## Log
+- 2026-10-22 19:19 claude: claimed
+- 2026-10-22 19:19 claude: Window/output size done (Resolution row, SARPBC_WINDOW_SIZE=WxH, patch 0080, checked under Xvfb at 1920x1080). Internal render scale NOT done: ScreenPercentage in the engine INI does nothing (surfaces stay 1280x720); a real scale needs the draw engine to scale every surface/viewport/copy and the screen-space shader constants. Analysis in docs/graphics-menu.md 'Render scale'. HANDOFF: done=window size; next=draw-engine surface scale (rsx_draw_engine.c surface creation ~line 609, vk_eng_surface_view) + fragment resolution constants; branch=main
+- 2026-10-22 19:19 claude: RELEASED: paused: window size done, internal render scale open; see HANDOFF

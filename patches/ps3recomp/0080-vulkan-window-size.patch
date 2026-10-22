@@ -1,0 +1,63 @@
+From 397c698a06fba21739b7cf54be9955b6fb0395ff Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Thu, 22 Oct 2026 19:18:17 +0000
+Subject: [PATCH] vulkan: rsx_vulkan_backend_set_window_size (resize the window
+ at run time, the swapchain follows) (T063)
+
+---
+ libs/video/rsx_vulkan_backend.c | 20 ++++++++++++++++++++
+ libs/video/rsx_vulkan_backend.h |  4 ++++
+ 2 files changed, 24 insertions(+)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 5ddfab3..395a02e 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -4667,9 +4667,29 @@ void rsx_vulkan_backend_shutdown(void)
+     memset(&s_vk, 0, sizeof s_vk);
+ }
+ 
++/* The window's size is the host's to change (any thread asks, the thread that pumps events does it:
++ * SDL wants window calls there). The swapchain follows on the next present (out-of-date / suboptimal). */
++static int s_want_win_w, s_want_win_h;
++
++void rsx_vulkan_backend_set_window_size(int w, int h)
++{
++    if (w < 16 || h < 16 || w > 16384 || h > 16384) return;
++    __atomic_store_n(&s_want_win_h, h, __ATOMIC_RELAXED);
++    __atomic_store_n(&s_want_win_w, w, __ATOMIC_RELEASE);
++}
++
+ int rsx_vulkan_backend_pump_messages(void)
+ {
+     if (!s_vk.windowed) return 0;
++    const int ww = __atomic_exchange_n(&s_want_win_w, 0, __ATOMIC_ACQUIRE), wh = __atomic_load_n(&s_want_win_h, __ATOMIC_RELAXED);
++    if (ww && s_vk.window) {
++        int cw = 0, ch = 0;
++        SDL_GetWindowSize(s_vk.window, &cw, &ch);
++        if (cw != ww || ch != wh) {
++            SDL_SetWindowSize(s_vk.window, ww, wh);
++            SDL_SetWindowPosition(s_vk.window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
++        }
++    }
+     int quit = 0;
+     SDL_Event e;
+     while (SDL_PollEvent(&e)) {
+diff --git a/libs/video/rsx_vulkan_backend.h b/libs/video/rsx_vulkan_backend.h
+index 35d08d6..e70812c 100644
+--- a/libs/video/rsx_vulkan_backend.h
++++ b/libs/video/rsx_vulkan_backend.h
+@@ -110,6 +110,10 @@ void rsx_vulkan_backend_set_overlay_text(const char* text);
+  * present (the swapchain is recreated); no effect headless. Safe from any thread. */
+ void rsx_vulkan_backend_set_present_unlocked(int unlocked);
+ 
++/* Resize the window (windowed runs; the frame is scaled to it by the present's blit). Takes effect
++ * the next time the event pump runs; any thread may ask. */
++void rsx_vulkan_backend_set_window_size(int w, int h);
++
+ /* Centre pixel of the last frame a present copied out, as 0xFFRRGGBB, or 0
+  * before the first. Unlike _readback_center(), which on the draw engine path
+  * reads the surface as it is now, this is what was shown. */
+-- 
+2.47.3
+

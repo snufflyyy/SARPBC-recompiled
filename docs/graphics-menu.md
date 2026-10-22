@@ -116,8 +116,9 @@ and in `COALESCED.INT`: `[MainMenuSceneContainer] GraphicsOptions/GraphicsOption
 shows no title). The patch uses no new package objects; new names are appended (`pkgwrite.Package.name`).
 
 The host side is `src/overrides/graphics_menu.cpp` (the bridge and the row list) and `graphics_settings.{h,cpp}`
-(values, persisted in `gamedata/graphics.ini`, `$SARPBC_GFX_FILE`). Rows today: Resolution, Render Scale,
-VSync (the game's own), Frame Rate, FPS Counter; the ones that switch something (T062-T064) read
+(values, persisted in `gamedata/graphics.ini`, `$SARPBC_GFX_FILE`). Rows today: Resolution (the window's
+size; the frame is scaled to it, patch 0080), VSync (the game's own), Frame Rate (T062, restart to apply),
+FPS Counter (T064); the ones that switch something (T062-T064) read
 `sarpbc_gfx::settings()`.
 
 Script gotchas learned: a call node's name is `parts[0]`, its arguments follow (`parts[1]...`); `if` needs the end
@@ -133,3 +134,14 @@ Adding a row: append to `make_rows()` in graphics_menu.cpp (at most `MAX_ROWS` =
 Menu done and verified by pad-scripted boots (Options lists System/Graphics/Profile/Controls; the page opens,
 popups work, choices persist, VSync works, System has six rows). Tools: `tools/ue3/` (upk, script, dis, props,
 funcedit, asm, tree, pkgwrite, coalesced).
+
+## Render scale (T063, not done)
+
+Window/output size is done (Resolution row, `SARPBC_WINDOW_SIZE=WxH`, live). An **internal render scale**
+is not: tried the engine's own `ScreenPercentage=150` in `PS3-TAEngine.ini` (via the overlay): the game runs
+but the RSX surfaces stay `1280x720` (the PS3 build ignores it), so it does nothing. A real scale has to be
+done in the draw engine: every guest surface's host image, viewport, scissor, clear, copy (NV0039) and the
+shadow snapshot crop (0064) scaled, and **the screen-space constants the game feeds its post effects
+(1280x720) no longer match WPOS**, so fog/depth/post passes would break unless the fragment programs'
+resolution inputs are scaled too. Left open in T063 with this analysis; the Render Scale row was taken out
+of the page rather than shown dead.

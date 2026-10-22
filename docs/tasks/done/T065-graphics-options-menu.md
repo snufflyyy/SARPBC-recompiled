@@ -1,6 +1,6 @@
 # T065: Native-feeling Graphics screen in the game's Options menu (T065)
 
-Status: claimed
+Status: done
 Owner: claude
 Priority: 5
 Touches: src/overrides/ (new graphics_menu.cpp: hooks keyed by guest address/NID), config.toml, docs/unreal-engine-3.md, new docs/graphics-menu.md
@@ -35,3 +35,4 @@ docs/graphics-menu.md; no game data tracked; lint passes.
 - 2026-10-22 18:10 claude: claimed
 - 2026-10-22 18:36 claude: Options screen = UnrealScript states in TAGAME.XXX (PsyUI), not Scaleform. Route (b): patch script/default-property bodies in the player's package, served by PS3_VFS_OVERLAY (needed patch 0077: ppu_fs HDD0 branch skipped the overlay). tools/ue3 reads/writes v539 packages; tools/graphics_menu_patch.py builds the overlay. Verified 2026-10-22 by pad-scripted boot: Options now lists System/Graphics/Profile/Controls with our INT text (Graphics opens the System page for now). Natives: all exec thunks are in a name table near file off 0x1247000; Helpers.FindLocalizedPropertyValue(Object,string)->string (thunk 0xBBCC58) is never called from script = the bridge. FFrame: Object +8, Code +0xC, GNatives 0x12D17B8, GMalloc 0x123CF30 (Realloc vtable+8, Free +0xC). Design and format notes: docs/graphics-menu.md
 - 2026-10-22 19:02 claude: Menu done and verified (2026-10-22, pad-scripted boots, captures checked): Options > Graphics page with rows Resolution, Render Scale, VSync (moved out of System at the user's request), Frame Rate, FPS Counter; popups, persistence (gamedata/graphics.ini), title GRAPHICS OPTIONS, System page keeps six rows. Overlay auto-built by tools/run.sh/boot_check.sh (tools/overlay.sh). Rows other than VSync only store values until T062-T064 read sarpbc_gfx::settings(). Details: docs/graphics-menu.md
+- 2026-10-22 19:22 claude: DONE: Options > Graphics page: rows Resolution (window size), VSync (moved from System, user request), Frame Rate (T062), FPS Counter (T064); native look (PsyUI/ToggleList rows, popups, title GRAPHICS OPTIONS); built by patched menu scripts in an auto-built overlay (tools/graphics_menu_patch.py, tools/ue3, patches 0077/0078-0080); verified by pad-scripted boots and captures. Left: Render Scale row (T063 internal scale) and more rows
