@@ -46,9 +46,3 @@ def walk(node):
     for k, v in node.parts:
         if k == 'e':
             yield from walk(v)
-
-
-def find_strings(stmts, text):
-    """Nodes (EX_StringConst) whose string is text."""
-    want = text.encode('latin-1') + b'\0'
-    return [n for s in stmts for n in walk(s) if n.op == 0x1F and n.parts[0][1] == want]

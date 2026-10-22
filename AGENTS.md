@@ -77,7 +77,6 @@ docs/tasks/{open,claimed,done}/  the task board (tools/task.sh); live copy is in
 src/main.cpp src/stubs.cpp   boot scaffold from the template (frame clock, VFS, backend choice)
 src/overrides/               port-side native replacements and settings, keyed by guest address/NID
 patches/ps3recomp/           our patches against the pinned upstream (+ README: what, why, upstream status)
-patches/experimental/        diffs kept for reference, never applied
 external/ps3recomp/          git submodule, pinned; tools/apply_patches.sh puts the patches on it
 tools/                       pipeline: extract.sh decrypt.sh relift.sh split_toc_stubs.py lift_prx_jobs.py
                              make_spu_overlays.py apply_patches.sh export_patch.sh verify.sh

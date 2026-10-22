@@ -2,8 +2,6 @@
 
 python3 tools/ue3 tree <package> <Class.Function> [statement index]
 """
-import struct
-
 from . import upk
 
 

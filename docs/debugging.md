@@ -497,3 +497,6 @@ is 25 MB (3840x2160x3 as PPM): when scripting many runs, convert each dump to a 
 
 `SARPBC_RENDER_SCALE_CYCLE=<seconds>` steps the render scale through 100/150/50/200/75/300 % every <seconds> (a stress
 test of the live render scale, see graphics-menu.md "Render scale").
+
+`SARPBC_UNLOCK_CYCLE=<seconds>` toggles the Frame Rate setting every <seconds> (logs `[gfx] test: Frame Rate -> ...`; the
+matching `[live] MaxSmoothedFrameRate ... <-` lines come from src/overrides/live_engine.cpp; docs/frame-pacing.md).

@@ -5,13 +5,16 @@ work session. Newest log entry first. Use absolute dates.
 
 ## Resume here (updated 2026-10-22)
 
-**Graphics menu and options (user, 2026-10-22; T065, T064, T062 done, T063 partly):** the game's Options screen
-has a native-looking **Graphics** page (Resolution = window size, VSync moved here from System, Frame Rate
-unlocked, FPS Counter). Built by patching the menu scripts in the player's own `TAGAME.XXX` through an overlay
-(`tools/graphics_menu_patch.py`, `tools/ue3/`, `PS3_VFS_OVERLAY`, patch 0077); `docs/graphics-menu.md` has the
-package format, the bridge and every address. Unlocked fps: arena ~58 -> ~85-90 (docs/frame-pacing.md). FPS
-overlay: top left, F3 (docs/debugging.md). **T063 done (render scale, 50-300 %, backend patch 0081); game speed unlocked verified against the match clock.** **Open:** more rows (anisotropic
-filtering, dod3-reuse "Port next" 10), changing the render scale without a restart.
+**Graphics menu and options (user, 2026-10-22; T062-T065 done):** the Options screen has native-looking **Graphics**
+(Resolution = window size, Render Scale 50-300 %, Fullscreen, VSync, Frame Rate, FPS Counter) and **Picture**
+(Texture Quality, Texture Filtering, Brightness) pages, and Skip Intro on System. **Every row applies at once, no
+restart** (user's standing rule, docs/graphics-menu.md "Convention: settings are live"); Skip Intro is the one
+that can only act at the next launch. Built by patching the menu scripts in the player's own `TAGAME.XXX` through an
+overlay (`tools/graphics_menu_patch.py`, `tools/ue3/`, `PS3_VFS_OVERLAY`, patch 0077); `docs/graphics-menu.md` has the
+package format, the bridge and every address. Backend patches 0078-0084; the engine's own native values (brightness,
+frame-rate cap) are written into the running game by `src/overrides/live_engine.cpp`. Unlocked fps: arena ~58 ->
+~85-90, game speed verified against the match clock (docs/frame-pacing.md). Ideas not yet done:
+docs/enhancements.md (safe area, language row, frame-cap choices, FXAA).
 
 **Performance (user, 2026-10-22: "focus on performance"; T060, patches 0074/0075 + `src/main.cpp`):**
 the arena went from 38-40 to **55-60 guest fps** (the 60 Hz clock), menus 55-60. Three things
@@ -159,6 +162,14 @@ match with input over time, arena audio and frame-rate measurement.
   POSIX boot scaffold gets this UE3 title to the menus on Linux.
 
 ## Log
+
+### 2026-10-22: settings go live; project audit (claude)
+
+Frame Rate applies instantly (the cap is written into the running game, `live_engine.cpp`); every settings row is live.
+Audit: pyflakes now also covers `tools/ue3/` (unused imports/variables and two dead helpers removed), stale tracked
+files removed (`specs/IMPACT_LATEST.md`, `patches/experimental/`: every hunk had landed or been dropped), stale
+comments and this file's top section brought up to date. Not done: the idle agent worktrees under `.worktrees/`
+(4.1 GB, all merged and clean) were left for the user (they are other agents' directories).
 
 ### 2026-10-22: draw-engine CPU: vertex cache, geometry ids (T061, claude)
 

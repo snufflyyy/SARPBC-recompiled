@@ -366,8 +366,8 @@ static DWORD WINAPI frame_clock(LPVOID)
         const unsigned long long now_x3 = now_us() * 3ull;
         /* T062: unlocked (Options > Graphics > Frame Rate, SARPBC_UNLOCK_FPS=1) the vblank ticks
          * at 1 kHz instead of 60 Hz, so a flip completes as soon as its frame is drained and the
-         * guest is no longer held to 16.7 ms. UE3's own limit is lifted in the engine INI by the
-         * overlay (tools/graphics_menu_patch.py), which needs a restart. */
+         * guest is no longer held to 16.7 ms. UE3's own limit (MaxSmoothedFrameRate) is lifted in
+         * the running game by src/overrides/live_engine.cpp. */
         /* T063: Options > Graphics > Resolution is the window's size: the frame is scaled to it */
         const int ws = sarpbc_gfx::settings().window_size.load(std::memory_order_relaxed);
         if (ws != window_size_applied) {
@@ -393,8 +393,7 @@ static DWORD WINAPI frame_clock(LPVOID)
             rsx_vulkan_backend_set_texture_filtering(flt.trilinear, flt.anisotropy, sarpbc_gfx::kTextureLodBias[tex % 16]);
 #endif
         }
-        /* Render Scale row: live. The backend rebuilds its targets with the FIFO walker excluded (this thread
-         * is the one that drives it, so this is between drains). */
+        /* Stress-test hooks (docs/debugging.md): flip a setting on a timer so live changes run under real rendering */
         if (cycle_us && now_us() >= next_cycle_us) {
             static const int steps[] = {2, 3, 0, 4, 1, 5};
             if (next_cycle_us) sarpbc_gfx::settings().render_scale = steps[cycle_step++ % 6];
@@ -408,6 +407,8 @@ static DWORD WINAPI frame_clock(LPVOID)
             }
             next_ucycle_us = now_us() + ucycle_us;
         }
+        /* Render Scale row: live. The backend rebuilds its targets with the FIFO walker excluded (this thread
+         * is the one that drives it, so this is between drains). */
         const int rs = sarpbc_gfx::settings().render_scale.load(std::memory_order_relaxed);
         if (rs != render_scale_applied) {
             render_scale_applied = rs;

@@ -234,6 +234,7 @@ def check_scripts():
             problem(s, "not executable in git (git update-index --chmod=+x)")
     sh = [s for s in scripts if s.endswith(".sh")]
     py = [s for s in scripts if s.endswith(".py")]
+    py += sorted(str(p.relative_to(ROOT)) for p in (ROOT / "tools").glob("*/*.py"))   # tools/ue3 (modules, not scripts)
     if shutil.which("shellcheck"):
         r = subprocess.run(["shellcheck", "-S", "warning", "-f", "gcc", *sh], cwd=ROOT,
                            capture_output=True, text=True)

@@ -10,7 +10,6 @@ inflated before the tables are read. The layouts below were worked out from the
 01.09 cook (docs/graphics-menu.md "Package format"); the chunk stream and the
 fstring reader follow dod3-recomp's tools/ue3/upk.py (MIT).
 """
-import os
 import struct
 import zlib
 

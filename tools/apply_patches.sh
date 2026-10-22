@@ -48,7 +48,7 @@ fi
 want=$( { echo "$PIN"; cat "${patches[@]}" 2>/dev/null; } | sha256sum | cut -d' ' -f1)
 tree=$(git -C "$SUB" rev-parse 'HEAD^{tree}')
 on_branch=$([ "$(git -C "$SUB" branch --show-current)" = sarpbc-patches ] && echo 1 || echo 0)
-if [ $ensure = 1 ] && [ $on_branch = 1 ]; then
+if [ "$ensure" = 1 ] && [ "$on_branch" = 1 ]; then
     read -r have_want have_tree 2>/dev/null < "$STAMP" || have_want='' have_tree=''
     if [ "$have_want" = "$want" ] && [ "$have_tree" = "$tree" ]; then exit 0; fi
 fi
@@ -71,7 +71,7 @@ fi
 result=$(git -C "$scratch" rev-parse HEAD)
 expected=$(git -C "$scratch" rev-parse 'HEAD^{tree}')
 
-if [ $ensure = 1 ] && [ $on_branch = 1 ] && [ "$tree" = "$expected" ]; then
+if [ "$ensure" = 1 ] && [ "$on_branch" = 1 ] && [ "$tree" = "$expected" ]; then
     echo "$want $tree" > "$STAMP"
     exit 0
 fi

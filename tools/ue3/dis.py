@@ -10,7 +10,6 @@ and the loader differ for version 539.
 """
 import os
 import struct
-import sys
 
 from . import upk
 
@@ -60,14 +59,14 @@ class Dis:
         if op == 0x03: return 'state.' + self.obj()
         if op == 0x04: return 'return ' + self.expr()
         if op == 0x05:
-            prop = self.obj(); sz = self.u8()
+            self.obj(); self.u8()
             return 'switch(%s)' % self.expr()
         if op == 0x06: return 'goto 0x%04x' % self.u16()
         if op == 0x07:
             t = self.u16(); return 'if !(%s) goto 0x%04x' % (self.expr(), t)
         if op == 0x08: return 'stop'
         if op == 0x09:
-            line = self.u16(); dbg = self.u8(); return 'assert(%s)' % self.expr()
+            self.u16(); self.u8(); return 'assert(%s)' % self.expr()
         if op == 0x0A:
             t = self.u16()
             if t == 0xFFFF: return 'default: (next 0x%04x)' % t
@@ -146,7 +145,7 @@ class Dis:
                 s += chr(c)
             return 'u' + repr(s)
         if op == 0x35:
-            prop = self.obj(); st = self.obj(); self.u8(); self.u8()
+            prop = self.obj(); self.obj(); self.u8(); self.u8()
             return '%s.%s' % (self.expr(), prop)
         if op == 0x36: return self.expr() + '.Length'
         if op == 0x37:
@@ -162,7 +161,7 @@ class Dis:
         if op == 0x40:
             a = self.expr(); i = self.expr(); n = self.expr(); return '%s.Remove(%s,%s)' % (a, i, n)
         if op == 0x42:
-            loc = self.u8(); o = self.obj(); n = self.name()
+            self.u8(); self.obj(); n = self.name()
             return 'delegate %s(%s)' % (n, ', '.join(self.params()))
         if op == 0x43:
             n = self.name(); self.obj(); return 'delegateprop ' + n

@@ -48,7 +48,7 @@ struct Live {
     bool touched = false;
     int widen = 0, tick = 0;
 
-    // true when the value was changed (written) at least once; `want` is the float's bits
+    // Keeps `want` (a float's bits) in every copy found. `is_default` and never asked to change: do nothing.
     void apply(uint32_t want, bool is_default)
     {
         if (is_default && !touched) return;
@@ -99,8 +99,8 @@ bool cap_check(uint32_t a)
 
 void worker()
 {
-    Live gamma{"DisplayGamma", gamma_check, gamma_first};
-    Live cap{"MaxSmoothedFrameRate", cap_check, cap_first};
+    Live gamma{"DisplayGamma", gamma_check, gamma_first, {}};
+    Live cap{"MaxSmoothedFrameRate", cap_check, cap_first, {}};
     for (;; usleep(500000)) {
         const auto& s = sarpbc_gfx::settings();
         const int bright = s.brightness.load(std::memory_order_relaxed);

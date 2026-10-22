@@ -8,9 +8,10 @@ a.inst('Class.Prop') a.loc('Class.Func.Local') a.default('Class.Prop')
 a.ctx(obj, member[, fld='Class.Prop'])         obj.member  (member: a.inst(..) or a call)
 a.let(lhs, rhs)  a.native('Name', *args)  a.vcall('Name', *args)  a.fcall('Class.Func', *args)
 a.static_call('Class', 'Class.Func', *args)    class'Class'.static.Func(args)
-a.elem(arr, idx)  a.smember('Struct.Field', 'Struct', expr)  a.cast(0x4A, expr)  a.dyncast('Class', expr)
+a.elem(arr, idx)  a.smember('Struct.Field', 'Struct', expr)  a.cast(CAST_STRING_TO_INT, expr)  a.dyncast('Class', expr)
 a.new(cls_path, template)  a.length(arr)  a.cond(c, x, y)  a.ret()
-a.if_(cond, then, else_=None) -> statements    a.text(node) -> disassembly
+a.concat(*parts)  a.if_(cond, then, else_=None) -> (statements, end label: put it on the statement after)
+a.text(node) -> disassembly   a.find(stmts, text) / a.find_sub(node, text)   clone(node)
 """
 import copy
 import itertools
@@ -53,10 +54,6 @@ class Asm:
         if 0 <= v < 256:
             return Node(0x2C, [('u8', v)])
         return Node(0x1D, [('i32', v)])
-
-    def f(self, v):
-        import struct
-        return Node(0x1E, [('i32', struct.unpack('>i', struct.pack('>f', v))[0])])
 
     def nm(self, text):
         return Node(0x21, [('name', (self.pkg.name(text), 0))])
@@ -149,11 +146,6 @@ class Asm:
             else_[0].label = (else_[0].label or []) + [els]
             out += else_
         return out, end
-
-    @staticmethod
-    def land(stmts, end, nxt):
-        """Put the end label of an if_ on the statement that follows it."""
-        nxt.label = (nxt.label or []) + [end]
 
     # -- rendering and cloning ------------------------------------------
     def text(self, node):
