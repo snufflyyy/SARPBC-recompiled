@@ -100,6 +100,18 @@ VFS_DIR=$(resolve "${VFS_DIR:-$ROOT/vfs}")
 [ -d "$VFS_DIR/dev_hdd0" ] || { echo "boot_check: no $VFS_DIR/dev_hdd0" >&2; exit 1; }
 [ "$GDB" = 0 ] || command -v gdb >/dev/null || { echo "boot_check: --gdb needs gdb" >&2; exit 1; }
 
+# Disk guard: a run writes its log, frame dumps (a 3x render scale dump is 25 MB) and a gdb report
+# under analysis/ and captures/. Refuse to start when the disk is nearly full, rather than fill it
+# (SARPBC_MIN_FREE_MB, default 3000; 0 turns the check off).
+MIN_FREE_MB=${SARPBC_MIN_FREE_MB:-3000}
+if [ "$MIN_FREE_MB" != 0 ]; then
+    FREE_MB=$(df -Pm "$ROOT" | awk 'NR==2 {print $4}')
+    if [ -n "$FREE_MB" ] && [ "$FREE_MB" -lt "$MIN_FREE_MB" ]; then
+        echo "boot_check: only ${FREE_MB} MB free under $ROOT (need ${MIN_FREE_MB}; SARPBC_MIN_FREE_MB=0 skips this)" >&2
+        exit 1
+    fi
+fi
+
 # --pad: expand SPEC into sorted "<sec> <mask> <polls> <text>" lines now, so a typo
 # fails before the game starts. Masks are PAD_FILE's (digital2 << 8 | digital1).
 PAD_EVENTS=

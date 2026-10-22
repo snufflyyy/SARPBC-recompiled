@@ -1,0 +1,445 @@
+From 1aaa74da00bf7538478ca43faad1a65ea65e1dba Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Thu, 22 Oct 2026 19:45:27 +0000
+Subject: [PATCH] vulkan: internal render scale
+ (rsx_vulkan_backend_set_render_scale): colour/depth targets >= 320x180
+ allocated scaled, viewport/scissor/transfers/snapshots converted at the
+ boundary, display image = scaled canvas, window opened at its own size (T063)
+
+---
+ libs/video/rsx_vulkan_backend.c | 192 ++++++++++++++++++++++++++------
+ libs/video/rsx_vulkan_backend.h |   5 +
+ 2 files changed, 160 insertions(+), 37 deletions(-)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 395a02e..62f6788 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -159,7 +159,8 @@ typedef struct vk_state {
+     u32              queue_family;
+     VkPhysicalDeviceMemoryProperties memprops;
+ 
+-    u32              width, height;
++    u32              width, height;   /* the display image: the guest's canvas times the render scale */
++    u32              lw, lh;          /* the guest's canvas (what the draw engine speaks)             */
+     vk_image         color;           /* R8G8B8A8_UNORM                 */
+     vk_image         depth;           /* D32_SFLOAT or fallback         */
+     VkFormat         depth_format;
+@@ -2056,6 +2057,7 @@ static void vk_window_drop(const char* why)
+     s_vk.windowed = 0;
+ }
+ 
++static int s_want_win_w, s_want_win_h;   /* the host's window size request (see rsx_vulkan_backend_set_window_size) */
+ static void vk_window_open(const char* title)
+ {
+     if (!vk_env_on("PS3RECOMP_VK_WINDOW")) return;
+@@ -2063,11 +2065,16 @@ static void vk_window_open(const char* title)
+         VK_LOG("window disabled, continuing headless: SDL video init failed: %s\n", SDL_GetError());
+         return;
+     }
++    /* The window opens at the size the host asked for (rsx_vulkan_backend_set_window_size), else the
++     * guest's canvas; the display image behind it may be larger (render scale). */
++    int win_w = __atomic_load_n(&s_want_win_w, __ATOMIC_ACQUIRE), win_h = __atomic_load_n(&s_want_win_h, __ATOMIC_RELAXED);
++    if (!win_w) { win_w = (int)s_vk.lw; win_h = (int)s_vk.lh; }
++    else __atomic_store_n(&s_want_win_w, 0, __ATOMIC_RELAXED);
+     Uint32 flags = SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN;
+     if (vk_env_on("PS3RECOMP_VK_FULLSCREEN")) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+     s_vk.window = SDL_CreateWindow(title && title[0] ? title : "ps3recomp",
+                                    SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+-                                   (int)s_vk.width, (int)s_vk.height, flags);
++                                   win_w, win_h, flags);
+     s_vk.windowed = 1;          /* so vk_window_drop also shuts SDL video down */
+     if (!s_vk.window) {
+         char why[256];
+@@ -2552,7 +2559,9 @@ typedef struct vk_eng_obj {
+     u8       kind;
+     VkFormat fmt;
+     u32      bpp;                    /* bytes per texel, 0 for depth     */
+-    u32      w, h;
++    u32      w, h;                   /* the guest's size (what the engine asks in)   */
++    u32      pw, ph;                 /* COLOR/DEPTH: the image's own size (render scale) */
++    float    sc;                     /* COLOR/DEPTH: pw / w                          */
+     vk_image im;                     /* a VIEW owns only im.view            */
+     u32      block;                  /* bytes per 4x4 block, 0 = not BC     */
+     u32      surface, remap, rsx_fmt;/* VIEW: what it is a view of          */
+@@ -2563,6 +2572,48 @@ typedef struct vk_eng_obj {
+ 
+ static vk_eng_obj s_eobj[VK_ENG_MAX_OBJ];
+ 
++/* ---- render scale ----------------------------------------------------------
++ * rsx_vulkan_backend_set_render_scale(s), before the first surface is made: every colour and depth
++ * target of at least 320x180 guest pixels is allocated s times larger, and the engine goes on
++ * speaking guest pixels: viewports and scissors are scaled when a draw is recorded, transfers into
++ * or out of a scaled target are resampled (nearest) on the CPU, depth snapshots crop the scaled
++ * region. Smaller targets (cube faces, 1x1 reductions) keep their size. */
++static float s_rscale = 1.0f;
++
++void rsx_vulkan_backend_set_render_scale(float scale)
++{
++    if (scale >= 0.25f && scale <= 4.0f) s_rscale = scale;
++}
++
++static u32 vk_sdim(u32 v, float sc)
++{
++    const u32 r = (u32)((float)v * sc + 0.5f);
++    return r ? r : 1u;
++}
++
++/* The scale a guest-sized target gets. */
++static float vk_target_scale(u32 w, u32 h)
++{
++    return (w >= 320u && h >= 180u) ? s_rscale : 1.0f;
++}
++
++/* Nearest-neighbour resample of a tight/strided pixel block into a malloc'd tight one. */
++static u8* vk_resample(const u8* src, u32 sw, u32 sh, size_t src_row, u32 bpp, u32 dw, u32 dh)
++{
++    u8* out = malloc((size_t)dw * dh * bpp);
++    if (!out) return NULL;
++    for (u32 y = 0; y < dh; y++) {
++        u32 sy = (u32)(((float)y + 0.5f) * (float)sh / (float)dh);
++        if (sy >= sh) sy = sh - 1;
++        for (u32 x = 0; x < dw; x++) {
++            u32 sx = (u32)(((float)x + 0.5f) * (float)sw / (float)dw);
++            if (sx >= sw) sx = sw - 1;
++            memcpy(out + ((size_t)y * dw + x) * bpp, src + sy * src_row + (size_t)sx * bpp, bpp);
++        }
++    }
++    return out;
++}
++
+ /* Defined with the E2 pipeline state further down. */
+ static void vk_eng_drop_framebuffers(void);
+ static void vk_eng2_shutdown(void* user);
+@@ -2761,16 +2812,19 @@ static u32 vk_eng_color_target_create(void* user, rsx_be_format fmt, u32 w, u32
+         VK_LOG("engine: colour target format %d %ux%u not supported yet\n", (int)fmt, w, h);
+         return 0;
+     }
++    const float sc = vk_target_scale(w, h);
++    const u32 pw = vk_sdim(w, sc), ph = vk_sdim(h, sc);
++    if (pw > vk_max_dim() || ph > vk_max_dim()) { VK_LOG("engine: %ux%u at render scale %.2f is too large\n", w, h, sc); return 0; }
+     const u32 hd = vk_eng_alloc();
+     if (!hd) return 0;
+     vk_eng_obj* o = &s_eobj[hd];
+-    if (vk_create_image(&o->im, vf, w, h,
++    if (vk_create_image(&o->im, vf, pw, ph,
+                         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                         VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                         VK_IMAGE_ASPECT_COLOR_BIT)) {
+         vk_destroy_image(&o->im); return 0;
+     }
+-    o->kind = VK_ENG_COLOR; o->fmt = vf; o->bpp = bpp; o->w = w; o->h = h;
++    o->kind = VK_ENG_COLOR; o->fmt = vf; o->bpp = bpp; o->w = w; o->h = h; o->pw = pw; o->ph = ph; o->sc = sc;
+     /* UNDEFINED -> GENERAL, then the guest's own bytes when the engine could
+      * resolve them, else transparent black so the contents are defined. */
+     if (vk_begin()) { vk_eng_release(user, hd); return 0; }
+@@ -2779,8 +2833,14 @@ static u32 vk_eng_color_target_create(void* user, rsx_be_format fmt, u32 w, u32
+     VkImageSubresourceRange r = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+     pvkCmdClearColorImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &r);
+     if (vk_submit_and_wait()) { vk_eng_release(user, hd); return 0; }
+-    if (seed && seed_row_bytes)
+-        vk_eng_upload(o->im.img, 0, 0, w, h, bpp, seed, seed_row_bytes);
++    if (seed && seed_row_bytes) {
++        if (pw == w && ph == h) {
++            vk_eng_upload(o->im.img, 0, 0, w, h, bpp, seed, seed_row_bytes);
++        } else {
++            u8* big = vk_resample(seed, w, h, seed_row_bytes, bpp, pw, ph);
++            if (big) { vk_eng_upload(o->im.img, 0, 0, pw, ph, bpp, big, (size_t)pw * bpp); free(big); }
++        }
++    }
+     return hd;
+ }
+ 
+@@ -2788,16 +2848,19 @@ static u32 vk_eng_depth_target_create(void* user, u32 w, u32 h)
+ {
+     (void)user;
+     if (!w || !h || w > vk_max_dim() || h > vk_max_dim()) return 0;
++    const float sc = vk_target_scale(w, h);
++    const u32 pw = vk_sdim(w, sc), ph = vk_sdim(h, sc);
++    if (pw > vk_max_dim() || ph > vk_max_dim()) return 0;
+     const u32 hd = vk_eng_alloc();
+     if (!hd) return 0;
+     vk_eng_obj* o = &s_eobj[hd];
+-    if (vk_create_image(&o->im, s_vk.depth_format, w, h,
++    if (vk_create_image(&o->im, s_vk.depth_format, pw, ph,
+                         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                         s_vk.depth_aspect)) {
+         vk_destroy_image(&o->im); return 0;
+     }
+-    o->kind = VK_ENG_DEPTH; o->fmt = s_vk.depth_format; o->w = w; o->h = h;
++    o->kind = VK_ENG_DEPTH; o->fmt = s_vk.depth_format; o->w = w; o->h = h; o->pw = pw; o->ph = ph; o->sc = sc;
+     /* Far plane, for the reason the display depth starts there. */
+     if (vk_begin()) { vk_eng_release(user, hd); return 0; }
+     vk_barrier_image(o->im.img, s_vk.depth_aspect, VK_IMAGE_LAYOUT_UNDEFINED);
+@@ -2926,13 +2989,13 @@ static void vk_eng_present(void* user, u32 surface)
+             vk_barrier_image_on(cb, s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+             VkImageBlit blit = {
+                 .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+-                .srcOffsets = { { 0, 0, 0 }, { (int32_t)o->w, (int32_t)o->h, 1 } },
++                .srcOffsets = { { 0, 0, 0 }, { (int32_t)o->pw, (int32_t)o->ph, 1 } },
+                 .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+                 .dstOffsets = { { 0, 0, 0 }, { (int32_t)s_vk.width, (int32_t)s_vk.height, 1 } },
+             };
+             pvkCmdBlitImage(cb, o->im.img, VK_IMAGE_LAYOUT_GENERAL,
+                             s_vk.color.img, VK_IMAGE_LAYOUT_GENERAL, 1, &blit,
+-                            (o->w == s_vk.width && o->h == s_vk.height) ? VK_FILTER_NEAREST
++                            (o->pw == s_vk.width && o->ph == s_vk.height) ? VK_FILTER_NEAREST
+                                                                         : VK_FILTER_LINEAR);
+         }
+         vk_present_record_end(cb);
+@@ -2951,7 +3014,21 @@ static void vk_eng_color_target_write(void* user, u32 surface, u32 x, u32 y,
+     vk_eng_obj* o = vk_eng_get(surface, VK_ENG_COLOR);
+     if (!o || o->fmt != VK_FORMAT_R8G8B8A8_UNORM) return;   /* rows are R,G,B,A */
+     if (!rows || !w || !h || x + w > o->w || y + h > o->h) return;
+-    vk_eng_upload_region(o->im.img, 0, 0, x, y, w, h, (size_t)w * o->bpp, h, rows, row_bytes);
++    if (o->sc == 1.0f) {
++        vk_eng_upload_region(o->im.img, 0, 0, x, y, w, h, (size_t)w * o->bpp, h, rows, row_bytes);
++        return;
++    }
++    /* a scaled target: the rectangle covers [x*sc, (x+w)*sc) on the image; replicate the pixels */
++    const u32 dx0 = x ? vk_sdim(x, o->sc) : 0, dy0 = y ? vk_sdim(y, o->sc) : 0;
++    u32 dx1 = vk_sdim(x + w, o->sc), dy1 = vk_sdim(y + h, o->sc);
++    if (dx1 > o->pw) dx1 = o->pw;
++    if (dy1 > o->ph) dy1 = o->ph;
++    if (dx1 <= dx0 || dy1 <= dy0) return;
++    u8* big = vk_resample(rows, w, h, row_bytes, o->bpp, dx1 - dx0, dy1 - dy0);
++    if (!big) return;
++    vk_eng_upload_region(o->im.img, 0, 0, dx0, dy0, dx1 - dx0, dy1 - dy0, (size_t)(dx1 - dx0) * o->bpp,
++                         dy1 - dy0, big, (size_t)(dx1 - dx0) * o->bpp);
++    free(big);
+ }
+ 
+ static void vk_eng_readback(void* user, u32 surface, u32 x, u32 y, u32 w, u32 h,
+@@ -2960,16 +3037,23 @@ static void vk_eng_readback(void* user, u32 surface, u32 x, u32 y, u32 w, u32 h,
+     (void)user;
+     vk_eng_obj* o = vk_eng_get(surface, VK_ENG_COLOR);
+     if (!o || !out || !out_pitch || !w || !h || x + w > o->w || y + h > o->h) return;
+-    const size_t tight = (size_t)w * o->bpp;
++    /* a scaled target: read the image rectangle that covers the guest's one, then pick one
++     * sample per guest pixel */
++    const u32 ix = o->sc == 1.0f ? x : (x ? vk_sdim(x, o->sc) : 0), iy = o->sc == 1.0f ? y : (y ? vk_sdim(y, o->sc) : 0);
++    u32 iw = o->sc == 1.0f ? w : vk_sdim(x + w, o->sc) - ix, ih = o->sc == 1.0f ? h : vk_sdim(y + h, o->sc) - iy;
++    if (ix + iw > o->pw) iw = o->pw - ix;
++    if (iy + ih > o->ph) ih = o->ph - iy;
++    if (!iw || !ih) return;
++    const size_t tight = (size_t)iw * o->bpp;
+     vk_buffer st = {0};
+-    if (vk_create_host_buffer(&st, (VkDeviceSize)tight * h, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
++    if (vk_create_host_buffer(&st, (VkDeviceSize)tight * ih, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+         vk_destroy_buffer(&st); return;
+     }
+     if (!vk_begin()) {
+         vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+         VkBufferImageCopy region = {
+             .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+-            .imageOffset = { (int32_t)x, (int32_t)y, 0 }, .imageExtent = { w, h, 1 },
++            .imageOffset = { (int32_t)ix, (int32_t)iy, 0 }, .imageExtent = { iw, ih, 1 },
+         };
+         pvkCmdCopyImageToBuffer(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, st.buf, 1, &region);
+         VkBufferMemoryBarrier hb = {
+@@ -2982,8 +3066,17 @@ static void vk_eng_readback(void* user, u32 surface, u32 x, u32 y, u32 w, u32 h,
+                               0, 0, NULL, 1, &hb, 0, NULL);
+         if (!vk_submit_and_wait()) {
+             vk_invalidate(&st);
+-            for (u32 row = 0; row < h; row++)
+-                memcpy((u8*)out + (size_t)row * out_pitch, (const u8*)st.ptr + (size_t)row * tight, tight);
++            if (iw == w && ih == h) {
++                for (u32 row = 0; row < h; row++)
++                    memcpy((u8*)out + (size_t)row * out_pitch, (const u8*)st.ptr + (size_t)row * tight, tight);
++            } else {
++                u8* small = vk_resample((const u8*)st.ptr, iw, ih, tight, o->bpp, w, h);
++                if (small) {
++                    for (u32 row = 0; row < h; row++)
++                        memcpy((u8*)out + (size_t)row * out_pitch, small + (size_t)row * w * o->bpp, (size_t)w * o->bpp);
++                    free(small);
++                }
++            }
+         }
+     }
+     vk_destroy_buffer(&st);
+@@ -3125,13 +3218,13 @@ static u32 vk_eng_color_snapshot(void* user, u32 surface)
+     vk_eng_obj* o = &s_eobj[hd];
+     int reused = 0;
+     for (u32 i = 0; i < s_snap_pool_n; i++)
+-        if (s_snap_pool[i].fmt == t->fmt && s_snap_pool[i].w == t->w && s_snap_pool[i].h == t->h) {
++        if (s_snap_pool[i].fmt == t->fmt && s_snap_pool[i].w == t->pw && s_snap_pool[i].h == t->ph) {
+             o->im = s_snap_pool[i].im;
+             s_snap_pool[i] = s_snap_pool[--s_snap_pool_n];
+             reused = 1;
+             break;
+         }
+-    if (!reused && vk_create_image(&o->im, t->fmt, t->w, t->h,
++    if (!reused && vk_create_image(&o->im, t->fmt, t->pw, t->ph,
+                                    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                    VK_IMAGE_ASPECT_COLOR_BIT)) {
+         vk_destroy_image(&o->im);
+@@ -3139,7 +3232,7 @@ static u32 vk_eng_color_snapshot(void* user, u32 surface)
+         return 0;
+     }
+     o->kind = VK_ENG_COLOR; o->snapshot = 1;
+-    o->fmt = t->fmt; o->bpp = t->bpp; o->w = t->w; o->h = t->h;
++    o->fmt = t->fmt; o->bpp = t->bpp; o->w = t->pw; o->h = t->ph; o->pw = t->pw; o->ph = t->ph; o->sc = 1.0f;
+     if (vk_batch_begin_cmds()) { vk_eng_release(user, hd); return 0; }
+     vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT,
+                      reused ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED);
+@@ -3147,7 +3240,7 @@ static u32 vk_eng_color_snapshot(void* user, u32 surface)
+     VkImageCopy c = {
+         .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+         .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+-        .extent = { t->w, t->h, 1 },
++        .extent = { t->pw, t->ph, 1 },
+     };
+     pvkCmdCopyImage(s_vk.cmd, t->im.img, VK_IMAGE_LAYOUT_GENERAL,
+                     o->im.img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+@@ -3183,6 +3276,11 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
+     if (w > z->w) w = z->w;
+     if (h > z->h) h = z->h;
+     if (!w || !h) return 0;
++    if (z->sc != 1.0f) {                    /* the crop covers the guest's w x h of the scaled image */
++        w = vk_sdim(w, z->sc); h = vk_sdim(h, z->sc);
++        if (w > z->pw) w = z->pw;
++        if (h > z->ph) h = z->ph;
++    }
+ 
+     u32 snap = z->surface;
+     int fresh = 0;
+@@ -3198,7 +3296,7 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
+                             VK_IMAGE_ASPECT_COLOR_BIT)) {
+             vk_destroy_image(&t->im); memset(t, 0, sizeof *t); return 0;
+         }
+-        t->kind = VK_ENG_TEXTURE; t->fmt = VK_FORMAT_R32_SFLOAT; t->bpp = 4; t->w = w; t->h = h;
++        t->kind = VK_ENG_TEXTURE; t->fmt = VK_FORMAT_R32_SFLOAT; t->bpp = 4; t->w = w; t->h = h; t->pw = w; t->ph = h; t->sc = 1.0f;
+         z = vk_eng_get(depth, VK_ENG_DEPTH);          /* same slot; reload for clarity */
+         z->surface = snap;
+         fresh = 1;
+@@ -3251,8 +3349,14 @@ static int vk_eng_depth_readback(void* user, u32 depth, u32 x, u32 y, u32 w, u32
+         out_pitch < w * 4u || (s_vk.depth_format != VK_FORMAT_D32_SFLOAT &&
+                                   s_vk.depth_format != VK_FORMAT_D32_SFLOAT_S8_UINT))
+         return -1;
++    /* a scaled target: read the covering image rectangle, one sample per guest pixel */
++    const u32 ix = z->sc == 1.0f ? x : (x ? vk_sdim(x, z->sc) : 0), iy = z->sc == 1.0f ? y : (y ? vk_sdim(y, z->sc) : 0);
++    u32 iw = z->sc == 1.0f ? w : vk_sdim(x + w, z->sc) - ix, ih = z->sc == 1.0f ? h : vk_sdim(y + h, z->sc) - iy;
++    if (ix + iw > z->pw) iw = z->pw - ix;
++    if (iy + ih > z->ph) ih = z->ph - iy;
++    if (!iw || !ih) return -1;
+     vk_buffer st = {0};
+-    if (vk_create_host_buffer(&st, (VkDeviceSize)w * h * 4u, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
++    if (vk_create_host_buffer(&st, (VkDeviceSize)iw * ih * 4u, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+         vk_destroy_buffer(&st); return -1;
+     }
+     int rc = vk_begin();
+@@ -3260,7 +3364,7 @@ static int vk_eng_depth_readback(void* user, u32 depth, u32 x, u32 y, u32 w, u32
+         vk_barrier_image(z->im.img, s_vk.depth_aspect, VK_IMAGE_LAYOUT_GENERAL);
+         VkBufferImageCopy region = {
+             .imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 },
+-            .imageOffset = { (int32_t)x, (int32_t)y, 0 }, .imageExtent = { w, h, 1 },
++            .imageOffset = { (int32_t)ix, (int32_t)iy, 0 }, .imageExtent = { iw, ih, 1 },
+         };
+         pvkCmdCopyImageToBuffer(s_vk.cmd, z->im.img, VK_IMAGE_LAYOUT_GENERAL, st.buf, 1, &region);
+         VkBufferMemoryBarrier hb = {
+@@ -3274,9 +3378,18 @@ static int vk_eng_depth_readback(void* user, u32 depth, u32 x, u32 y, u32 w, u32
+         rc = vk_submit_and_wait();
+         if (!rc) {
+             vk_invalidate(&st);
+-            for (u32 row = 0; row < h; row++)
+-                memcpy((u8*)out + (size_t)row * out_pitch,
+-                       (const u8*)st.ptr + (size_t)row * w * 4u, (size_t)w * 4u);
++            if (iw == w && ih == h) {
++                for (u32 row = 0; row < h; row++)
++                    memcpy((u8*)out + (size_t)row * out_pitch,
++                           (const u8*)st.ptr + (size_t)row * w * 4u, (size_t)w * 4u);
++            } else {
++                u8* small = vk_resample((const u8*)st.ptr, iw, ih, (size_t)iw * 4u, 4u, w, h);
++                if (small) {
++                    for (u32 row = 0; row < h; row++)
++                        memcpy((u8*)out + (size_t)row * out_pitch, small + (size_t)row * w * 4u, (size_t)w * 4u);
++                    free(small);
++                } else rc = -1;
++            }
+         }
+     }
+     vk_destroy_buffer(&st);
+@@ -4192,9 +4305,10 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+         if (!(s_e2.warned & 32u)) { VK_LOG("engine: draw into colour format %d with a pipeline built for %d skipped\n", (int)rt0->fmt, (int)P->rt_fmt); s_e2.warned |= 32u; }
+         return;
+     }
+-    const u32 w = rt0->w, h = rt0->h;
++    const u32 w = rt0->pw, h = rt0->ph;
++    const float rsc = rt0->sc;                /* guest pixels -> this target's pixels */
+     vk_eng_obj* zo = vk_eng_get(s_eng_bound.depth, VK_ENG_DEPTH);
+-    VkImageView dview = (zo && zo->w >= w && zo->h >= h) ? zo->im.view : vk_eng_scratch_depth(w, h);
++    VkImageView dview = (zo && zo->pw >= w && zo->ph >= h) ? zo->im.view : vk_eng_scratch_depth(w, h);
+     if (!dview) return;
+     const u32 dkey = (zo && dview == zo->im.view) ? s_eng_bound.depth : 0xFFFFFFFFu;
+ 
+@@ -4340,12 +4454,13 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+     pvkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+     VkViewport vp = { 0.0f, 0.0f, (float)w, (float)h, 0.0f, 1.0f };
+     if (s_e2.have_vp && s_e2.vp[2] > 0.0f && s_e2.vp[3] > 0.0f) {
+-        vp.x = s_e2.vp[0]; vp.y = s_e2.vp[1]; vp.width = s_e2.vp[2]; vp.height = s_e2.vp[3];
++        vp.x = s_e2.vp[0] * rsc; vp.y = s_e2.vp[1] * rsc; vp.width = s_e2.vp[2] * rsc; vp.height = s_e2.vp[3] * rsc;
+     }
+     VkRect2D sc = { { 0, 0 }, { w, h } };
+     if (s_e2.have_sc) {                       /* clamped: Vulkan rejects negative or over-size */
+-        u32 x0 = s_e2.sc[0] < w ? s_e2.sc[0] : w, y0 = s_e2.sc[1] < h ? s_e2.sc[1] : h;
+-        u32 x1 = s_e2.sc[0] + s_e2.sc[2], y1 = s_e2.sc[1] + s_e2.sc[3];
++        const u32 sx = (u32)((float)s_e2.sc[0] * rsc + 0.5f), sy = (u32)((float)s_e2.sc[1] * rsc + 0.5f);
++        u32 x0 = sx < w ? sx : w, y0 = sy < h ? sy : h;
++        u32 x1 = (u32)((float)(s_e2.sc[0] + s_e2.sc[2]) * rsc + 0.5f), y1 = (u32)((float)(s_e2.sc[1] + s_e2.sc[3]) * rsc + 0.5f);
+         if (x1 > w) x1 = w;
+         if (y1 > h) y1 = h;
+         sc.offset.x = (int32_t)x0; sc.offset.y = (int32_t)y0;
+@@ -4443,8 +4558,13 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+ {
+     pthread_mutex_init(&s_vk.queue_mu, NULL);
+     pthread_mutex_init(&s_vk.present_mu, NULL);
+-    s_vk.width  = width  ? width  : 1280;
+-    s_vk.height = height ? height : 720;
++    s_vk.lw = width  ? width  : 1280;
++    s_vk.lh = height ? height : 720;
++    {   /* the display image holds the scaled canvas (rsx_vulkan_backend_set_render_scale) */
++        const float sc = vk_target_scale(s_vk.lw, s_vk.lh);
++        s_vk.width = vk_sdim(s_vk.lw, sc);
++        s_vk.height = vk_sdim(s_vk.lh, sc);
++    }
+     s_vk.dump_path = getenv("PS3RECOMP_VK_DUMP");
+     /* Writing a full frame to disk on every present costs more than the
+      * present itself and slows a title enough to change what it does; a
+@@ -4605,7 +4725,7 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
+      * Either way PS3RECOMP_RSX_ENGINE=dispatch|vtable overrides. */
+     rsx_draw_engine_set_backend(&s_vk_engine_backend);
+     rsx_draw_engine_set_default(s_g.on ? 1 : 0);
+-    if (rsx_draw_engine_enabled() && rsx_draw_engine_init(s_vk.width, s_vk.height) == 0)
++    if (rsx_draw_engine_enabled() && rsx_draw_engine_init(s_vk.lw, s_vk.lh) == 0)
+         s_vk.eng_active = 1;
+     else
+         rsx_set_backend(&s_vulkan_backend);
+@@ -4669,8 +4789,6 @@ void rsx_vulkan_backend_shutdown(void)
+ 
+ /* The window's size is the host's to change (any thread asks, the thread that pumps events does it:
+  * SDL wants window calls there). The swapchain follows on the next present (out-of-date / suboptimal). */
+-static int s_want_win_w, s_want_win_h;
+-
+ void rsx_vulkan_backend_set_window_size(int w, int h)
+ {
+     if (w < 16 || h < 16 || w > 16384 || h > 16384) return;
+diff --git a/libs/video/rsx_vulkan_backend.h b/libs/video/rsx_vulkan_backend.h
+index e70812c..623be42 100644
+--- a/libs/video/rsx_vulkan_backend.h
++++ b/libs/video/rsx_vulkan_backend.h
+@@ -110,6 +110,11 @@ void rsx_vulkan_backend_set_overlay_text(const char* text);
+  * present (the swapchain is recreated); no effect headless. Safe from any thread. */
+ void rsx_vulkan_backend_set_present_unlocked(int unlocked);
+ 
++/* Internal render scale (T063): call before rsx_vulkan_backend_init. Every colour and depth target
++ * of at least 320x180 guest pixels is made `scale` times larger (0.25-4); the draw engine keeps
++ * speaking guest pixels, the display image and the window blit follow. 1 = off. */
++void rsx_vulkan_backend_set_render_scale(float scale);
++
+ /* Resize the window (windowed runs; the frame is scaled to it by the present's blit). Takes effect
+  * the next time the event pump runs; any thread may ask. */
+ void rsx_vulkan_backend_set_window_size(int w, int h);
+-- 
+2.47.3
+

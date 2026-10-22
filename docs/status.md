@@ -10,8 +10,8 @@ has a native-looking **Graphics** page (Resolution = window size, VSync moved he
 unlocked, FPS Counter). Built by patching the menu scripts in the player's own `TAGAME.XXX` through an overlay
 (`tools/graphics_menu_patch.py`, `tools/ue3/`, `PS3_VFS_OVERLAY`, patch 0077); `docs/graphics-menu.md` has the
 package format, the bridge and every address. Unlocked fps: arena ~58 -> ~85-90 (docs/frame-pacing.md). FPS
-overlay: top left, F3 (docs/debugging.md). **Open:** T063's internal render scale (analysis in graphics-menu.md),
-game speed against a wall clock while unlocked, more rows (anisotropic filtering, dod3-reuse "Port next" 10).
+overlay: top left, F3 (docs/debugging.md). **T063 done (render scale, 50-300 %, backend patch 0081); game speed unlocked verified against the match clock.** **Open:** more rows (anisotropic
+filtering, dod3-reuse "Port next" 10), changing the render scale without a restart.
 
 **Performance (user, 2026-10-22: "focus on performance"; T060, patches 0074/0075 + `src/main.cpp`):**
 the arena went from 38-40 to **55-60 guest fps** (the 60 Hz clock), menus 55-60. Three things

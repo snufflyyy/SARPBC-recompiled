@@ -135,13 +135,27 @@ Menu done and verified by pad-scripted boots (Options lists System/Graphics/Prof
 popups work, choices persist, VSync works, System has six rows). Tools: `tools/ue3/` (upk, script, dis, props,
 funcedit, asm, tree, pkgwrite, coalesced).
 
-## Render scale (T063, not done)
+## Render scale (T063, done 2026-10-22)
 
-Window/output size is done (Resolution row, `SARPBC_WINDOW_SIZE=WxH`, live). An **internal render scale**
-is not: tried the engine's own `ScreenPercentage=150` in `PS3-TAEngine.ini` (via the overlay): the game runs
-but the RSX surfaces stay `1280x720` (the PS3 build ignores it), so it does nothing. A real scale has to be
-done in the draw engine: every guest surface's host image, viewport, scissor, clear, copy (NV0039) and the
-shadow snapshot crop (0064) scaled, and **the screen-space constants the game feeds its post effects
-(1280x720) no longer match WPOS**, so fog/depth/post passes would break unless the fragment programs'
-resolution inputs are scaled too. Left open in T063 with this analysis; the Render Scale row was taken out
-of the page rather than shown dead.
+Options > Graphics > Render Scale (50/75/100/150/200/300 %, applies at the next start; `SARPBC_RENDER_SCALE=<percent>`).
+The engine's own `ScreenPercentage` does nothing here (the PS3 build ignores it: surfaces stay 1280x720), so the
+scale is done in the Vulkan backend (patch 0081, `rsx_vulkan_backend_set_render_scale`):
+
+- Every colour and depth target of at least 320x180 guest pixels is allocated `scale` times larger; smaller ones
+  (cube faces, 1x1 reductions) keep their size. Each target object keeps its guest size (`w`, `h`, what the draw
+  engine speaks) and its image size (`pw`, `ph`, `sc`).
+- The boundary converts: viewport and scissor are scaled when a draw is recorded (the engine always sets the
+  full surface, the guest's own viewport is a shader epilogue in guest pixels, so shaders needed no change);
+  guest-memory transfers into a scaled target (seed, 2D writes) and readbacks (coherence, depth) are resampled
+  nearest on the CPU; depth snapshots (shadow maps) crop the scaled rectangle; feedback snapshots copy the
+  image size; the framebuffer and scratch depth use the image size.
+- The display image (`s_vk.width/height`) is the scaled canvas, so frame dumps and the window blit use the full
+  render; `s_vk.lw/lh` stay the guest's 1280x720 for the engine. The window opens at the Resolution row's size
+  and is independent of the scale (the present blit scales to it, so a 200% render in a 1080p window is a
+  supersampled 1080p picture).
+- Verified (arena, menus, loading screens): 100% unchanged, 50% = 640x360, 150% = 1920x1080, 200% = 2560x1440,
+  300% = 3840x2160; shadows, glow, HUD and post effects match 100% at the same moment, the HUD and text are sharp.
+  Guest fps in the arena at 300%: ~23 (the GPU idles at P8/405 MHz here); 100-150% cost little.
+- Not done: changing it at run time (surfaces are cached by the engine), and the screen-space constants the game
+  feeds some post passes stay in 1280x720 units (nothing visibly wrong was found; look here first if a post
+  effect shows a seam at a scale).

@@ -85,6 +85,7 @@ void     sarpbc_fps_overlay_tick(uint64_t clock_ms, unsigned guest_frames);   /*
 #if defined(PS3RECOMP_RSX_VULKAN)
 extern "C" void rsx_vulkan_backend_set_present_unlocked(int unlocked);       /* T062 */
 extern "C" void rsx_vulkan_backend_set_window_size(int w, int h);              /* T063 */
+extern "C" void rsx_vulkan_backend_set_render_scale(float scale);              /* T063 */
 #endif
 
 /* libs/system/cellGame.c: title id and game type (CATEGORY HG -> HDD) from the
@@ -280,6 +281,12 @@ static DWORD WINAPI frame_clock(LPVOID)
     const char* title = getenv("PS3_TITLE");
     if (!title || !*title) title = "ps3recomp";
 
+#if defined(PS3RECOMP_RSX_VULKAN)
+    /* T063: the Graphics page's render scale (internal resolution, applied at start) and the window's size */
+    rsx_vulkan_backend_set_render_scale(sarpbc_gfx::kRenderScalePercent[sarpbc_gfx::settings().render_scale.load()] / 100.0f);
+    rsx_vulkan_backend_set_window_size(sarpbc_gfx::kWindowSizes[sarpbc_gfx::settings().window_size.load()].w,
+                                       sarpbc_gfx::kWindowSizes[sarpbc_gfx::settings().window_size.load()].h);
+#endif
     int rsx_ok = (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, title) == 0);
     fprintf(stderr, "[rsx] %s backend init %s\n", RSX_BACKEND_NAME,
             rsx_ok ? "OK -- window open" : "FAILED");

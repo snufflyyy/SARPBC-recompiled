@@ -96,5 +96,8 @@ Measured (01.09, RTX 2070 SUPER at P8, `boot_check --scenario arena`, `[frame-st
 present per frame). Game speed: UE3 advances by real delta time and the INI's smoothing clamp (22-1000 fps)
 no longer slows it, so it is not fast-forwarded. In a window the present mode becomes MAILBOX (else
 IMMEDIATE) instead of FIFO (patch 0079, `rsx_vulkan_backend_set_present_unlocked`; the swapchain is
-recreated when the setting changes, checked under Xvfb) so the display refresh does not cap it either; **not measured against a wall clock** (no in-game
-timer reachable from the arena scenario): check with the match clock when a real match is played.
+recreated when the setting changes, checked under Xvfb) so the display refresh does not cap it either; **measured against a wall clock (2026-10-22):** the arena's match countdown
+went 1:30 -> 0:48 in 42 s locked and 1:30 -> 0:46 in 45 s unlocked (frames captured with timestamps, +-0.5 s), i.e.
+real time in both; and with the throttle held for the whole run the car's path (boost pickup, wall impacts, "One Minute
+Remaining") repeats event for event at the same relative times in both modes, offset by a constant 1 s from load
+timing. Unlocking changes the frame rate only.

@@ -1274,3 +1274,7 @@ taken. Revisit if a later scene shows a hitch in `[pipe-time]`.
 - System dialogs (cellMsgDialog, cellOskDialog for names), cellSysutil callbacks (XMB
   exit, game-exit request) — implemented upstream; watch for an unhandled callback stall.
 - `PS3LOGO.DAT`, `ICON1.PAM` are XMB assets the game never reads.
+
+## Render scale (T063)
+
+Internal resolution is a backend feature, not an engine one: see docs/graphics-menu.md "Render scale" (patch 0081).

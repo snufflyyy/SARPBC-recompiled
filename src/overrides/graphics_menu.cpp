@@ -132,6 +132,13 @@ std::vector<Row> make_rows()
                                 std::to_string(sarpbc_gfx::kWindowSizes[i].h));
         rows.push_back(r);
     }
+    {
+        Row r{"Render Scale", "Render Scale (restart to apply)", {}, [] { return settings().render_scale.load(); },
+              [](int i) { settings().render_scale = i; }};
+        for (int i = 0; i < sarpbc_gfx::kNumRenderScales; i++)
+            r.choices.push_back(std::to_string(sarpbc_gfx::kRenderScalePercent[i]) + "%");
+        rows.push_back(r);
+    }
     rows.push_back({"VSync", "VSync", {"Enabled", "Disabled"}, [] { return 0; }, [](int) {}});
     rows.push_back({"Frame Rate", "Frame Rate (restart to apply)", {"Game default", "Unlocked"},
                     [] { return settings().unlock_fps.load(); }, [](int i) { settings().unlock_fps = i; }});
@@ -147,7 +154,7 @@ const std::vector<Row>& rows()
 }
 
 bool s_gfx_page = false;
-constexpr int kVsyncRow = 1;   // after Resolution (make_rows)
+constexpr int kVsyncRow = 2;   // after Resolution and Render Scale (make_rows)
 
 bool parse_int(const char*& p, int& out)
 {
