@@ -79,17 +79,19 @@ NOT slow the guest: it is bound by the drain, not by vsync). Arena, cap 30: 27.6
 ## Unlocked frame rate (T062, 2026-10-22)
 
 `SARPBC_UNLOCK_FPS=1`, or Options > Graphics > Frame Rate > Unlocked (saved as `unlock_fps = 1` in
-`gamedata/graphics.ini`; the page says "restart to apply"). Two limits were in the way and both are lifted,
-only while the setting is on (default behaviour is byte-identical: no INI in the overlay, a 60 Hz tick):
+`gamedata/graphics.ini`). **Live**: it applies and reverts at once, no restart (user, 2026-10-22). Two limits were in
+the way and both are lifted only while the setting is on (default behaviour is byte-identical: nothing is written
+or scanned, a 60 Hz tick):
 
-1. **UE3's own limit.** `[Engine.GameEngine] MaxSmoothedFrameRate=60` in `PS3-TAEngine.ini` (inside
-   `COALESCED.INI`) is what `GetMaxTickRate` returns with `bSmoothFrameRate=TRUE`: the engine sleeps to hold
-   it and clamps its frame time to it. `tools/graphics_menu_patch.py` writes the overlay's copy of
-   `COALESCED.INI` with 1000 (and its `PS3TOC.TXT` line). This needed no address of `GetMaxTickRate`
-   (still unnamed in the EBOOT) and no hook. The engine reads the INI at start-up: a restart applies it.
-2. **The 60 Hz vblank tick** (`frame_clock` in `src/main.cpp`): flips complete on the tick, which capped
-   the arena at the tick rate once T061 made the drain cheaper. Unlocked, the tick runs at 1 kHz
-   (the setting is read live; the clock re-syncs when it changes).
+1. **UE3's own limit.** `[Engine.GameEngine] MaxSmoothedFrameRate=60` is what `GetMaxTickRate` returns with
+   `bSmoothFrameRate=TRUE`: the engine sleeps to hold it and clamps its frame time to it. It is a native config value
+   the engine reads every frame, so `src/overrides/live_engine.cpp` writes 1000.0f into it in the running game (and 60.0f
+   back): found as `60.0f` directly followed by `22.0f` (MinSmoothedFrameRate) inside a run of zeros, three copies
+   (class default object, instance, subclass; ~0x4049C718 / 0x40628978 / 0x40BA56F8 in one boot, searched for every
+   time, re-searched every few seconds because the objects appear as the engine starts). No address of
+   `GetMaxTickRate` was needed. (Until 2026-10-22 an INI edit in the overlay did this at start.)
+2. **The 60 Hz vblank tick** (`frame_clock` in `src/main.cpp`): flips complete on the tick, which capped the arena at
+   the tick rate once T061 made the drain cheaper. Unlocked, the tick runs at 1 kHz (read live; the clock re-syncs).
 
 Measured (01.09, RTX 2070 SUPER at P8, `boot_check --scenario arena`, `[frame-stats]`): the arena goes from
 ~58 guest fps locked to **~85-90 unlocked** (menus 100-150); the clock thread is the limit again (drain +
@@ -101,3 +103,6 @@ went 1:30 -> 0:48 in 42 s locked and 1:30 -> 0:46 in 45 s unlocked (frames captu
 real time in both; and with the throttle held for the whole run the car's path (boost pickup, wall impacts, "One Minute
 Remaining") repeats event for event at the same relative times in both modes, offset by a constant 1 s from load
 timing. Unlocking changes the frame rate only.
+
+Live toggle check (arena, `SARPBC_UNLOCK_CYCLE=14` flips the setting every 14 s): the 60.0f/1000.0f writes land on all
+three copies each time, guest fps alternates 74-107 unlocked and 47-60 locked (the lower numbers are load phases).

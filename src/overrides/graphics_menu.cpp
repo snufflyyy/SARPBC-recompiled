@@ -144,7 +144,7 @@ std::vector<Row> make_graphics_rows()
     rows.push_back({"Fullscreen", "Fullscreen", {"Off", "On"},
                     [] { return settings().fullscreen.load(); }, [](int i) { settings().fullscreen = i; }});
     rows.push_back({"VSync", "VSync", {"Enabled", "Disabled"}, [] { return 0; }, [](int) {}});
-    rows.push_back({"Frame Rate", "Frame Rate (restart to apply)", {"Game default", "Unlocked"},
+    rows.push_back({"Frame Rate", "Frame Rate", {"Game default", "Unlocked"},
                     [] { return settings().unlock_fps.load(); }, [](int i) { settings().unlock_fps = i; }});
     rows.push_back({"FPS Counter", "FPS Counter", {"Off", "On"},
                     [] { return settings().fps_overlay.load(); }, [](int i) { settings().fps_overlay = i; }});
@@ -272,7 +272,7 @@ void thunk(ppu_context* ctx)
 extern "C" void sarpbc_register_graphics_menu(void)
 {
     sarpbc_gfx::load();
-    sarpbc_gfx::start_live_gamma();
+    sarpbc_gfx::start_live_engine();
     const char* off = getenv("SARPBC_NO_GRAPHICS_MENU");
     if (off && *off && *off != '0') return;
     ppu_register_function(kThunkAddr, thunk);

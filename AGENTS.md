@@ -153,6 +153,8 @@ Details and every flag: [docs/pipeline.md](docs/pipeline.md).
   patch or a tool); `tools/merge_to_main.sh` refuses to merge when it fails. It checks what
   drifts between sessions: paths and patch names in docs, the patch README table, the task
   board's fields, script headers and modes, shellcheck/pyflakes, and that no game data is tracked.
+- **New settings apply live** (user, 2026-10-22): an option added to the Options > Graphics/Picture pages must take effect
+  without a restart wherever a live route exists (see docs/graphics-menu.md); mark a row "(restart to apply)" only when none does.
 - **No subagents.** Don't spawn subagents (Claude Code's Agent tool, workflows, or another
   harness's equivalent) unless the user asks: they used too much usage (user, 2026-10-19). The
   user runs more agents in parallel by starting them, and they coordinate through the board.

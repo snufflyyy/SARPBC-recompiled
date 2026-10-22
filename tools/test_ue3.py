@@ -119,8 +119,8 @@ class EngineIniTest(unittest.TestCase):
         self.assertIsNone(self.patched())
 
     def test_settings_edit_the_ini(self):
-        t = self.patched(SARPBC_UNLOCK_FPS='1', SARPBC_BRIGHTNESS='4')[0][1]
-        self.assertIn('MaxSmoothedFrameRate=1000', t)
+        t = self.patched(SARPBC_BRIGHTNESS='4')[0][1]
+        self.assertIn('MaxSmoothedFrameRate=60', t)   # the frame cap is live now (src/overrides/live_engine.cpp)
         self.assertIn('DisplayGamma=2.800000', t)
         # texture filtering and quality are live in the sampler now: the INI keeps the game's values
         self.assertIn('MaxAnisotropy=4', t)

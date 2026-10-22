@@ -58,8 +58,8 @@ def patch_coalesced(path):
 # Texture filtering and quality are live in the Vulkan sampler and brightness is written into the running
 # game (src/overrides/live_gamma.cpp); the INI value only makes the game *start* at the chosen brightness.
 BRIGHTNESS_GAMMA = ('1.800000', '2.000000', '2.200000', '2.500000', '2.800000')
-DEFAULTS = {'unlock_fps': 0, 'brightness': 2}
-ENV = {'unlock_fps': 'SARPBC_UNLOCK_FPS', 'brightness': 'SARPBC_BRIGHTNESS'}
+DEFAULTS = {'brightness': 2}
+ENV = {'brightness': 'SARPBC_BRIGHTNESS'}
 
 
 def engine_settings():
@@ -80,12 +80,7 @@ def engine_settings():
         if e is not None and e.strip().lstrip('-').isdigit():
             vals[k] = int(e)
     vals['brightness'] = min(max(vals['brightness'], 0), len(BRIGHTNESS_GAMMA) - 1)
-    vals['unlock_fps'] = 1 if vals['unlock_fps'] else 0
     return vals
-
-
-def unlock_fps_wanted():
-    return engine_settings()['unlock_fps'] == 1
 
 
 def engine_ini_wanted():
@@ -94,8 +89,6 @@ def engine_ini_wanted():
 
 def patch_engine_ini(path):
     """Edit PS3-TAEngine.ini, inside COALESCED.INI, for the settings that live there:
-    - unlocked fps (T062): UE3 sleeps to hold [Engine.GameEngine] MaxSmoothedFrameRate (60) and clamps
-      its frame time to it: 1000;
     - brightness: [Engine.Client] DisplayGamma (2.2; lower is darker, tested), the value the game starts with."""
     import re
     cfg = engine_settings()
@@ -103,10 +96,6 @@ def patch_engine_ini(path):
     for e in entries:
         if e[0].rstrip('\0').lower().endswith('\\ps3-taengine.ini'):
             t = e[1]
-            if cfg['unlock_fps']:
-                if 'MaxSmoothedFrameRate=60' not in t:
-                    raise KeyError('MaxSmoothedFrameRate=60')
-                t = t.replace('MaxSmoothedFrameRate=60', 'MaxSmoothedFrameRate=1000')
             if cfg['brightness'] != DEFAULTS['brightness']:
                 t, n = re.subn(r'^DisplayGamma=[\d.]+', 'DisplayGamma=%s' % BRIGHTNESS_GAMMA[cfg['brightness']], t, flags=re.M)
                 if not n:

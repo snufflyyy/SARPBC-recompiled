@@ -33,7 +33,7 @@ constexpr int kNumRenderScales = sizeof kRenderScalePercent / sizeof kRenderScal
 
 // Texture and brightness settings are live. Texture filtering and quality go to the Vulkan sampler
 // (rsx_vulkan_backend_set_texture_filtering: trilinear, anisotropy, mip LOD bias); brightness is the engine's
-// own DisplayGamma, written into the running game (live_gamma.cpp) and, so the game starts with it, into the
+// own DisplayGamma, written into the running game (live_engine.cpp) and, so the game starts with it, into the
 // overlay's INI (tools/graphics_menu_patch.py: keep BRIGHTNESS_GAMMA in step with kBrightnessGamma).
 constexpr const char* kTextureQualityNames[] = {"Low", "Default", "High"};
 constexpr float kTextureLodBias[] = {1.5f, 0.0f, -0.5f};
@@ -44,7 +44,7 @@ constexpr const char* kBrightnessNames[] = {"Darker", "Dark", "Default", "Bright
 constexpr float kBrightnessGamma[] = {1.8f, 2.0f, 2.2f, 2.5f, 2.8f};   // DisplayGamma: lower is darker
 constexpr int kNumTextureQuality = 3, kNumTextureFilter = 4, kNumBrightness = 5;
 
-void start_live_gamma();   // live_gamma.cpp: a worker that keeps the engine's DisplayGamma at the setting
+void start_live_engine();   // live_engine.cpp: a worker that keeps the engine's DisplayGamma and frame-rate cap at the settings
 
 Settings& settings();
 void load();                  // once, before the guest starts

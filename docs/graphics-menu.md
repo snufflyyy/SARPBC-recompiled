@@ -118,7 +118,7 @@ shows no title). The patch uses no new package objects; new names are appended (
 The host side is `src/overrides/graphics_menu.cpp` (the bridge and the row list) and `graphics_settings.{h,cpp}`
 (values, persisted in `gamedata/graphics.ini`, `$SARPBC_GFX_FILE`). Rows today, Graphics page: Resolution (the window's
 size; the frame is scaled to it, patch 0080), Render Scale (T063, live), Fullscreen (live), VSync (the game's
-own), Frame Rate (T062, restart to apply), FPS Counter (T064); Picture page: see the last section; the ones that switch something (T062-T064) read
+own), Frame Rate (T062, live), FPS Counter (T064); Picture page: see the last section; the ones that switch something (T062-T064) read
 `sarpbc_gfx::settings()`.
 
 Script gotchas learned: a call node's name is `parts[0]`, its arguments follow (`parts[1]...`); `if` needs the end
@@ -195,13 +195,14 @@ All three Picture rows are **live, no restart**:
   sharpening of an INI `Trilinear=true` is what these rows now do. The INI `LODBias` is a weak lever (a +1 bias was
   indistinguishable), the sampler bias is not: Low is clearly softer, High/Trilinear 16x crisper.
 - **Brightness** Darker / Dark / Default / Bright / Brighter = `DisplayGamma` 1.8 / 2.0 / 2.2 / 2.5 / 2.8 (lower is
-  darker), written into the running game by `src/overrides/live_gamma.cpp`. `UClient::DisplayGamma` is native only
+  darker), written into the running game by `src/overrides/live_engine.cpp`. `UClient::DisplayGamma` is native only
   (no script reaches it) but the engine reads it every frame. The worker finds the client config by the block
   `35.0f | 2.2f | 0.2f | 0.1f` ([Engine.Client] MinDesiredFrameRate, DisplayGamma, InitialButtonRepeatDelay,
   ButtonRepeatDelay; three copies, all written; seen at 0x40583794 / 0x4063F1E4 / 0x40BA7174 in one boot, searched
   for every time) and rewrites it twice a second while the setting is not the default. Measured in the arena with no
   INI change: luma 71 / 88 / 109 for Darker / Default / Brighter. The overlay's INI still carries the chosen
   brightness so the game starts at it (`patch_engine_ini`, keep `BRIGHTNESS_GAMMA` and `kBrightnessGamma` in step).
+  The frame-rate cap uses the same worker (`live_engine.cpp`, docs/frame-pacing.md).
   The menu backgrounds respond less than the arena (a 1.8 setting moved a menu's luma only ~93 -> 90).
 
 **Skip Intro** is on **Options > System** (not Graphics), as its seventh row (the slot VSync left: same component
@@ -209,3 +210,11 @@ and handlers, whose non-Graphics branch now talks to the host: `intro:get`, `int
 key `[MidGameMenuActor] SkipIntroStr`. `IntroSceneContainer.InitScene` asks the host (`skipintro`) and runs the
 statements the game's own `-nosplash` check runs (`CloseScene(); return`). Measured: Loading -> profile screen at
 4 s instead of ~33 s. `SARPBC_SKIP_INTRO=1` sets it for a run. The System page is back to its seven-row frame.
+
+## Convention: settings are live
+
+Every row applies without a restart (user, 2026-10-22). The routes that worked: backend calls from the frame clock
+(fullscreen, window size, texture filtering/quality, present mode), a rebuild under the GCM lock (render scale),
+writing the engine's native config value into the running game (brightness, frame-rate cap: `live_engine.cpp`).
+**Skip Intro** is the one that cannot be live: the intro plays once at start, so it takes effect on the next launch by
+nature. Add new rows live too; a row says "(restart to apply)" only where no live route exists.
