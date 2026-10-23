@@ -1,0 +1,105 @@
+From 796d7f789dc37e326718653de5d350a59e5186d1 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Fri, 23 Oct 2026 17:14:17 +0000
+Subject: [PATCH] spurs: a job-chain walker waits a moment for the next Run
+ instead of ending its thread (SPURS_JC_LINGER_US)
+
+A title that appends one job per draw and Runs the chain after each walked it 17,000 times a second, 1.1 jobs a walk, and
+every walk started a host thread with a 1 MB stack: the thread start cost far more than the 7 us job. The walker now polls for
+a Run for 1 ms (default; 0 restores the old behaviour) before it ends. Completion is signalled at the quiet point, before the
+wait, and JoinJobChain ends the wait at once.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ libs/spurs/cellSpurs.c | 40 ++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 36 insertions(+), 4 deletions(-)
+
+diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+index 913dc77..7c260f3 100644
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -2293,6 +2293,8 @@ static struct {
+     /* 1 while the chain is parked on a GUARD it gave up waiting for; the
+      * guard's next notify restarts the walk (cellSpursJobGuardNotify). */
+     volatile long parked;
++    /* Threads inside cellSpursJoinJobChain: a lingering walker (jc_linger) ends at once. */
++    volatile long joining;
+ } s_jobchains[MAX_JOBCHAINS];
+ 
+ static s32 jc_start(u64 jc_ea, const char* who);
+@@ -2873,6 +2875,27 @@ static int jc_execute(int slot)
+     return jobs;
+ }
+ 
++/* SPURS_JC_LINGER_US=<us> (default 1000, 0 = off): how long a walker waits for another Run
++ * after its chain went quiet before the host thread ends. Returns 1 when a Run arrived. */
++static int jc_linger(int slot)
++{
++    static long long s_us = -1;
++    if (s_us < 0) { const char* e = getenv("SPURS_JC_LINGER_US"); s_us = e ? atoll(e) : 1000; if (s_us < 0) s_us = 0; }
++    if (!s_us) return 0;
++    LARGE_INTEGER t0, now, f;
++    QueryPerformanceFrequency(&f);
++    QueryPerformanceCounter(&t0);
++    const long long span = s_us * f.QuadPart / 1000000;
++    do {
++        if (InterlockedExchange(&s_jobchains[slot].rerun, 0L)) return 1;
++        if (!s_jobchains[slot].running) return 0;      /* ShutdownJobChain stopped it */
++        if (s_jobchains[slot].joining) return 0;       /* a Join is waiting for this walker to end */
++        Sleep(0);
++        QueryPerformanceCounter(&now);
++    } while (now.QuadPart - t0.QuadPart < span);
++    return 0;
++}
++
+ static DWORD WINAPI jc_thread(LPVOID p)
+ {
+     int slot = (int)(intptr_t)p;
+@@ -2890,6 +2913,17 @@ static DWORD WINAPI jc_thread(LPVOID p)
+     for (;;) {
+         ran = jc_execute(slot);
+         if (InterlockedExchange(&s_jobchains[slot].rerun, 0L)) continue;
++        /* Tell the application the chain is done. Without this the walk finishes
++         * in silence and a thread waiting on the attached queue never runs again.
++         * A walk that only parked on a closed guard did no work: say nothing. This
++         * is said before the walker lingers, so lingering delays nobody. */
++        if (ran >= 0) jc_signal_done(s_jobchains[slot].jc_ea, -1);
++        /* A title that appends one job per draw and Runs the chain after each
++         * (SARPBC's ShaderPatching: ~17,000 Runs a second, 1.1 jobs a walk) used
++         * to start a host thread, a 1 MB stack and all, for every one of them:
++         * the Run's thread start was then the cost of a job, not the job (7 us
++         * against ~60 us of start and wake). Stay for the next Run a moment. */
++        if (jc_linger(slot)) continue;
+         s_jobchains[slot].running = 0;
+         /* A request that landed between the check above and the clear: take
+          * the chain back if nobody else has. */
+@@ -2900,10 +2934,6 @@ static DWORD WINAPI jc_thread(LPVOID p)
+         }
+         break;
+     }
+-    /* Tell the application the chain is done. Without this the walk finishes
+-     * in silence and a thread waiting on the attached queue never runs again.
+-     * A walk that only parked on a closed guard did no work: say nothing. */
+-    if (ran >= 0) jc_signal_done(s_jobchains[slot].jc_ea, -1);
+     return 0;
+ }
+ 
+@@ -3006,6 +3036,7 @@ s32 cellSpursJoinJobChain(u64 jc_ea)
+      * so that frame's data was never written at all. */
+     for (int i = 0; i < MAX_JOBCHAINS; i++) {
+         if (s_jobchains[i].jc_ea != (u32)jc_ea) continue;
++        InterlockedIncrement(&s_jobchains[i].joining);
+         while (s_jobchains[i].running) {
+ #ifdef _WIN32
+             Sleep(0);
+@@ -3013,6 +3044,7 @@ s32 cellSpursJoinJobChain(u64 jc_ea)
+             usleep(0);
+ #endif
+         }
++        InterlockedDecrement(&s_jobchains[i].joining);
+     }
+     return CELL_OK;
+ }
+-- 
+2.47.3
+

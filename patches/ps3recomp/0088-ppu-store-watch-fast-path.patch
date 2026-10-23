@@ -1,0 +1,67 @@
+From e59ec77ab18f468996bdf8c29751acb112651dd3 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Fri, 23 Oct 2026 17:14:23 +0000
+Subject: [PATCH] ppu: unarmed store watches cost two compares per guest store
+
+Every vm_write went through barrier_watch_hit, whose PPU_WVAL / PPU_WWATCH checks ran inline on each store: 21% of a UE3
+title's render thread. The debug watches move to barrier_watch_slow, taken only when PPU_WVAL or PPU_WWATCH is set (read
+on the first store) or g_barrier_sync_watch is armed; the gate is always_inline.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ runtime/ppu/ppu_loader.cpp | 25 ++++++++++++++++++++++++-
+ 1 file changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index c785083..ceed7da 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -1774,7 +1774,7 @@ static void ww_arm_inline_window(uint32_t ww)
+     g_ww_lo = ww & ~15u;
+     g_ww_hi = (ww & ~15u) + len;
+ }
+-static inline void barrier_watch_hit(uint32_t a, uint32_t v, int width, void* ra)
++static void barrier_watch_debug(uint32_t a, uint32_t v, int width, void* ra)
+ {
+     /* PPU_WVAL=<hexvalue>: log every PPU store that WRITES this value, wherever
+      * it lands. PPU_WWATCH answers "who writes this address"; when a bad value is
+@@ -1885,6 +1885,24 @@ static inline void barrier_watch_hit(uint32_t a, uint32_t v, int width, void* ra
+               fflush(stderr);
+           }
+       } }
++}
++
++/* Every guest store passes through barrier_watch_hit, and the two debug watches above are
++ * unarmed in any normal run: with their env checks inline it cost 17% of a UE3 title's render
++ * thread (21% with the 32-bit stores). Unarmed, a store now takes two compares. The first
++ * store reads PPU_WVAL / PPU_WWATCH the way the watches do (nonzero = armed) and runs the
++ * watches for itself, so a watch that is set behaves as it did. */
++static int s_watch_armed = -1;   /* -1 not read yet, 0 neither watch set, 1 a watch is set */
++static void __attribute__((noinline)) barrier_watch_slow(uint32_t a, uint32_t v, int width, void* ra)
++{
++    if (s_watch_armed != 0) {
++        barrier_watch_debug(a, v, width, ra);
++        if (s_watch_armed < 0) {
++            const char* wv = getenv("PPU_WVAL");
++            const char* ww = getenv("PPU_WWATCH");
++            s_watch_armed = ((wv && strtoul(wv, 0, 0)) || (ww && strtoul(ww, 0, 16))) ? 1 : 0;
++        }
++    }
+     uint32_t b = g_barrier_sync_watch;
+     if (!b) return;
+     if (a >= b + 0x40 && a < b + 0xC0) {
+@@ -1894,6 +1912,11 @@ static inline void barrier_watch_hit(uint32_t a, uint32_t v, int width, void* ra
+                     a - b, v, width, ppu_prof_resolve_host(ra));
+     }
+ }
++static inline __attribute__((always_inline)) void barrier_watch_hit(uint32_t a, uint32_t v, int width, void* ra)
++{
++    if (__builtin_expect(s_watch_armed != 0 || g_barrier_sync_watch != 0, 0))
++        barrier_watch_slow(a, v, width, ra);
++}
+ 
+ /* See the note on the forward declaration above ppu_stwcx32. */
+ extern "C" void ppu_ww_note_atomic(uint32_t ea, uint32_t val, int width, void* ra)
+-- 
+2.47.3
+

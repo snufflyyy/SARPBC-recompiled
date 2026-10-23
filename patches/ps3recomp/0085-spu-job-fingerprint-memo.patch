@@ -1,0 +1,109 @@
+From 88e4638e0b7818a0ee527830f04c1b75ed4a6402 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Fri, 23 Oct 2026 17:13:47 +0000
+Subject: [PATCH] spu: memoize the job-image fingerprint (content-verified) on
+ the dispatch paths
+
+The byte-wise FNV-1a over a job binary cost 46 us of a 67 us ShaderPatching job (48,512-byte image, ~14,000 jobs/s).
+spu_workload_fingerprint_image keeps a private copy of up to 16 distinct images of 4 KB or more and compares bytes
+before trusting the stored value, so it answers exactly what the hash does, also when the binary at an address changes.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ runtime/spu/spu_workload.c | 61 ++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 58 insertions(+), 3 deletions(-)
+
+diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
+index 69c2c6b..5fe4f0b 100644
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -201,12 +201,67 @@ size_t spu_elf_image_size(const uint8_t* image, size_t max_avail)
+ 
+ /* ---- dispatch ---------------------------------------------------------- */
+ 
++/* Fingerprint memo for the dispatch paths. A SPURS job chain dispatches the same job binary
++ * over and over (a UE3 title's shader-patching chain: ~14,000 jobs a second, a 48,512-byte
++ * image), and the byte-wise FNV above cost 46 us of a 67 us job: that one chain became the
++ * frame-rate limit. The memo keeps a private copy of each distinct large image it has hashed
++ * and compares bytes (a memcmp, ~2 us for that image) before it trusts the stored value, so it
++ * answers exactly what the hash would, also when the title loads a different job at the same
++ * address. The fingerprint is taken over the private copy, never over the live image, so a
++ * binary being rewritten while it is copied cannot store a value that does not match its bytes.
++ * Slots are never reused (a reader may be comparing one): past SPU_FP_MEMO_SLOTS distinct
++ * images the rest are hashed as before. */
++#define SPU_FP_MEMO_MIN   4096u
++#define SPU_FP_MEMO_SLOTS 16
++typedef struct { uint32_t n; uint64_t fp; uint8_t* copy; } spu_fp_memo;
++static spu_fp_memo s_fp_memo[SPU_FP_MEMO_SLOTS];
++static unsigned    s_fp_memo_count;            /* published slots; release/acquire */
++#ifdef _WIN32
++static SRWLOCK s_fp_memo_lock = SRWLOCK_INIT;
++#else
++static pthread_mutex_t s_fp_memo_lock = PTHREAD_MUTEX_INITIALIZER;
++#endif
++
++static uint64_t spu_workload_fingerprint_image(const uint8_t* image, uint32_t n)
++{
++    if (n < SPU_FP_MEMO_MIN) return spu_workload_fingerprint(image, n);
++    unsigned count = __atomic_load_n(&s_fp_memo_count, __ATOMIC_ACQUIRE);
++    for (unsigned i = 0; i < count; i++)
++        if (s_fp_memo[i].n == n && memcmp(s_fp_memo[i].copy, image, n) == 0)
++            return s_fp_memo[i].fp;
++    if (count >= SPU_FP_MEMO_SLOTS) return spu_workload_fingerprint(image, n);
++
++    uint8_t* copy = (uint8_t*)malloc(n);
++    if (!copy) return spu_workload_fingerprint(image, n);
++    memcpy(copy, image, n);
++    uint64_t fp = spu_workload_fingerprint(copy, n);
++#ifdef _WIN32
++    AcquireSRWLockExclusive(&s_fp_memo_lock);
++#else
++    pthread_mutex_lock(&s_fp_memo_lock);
++#endif
++    unsigned slot = s_fp_memo_count;           /* only writers change it, under the lock */
++    int stored = slot < SPU_FP_MEMO_SLOTS;
++    if (stored) {
++        s_fp_memo[slot].n = n; s_fp_memo[slot].fp = fp; s_fp_memo[slot].copy = copy;
++        __atomic_store_n(&s_fp_memo_count, slot + 1, __ATOMIC_RELEASE);
++    }
++#ifdef _WIN32
++    ReleaseSRWLockExclusive(&s_fp_memo_lock);
++#else
++    pthread_mutex_unlock(&s_fp_memo_lock);
++#endif
++    if (!stored) free(copy);
++    return fp;
++}
++
++
+ int spu_workload_dispatch(const uint8_t* image, uint32_t image_size,
+                           uint32_t args_ea)
+ {
+     if (!image || image_size == 0) return 0;
+ 
+-    uint64_t fp = spu_workload_fingerprint(image, image_size);
++    uint64_t fp = spu_workload_fingerprint_image(image, image_size);
+     spu_lifted_entry_fn fn = NULL;
+     int image_id = 0;
+     for (unsigned i = 0; i < s_registry_count; i++)
+@@ -865,7 +920,7 @@ int spu_workload_dispatch_job(const uint8_t* image, uint32_t image_size,
+ {
+     if (!image || image_size == 0) return 0;
+ 
+-    uint64_t fp = spu_workload_fingerprint(image, image_size);
++    uint64_t fp = spu_workload_fingerprint_image(image, image_size);
+     spu_lifted_entry_fn fn = NULL;
+     int image_id = 0;
+     for (unsigned i = 0; i < s_registry_count; i++)
+@@ -1268,7 +1323,7 @@ int spu_workload_dispatch_task_async(const uint8_t* image, uint32_t image_size,
+ {
+     if (!image || image_size == 0) return 0;
+ 
+-    uint64_t fp = spu_workload_fingerprint(image, image_size);
++    uint64_t fp = spu_workload_fingerprint_image(image, image_size);
+     spu_lifted_entry_fn fn = NULL;
+     int image_id = 0;
+     for (unsigned i = 0; i < s_registry_count; i++)
+-- 
+2.47.3
+

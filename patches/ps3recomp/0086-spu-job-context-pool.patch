@@ -1,0 +1,480 @@
+From 8359c6190b64f4cd89d68a75860ccf6549da3ae2 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Fri, 23 Oct 2026 17:14:09 +0000
+Subject: [PATCH] spu: pooled SPURS job contexts, staged in place; the kept
+ store is copied only once a title polls for it
+
+spu_run_spurs_job built every job in a calloc'd 256 KB buffer, memset a fresh 268,864-byte spu_context (19 us of a 25 us job),
+copied the buffer into it and copied the store out again for sys_spu_thread_read_LS. Now a pooled context is staged
+directly, and a recycled one is cleaned only where an earlier job here could have written (the largest job extent
+so far and the top 4 KB). The store is copied out only after the first poll for it (Tokyo Jungle polls 45k times a run).
+test_spu_job_hotpath covers the recycled store (also for the fingerprint memo of the previous patch).
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ runtime/spu/spurs_job.c                  |  98 ++++++++---
+ runtime/spu/tests/test_spu_job_hotpath.c | 210 +++++++++++++++++++++++
+ tools/test_spu_job_hotpath.py            |  51 ++++++
+ 3 files changed, 337 insertions(+), 22 deletions(-)
+ create mode 100644 runtime/spu/tests/test_spu_job_hotpath.c
+ create mode 100755 tools/test_spu_job_hotpath.py
+
+diff --git a/runtime/spu/spurs_job.c b/runtime/spu/spurs_job.c
+index 49335fe..1ac4e48 100644
+--- a/runtime/spu/spurs_job.c
++++ b/runtime/spu/spurs_job.c
+@@ -39,6 +39,7 @@
+ #include "spu_workload.h"
+ #include "spu_context.h"
+ 
++#include <stddef.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -120,10 +121,15 @@ enum {
+  * resolve a chain handle to it. */
+ static uint8_t  s_job_ls[SPU_LS_SIZE];
+ static int      s_job_ls_valid;
++/* Set by the first poll. Keeping the store costs a 256 KB copy per job, which a title that
++ * never polls (a UE3 title runs ~14,000 jobs a second) should not pay; a title that does poll
++ * has its store from the next job on (Tokyo Jungle polls 45k times a run). */
++static int      s_job_ls_wanted;
+ uint32_t        g_spurs_job_ls_handle;   /* set by the chain walker */
+ 
+ const uint8_t* spurs_job_ls_for_handle(uint32_t handle)
+ {
++    __atomic_store_n(&s_job_ls_wanted, 1, __ATOMIC_RELAXED);
+     if (!s_job_ls_valid || !handle || handle != g_spurs_job_ls_handle) return 0;
+     return s_job_ls;
+ }
+@@ -148,6 +154,51 @@ SPURS_JOB_TLS uint32_t g_spurs_job_mbox, g_spurs_job_mbox_intr;
+ SPURS_JOB_TLS uint32_t g_spurs_job_cmd;
+ SPURS_JOB_TLS int g_spurs_job_mbox_valid;
+ 
++/* Pooled job contexts. A job used to get a fresh spu_context (268,864 bytes) from
++ * spu_context_init, whose memset alone was 19 us of a 25 us job at ~14,000 jobs a second: the
++ * zeroing of a 256 KB local store of which a job uses its own regions only (a UE3 title's
++ * shader-patching job: 59 KB). A pooled context is zeroed once, and a recycled one is cleaned
++ * only where an earlier job here could have written: the extent of the largest job's regions
++ * (dirty_hi) and the top of the store, where the context and the descriptor are parked. A job
++ * that writes outside its own regions leaves that data for the next job, which on hardware it
++ * would have done in its own SPU's store too. */
++typedef struct { spu_context ctx; uint32_t dirty_hi; } job_ctx;
++#define JOB_CTX_POOL 4
++#define JOB_LS_TOP   0x1000u       /* ctx + descriptor + return address live in the top 4 KB */
++static job_ctx* s_job_pool[JOB_CTX_POOL];
++
++static job_ctx* job_ctx_take(void)
++{
++    for (int i = 0; i < JOB_CTX_POOL; i++) {
++        job_ctx* j = __atomic_exchange_n(&s_job_pool[i], (job_ctx*)NULL, __ATOMIC_ACQ_REL);
++        if (!j) continue;
++        spu_context* c = &j->ctx;
++        const size_t ls_off = offsetof(spu_context, ls_store);
++        memset(c, 0, ls_off);                                            /* state before the store */
++        memset(c->ls_store + SPU_LS_SIZE, 0, sizeof *c - ls_off - SPU_LS_SIZE);   /* and after it */
++        c->ls     = c->ls_store;
++        c->status = SPU_STATUS_STOPPED;
++        memset(c->ls_store, 0, j->dirty_hi);
++        memset(c->ls_store + SPU_LS_SIZE - JOB_LS_TOP, 0, JOB_LS_TOP);
++        return j;
++    }
++    job_ctx* j = (job_ctx*)calloc(1, sizeof *j);       /* all zero, the store too */
++    if (j) spu_context_init(&j->ctx, 0);
++    return j;
++}
++
++static void job_ctx_give(job_ctx* j, uint32_t extent)
++{
++    if (extent > SPU_LS_SIZE) extent = SPU_LS_SIZE;
++    if (extent > j->dirty_hi) j->dirty_hi = extent;
++    for (int i = 0; i < JOB_CTX_POOL; i++) {
++        job_ctx* none = NULL;
++        if (__atomic_compare_exchange_n(&s_job_pool[i], &none, j, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
++            return;
++    }
++    free(j);
++}
++
+ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
+                       uint32_t job_ea, uint32_t job_desc_size)
+ {
+@@ -172,8 +223,12 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
+         return -1;
+     }
+ 
+-    uint8_t* ls = (uint8_t*)calloc(1, SPU_LS_SIZE);
+-    if (!ls) return -1;
++    /* The job is staged straight into a pooled context's store (job_ctx_take hands it over
++     * zeroed): no separate zeroed buffer, no 256 KB copy into the context. */
++    job_ctx* jc = job_ctx_take();
++    if (!jc) return -1;
++    spu_context* ctx = &jc->ctx;
++    uint8_t* ls = ctx->ls;
+ 
+     /* ---- binary at LS 0 (PIC, so delta 0 keeps the lifted addresses) ---- */
+     memcpy(ls, vm_base + ea_bin, size_bin);
+@@ -335,10 +390,7 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
+     }
+ 
+     /* ---- enter the job -------------------------------------------------- */
+-    spu_context ctx;
+-    spu_context_init(&ctx, 0);
+-    ctx.image_id = image_id;
+-    memcpy(ctx.ls, ls, SPU_LS_SIZE);
++    ctx->image_id = image_id;
+     /* SPU stack grows down. A function saves its link register in its
+      * caller's frame, at 16($sp), so the entry's first store lands 16 bytes
+      * above $sp. The cache buffers start right at stack_top: with $sp at
+@@ -346,18 +398,18 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
+      * cacheBuffer[0] (Twisted Metal's Edge jobs read their viewport there and
+      * got width = height = 0). Leave the caller's 32-byte frame inside the
+      * stack. */
+-    ctx.gpr[1]._u32[0] = (stack_top - 32u) & ~15u;
++    ctx->gpr[1]._u32[0] = (stack_top - 32u) & ~15u;
+     /* Link register: where the job returns when it is done. The job manager
+      * would pass an address inside itself; 0 makes the job re-enter its own
+      * entry at LS 0 and run a bogus second lap. */
+-    ctx.gpr[0]._u32[0] = 0x3FF00u;                   /* SPU_JOB_RETURN_LS */
+-    ctx.gpr[3]._u32[0] = ctx_ls;                     /* CellSpursJobContext2* */
+-    ctx.gpr[4]._u32[0] = desc_ls;                    /* CellSpursJob256*      */
++    ctx->gpr[0]._u32[0] = 0x3FF00u;                   /* SPU_JOB_RETURN_LS */
++    ctx->gpr[3]._u32[0] = ctx_ls;                     /* CellSpursJobContext2* */
++    ctx->gpr[4]._u32[0] = desc_ls;                    /* CellSpursJob256*      */
+ 
+     { static int _n = 0;
+       if (_n++ < 4)
+           fprintf(stderr, "[spurs-job] ENTER r3=%08X r4=%08X r1=%08X entry-fn image=%d\n",
+-                  ctx.gpr[3]._u32[0], ctx.gpr[4]._u32[0], ctx.gpr[1]._u32[0],
++                  ctx->gpr[3]._u32[0], ctx->gpr[4]._u32[0], ctx->gpr[1]._u32[0],
+                   image_id); }
+     /* NOTE: after its work the job's runtime jumps to LS 0 ("return to the
+      * jm2 kernel" -- real layout has the kernel at 0, jobs above; we load the
+@@ -365,7 +417,7 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
+      * and trips its parameter guard, which HALTS -- ending the run. So the
+      * HALT-ASSERT heqi 0x1650 seen once per jm2 job is NORMAL COMPLETION
+      * noise, not a failure: the job's real work finished before the jump. */
+-    spu_run_with_halt(entry, &ctx);
++    spu_run_with_halt(entry, ctx);
+ 
+     /* Capture the job's outbound mailbox. These are LS POINTERS TO STRINGS for
+      * the SPU printf service, NOT query results -- value 0x83C0 from the sound
+@@ -373,13 +425,15 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
+      * comment here claimed they carried the title's bus counts; they do not,
+      * and feeding them into the completion event turned 0x40000000 into a 1 GB
+      * allocation request. Kept because the printf service needs them. */
+-    memcpy(s_job_ls, ctx.ls, SPU_LS_SIZE);   /* keep the store readable */
+-    s_job_ls_valid = 1;
++    if (__atomic_load_n(&s_job_ls_wanted, __ATOMIC_RELAXED)) {
++        memcpy(s_job_ls, ctx->ls, SPU_LS_SIZE);   /* keep the store readable */
++        s_job_ls_valid = 1;
++    }
+ 
+-    g_spurs_job_mbox      = spu_channel_has_data(&ctx.ch_out_mbox)
+-                          ? ctx.ch_out_mbox.value : 0;
+-    g_spurs_job_mbox_intr = spu_channel_has_data(&ctx.ch_out_intr_mbox)
+-                          ? ctx.ch_out_intr_mbox.value : 0;
++    g_spurs_job_mbox      = spu_channel_has_data(&ctx->ch_out_mbox)
++                          ? ctx->ch_out_mbox.value : 0;
++    g_spurs_job_mbox_intr = spu_channel_has_data(&ctx->ch_out_intr_mbox)
++                          ? ctx->ch_out_intr_mbox.value : 0;
+     g_spurs_job_mbox_valid = g_spurs_job_mbox || g_spurs_job_mbox_intr;
+     { uint32_t _cb = g32(job_ea + 0x4C);
+       g_spurs_job_cmd = _cb ? (g32(_cb) >> 16) : 0; }
+@@ -391,7 +445,7 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
+ 
+     if (getenv("SPURS_JOB_DUMP")) {
+         fprintf(stderr, "[spurs-job] job 0x%08X exit: status=0x%X stop=0x%X pc=0x%05X\n",
+-                job_ea, ctx.status, ctx.stop_code, ctx.pc);
++                job_ea, ctx->status, ctx->stop_code, ctx->pc);
+         /* Post-run view of the same command block: the game polls result/status
+          * fields the job writes back -- a before/after diff shows whether the
+          * handler delivered its completion or the PPU waits on stale state. */
+@@ -406,8 +460,8 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
+         fflush(stderr);
+     }
+ 
+-    spu_mfc_release(&ctx);
+-    spu_coh_unregister(&ctx);   /* stack local: out of the reserver set */
+-    free(ls);
++    spu_mfc_release(ctx);
++    spu_coh_unregister(ctx);   /* out of the reserver set before the context is reused */
++    job_ctx_give(jc, p);
+     return 0;
+ }
+diff --git a/runtime/spu/tests/test_spu_job_hotpath.c b/runtime/spu/tests/test_spu_job_hotpath.c
+new file mode 100644
+index 0000000..fac0429
+--- /dev/null
++++ b/runtime/spu/tests/test_spu_job_hotpath.c
+@@ -0,0 +1,210 @@
++/*
++ * The two per-job costs spurs_job.c / spu_workload.c cut for job chains that run thousands
++ * of jobs a second (a UE3 title's shader-patching chain: ~14,000 a second).
++ *
++ * 1. spu_workload_dispatch_job looks the job binary up by its FNV-1a-64 fingerprint, and
++ *    memoizes it by content (spu_workload_fingerprint_image). The memo must answer exactly
++ *    what the hash would: a different job loaded at the same address, a binary changed in
++ *    place, and a binary no lifted entry matches.
++ * 2. spu_run_spurs_job stages the job in a pooled context instead of a fresh 268,864-byte
++ *    one. A recycled context must hand the next job the same all-zero store a fresh one
++ *    did: no byte of an earlier, larger job (scratch/stack, the context and descriptor
++ *    parked at the top) may show through.
++ *
++ * Build:
++ *   clang -std=gnu17 -I include -I runtime/spu -I runtime/platform \
++ *         -o /tmp/test_spu_job_hotpath \
++ *         runtime/spu/tests/test_spu_job_hotpath.c \
++ *         runtime/spu/spu_drain.c runtime/spu/spu_lockstep.c \
++ *         runtime/spu/spu_coherency.c runtime/spu/spu_workload.c \
++ *         runtime/spu/spurs_policy.c runtime/spu/spurs_job.c \
++ *         runtime/spu/spu_tsp_weak.c runtime/spu/spu_vm_pagemap.c \
++ *         runtime/spu/spurs_policy_blob_weak.c runtime/spu/spu_interp.c \
++ *         runtime/platform/win32_compat.c -lpthread -lm
++ *
++ * Exit code: 0 if all passed, 1 if any failed. Final line prints a summary.
++ */
++
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++static uint8_t g_guest_mem[1u << 20];
++uint8_t* vm_base = g_guest_mem;
++uint32_t ppu_vm_size = 0;
++
++#include "../spu_channels.c"
++#include "spu_workload.h"   /* spu_run_spurs_job, spu_workload_dispatch_job */
++
++static int g_pass, g_fail;
++static const char* g_current = "(none)";
++
++#define TEST(name) g_current = (name)
++
++#define CHECK(cond) do {                                          \
++    if (cond) { g_pass++; }                                       \
++    else {                                                        \
++        g_fail++;                                                 \
++        fprintf(stderr, "FAIL: %s\n  at %s:%d: %s\n",             \
++                g_current, __FILE__, __LINE__, #cond);            \
++    }                                                             \
++} while (0)
++
++#define JOB_EA     0x00010000u
++#define BIN_EA     0x00020000u
++#define BIN_SIZE   0xA000u      /* 40,960 bytes: past the memo's 4,096-byte floor */
++
++static void put32(uint32_t ea, uint32_t v)
++{
++    g_guest_mem[ea] = (uint8_t)(v >> 24); g_guest_mem[ea + 1] = (uint8_t)(v >> 16);
++    g_guest_mem[ea + 2] = (uint8_t)(v >> 8); g_guest_mem[ea + 3] = (uint8_t)v;
++}
++static void put16(uint32_t ea, uint16_t v)
++{
++    g_guest_mem[ea] = (uint8_t)(v >> 8); g_guest_mem[ea + 1] = (uint8_t)v;
++}
++
++/* A job with no I/O and the given scratch+stack, binary BIN_SIZE bytes at BIN_EA. */
++static void build_job(uint16_t stack_qw, uint16_t scratch_qw)
++{
++    put32(JOB_EA + 0x00, 0);
++    put32(JOB_EA + 0x04, BIN_EA);
++    put16(JOB_EA + 0x08, BIN_SIZE >> 4);
++    put16(JOB_EA + 0x0A, 0);
++    put16(JOB_EA + 0x1C, stack_qw);
++    put16(JOB_EA + 0x1E, scratch_qw);
++    put32(JOB_EA + 0x24, 0);
++}
++
++/* ---- pooled contexts ---------------------------------------------------- */
++
++static int g_dirty_job;          /* 1: scribble over the job's own memory; 0: only look */
++static uint32_t g_job_end;       /* end of that memory: binary, scratch and stack (no io, no out) */
++static int g_leaks;              /* bytes seen non-zero where a fresh context holds zero */
++
++static void probe_entry(spu_context* ctx)
++{
++    /* Everything above the binary and below the context block parked at the top (0x3FBC0..)
++     * is the job's own io/out/scratch/stack or unused: zero in a fresh context. Skip the
++     * top 4 KB and the binary at LS 0, which are staged. */
++    for (uint32_t i = BIN_SIZE; i < SPU_LS_SIZE - 0x1000u; i++)
++        if (ctx->ls[i]) g_leaks++;
++    for (uint32_t i = SPU_LS_SIZE - 0x1000u; i < SPU_LS_SIZE - 0x440u; i++)
++        if (ctx->ls[i]) g_leaks++;                       /* the top 4 KB below ctx+desc */
++    /* A job writes inside its own regions and the top block, which is all a recycled context
++     * is cleaned of; what it does beyond them is on hardware its own SPU's business too. */
++    if (g_dirty_job) {
++        memset(ctx->ls + BIN_SIZE, 0xA5, g_job_end - BIN_SIZE);
++        memset(ctx->ls + SPU_LS_SIZE - 0x1000u, 0xA5, 0x1000u - 0x440u);
++    }
++}
++
++static void run_probe(uint16_t stack_qw, uint16_t scratch_qw, int dirty)
++{
++    build_job(stack_qw, scratch_qw);
++    g_dirty_job = dirty;
++    g_job_end = ((BIN_SIZE + 1023u) & ~1023u) + ((((uint32_t)stack_qw + scratch_qw) * 16u + 1023u) & ~1023u);
++    g_leaks = 0;
++    CHECK(spu_run_spurs_job(probe_entry, 5, JOB_EA, 256) == 0);
++}
++
++/* ---- fingerprint memo --------------------------------------------------- */
++
++static int g_ran_a, g_ran_b;
++static void entry_a(spu_context* ctx) { (void)ctx; g_ran_a++; }
++static void entry_b(spu_context* ctx) { (void)ctx; g_ran_b++; }
++
++static void fill(uint8_t seed)
++{
++    for (uint32_t i = 0; i < BIN_SIZE; i++) g_guest_mem[BIN_EA + i] = (uint8_t)(seed * 31u + i * 7u);
++}
++
++int main(void)
++{
++    memset(g_guest_mem, 0, sizeof g_guest_mem);
++
++    TEST("pooled context: a dirty job leaves nothing for the next one");
++    run_probe(0x100, 0x100, 0);       /* fresh context */
++    CHECK(g_leaks == 0);
++    run_probe(0x800, 0x400, 1);       /* large regions, all scribbled with 0xA5 */
++    CHECK(g_leaks == 0);
++    run_probe(0x100, 0, 0);           /* recycled, smaller job: the 0xA5 must be gone */
++    CHECK(g_leaks == 0);
++    run_probe(0x100, 0, 0);
++    CHECK(g_leaks == 0);
++
++    TEST("pooled context: recycled again right after a dirty job");
++    run_probe(0x80, 0, 1);
++    run_probe(0x80, 0, 0);
++    CHECK(g_leaks == 0);
++
++    TEST("fingerprint memo: exact across content changes at one address");
++    fill(1);
++    const uint64_t fp_a = spu_workload_fingerprint(g_guest_mem + BIN_EA, BIN_SIZE);
++    fill(2);
++    const uint64_t fp_b = spu_workload_fingerprint(g_guest_mem + BIN_EA, BIN_SIZE);
++    CHECK(fp_a != fp_b);
++    spu_workload_register_img(fp_a, entry_a, 11, "memo A");
++    spu_workload_register_img(fp_b, entry_b, 12, "memo B");
++    build_job(0x100, 0);
++
++    for (int round = 0; round < 3; round++) {
++        g_ran_a = g_ran_b = 0;
++        fill(1);
++        CHECK(spu_workload_dispatch_job(g_guest_mem + BIN_EA, BIN_SIZE, JOB_EA, 256) == 1);
++        CHECK(g_ran_a == 1 && g_ran_b == 0);
++        CHECK(spu_workload_dispatch_job(g_guest_mem + BIN_EA, BIN_SIZE, JOB_EA, 256) == 1);   /* memo hit */
++        CHECK(g_ran_a == 2 && g_ran_b == 0);
++        fill(2);                                         /* the same address, another job */
++        CHECK(spu_workload_dispatch_job(g_guest_mem + BIN_EA, BIN_SIZE, JOB_EA, 256) == 1);
++        CHECK(g_ran_a == 2 && g_ran_b == 1);
++        g_guest_mem[BIN_EA + BIN_SIZE - 1] ^= 1;         /* one byte off: matches nothing */
++        CHECK(spu_workload_dispatch_job(g_guest_mem + BIN_EA, BIN_SIZE, JOB_EA, 256) == 0);
++        CHECK(g_ran_a == 2 && g_ran_b == 1);
++    }
++
++    TEST("fingerprint memo: small images are not memoized but still found");
++    {
++        uint8_t small[256];
++        for (unsigned i = 0; i < sizeof small; i++) small[i] = (uint8_t)(i * 13u + 5u);
++        memcpy(g_guest_mem + BIN_EA, small, sizeof small);
++        put16(JOB_EA + 0x08, (uint16_t)(sizeof small >> 4));
++        spu_workload_register_img(spu_workload_fingerprint(small, sizeof small), entry_a, 13, "small");
++        g_ran_a = 0;
++        CHECK(spu_workload_dispatch_job(g_guest_mem + BIN_EA, sizeof small, JOB_EA, 256) == 1);
++        CHECK(g_ran_a == 1);
++    }
++
++    printf("spu job hot path: %d passed, %d failed\n", g_pass, g_fail);
++    return g_fail ? 1 : 0;
++}
++
++/* ---------------------------------------------------------------------------
++ * The runtime beyond the job runner and the SPU channel layer, stubbed as in
++ * test_spu_taskset_wake.c. None of it is on the path this test drives.
++ * -----------------------------------------------------------------------*/
++void ppu_resv_break_store(uint64_t ea)                 { (void)ea; }
++void ps3_ww_report_inline(uint32_t a, uint64_t v, int w)
++{
++    (void)a; (void)v; (void)w;
++}
++unsigned long long ps3_ms_now(void)                    { return 0; }
++uint32_t g_ww_lo = 0xFFFFFFFFu, g_ww_hi = 0;
++int      g_resv_store_active = 0;
++uint32_t g_barrier_sync_watch = 0;
++
++void (*g_spurs_kernel_hook)(uint32_t) = 0;
++uint32_t g_ydkj_spurs_ctx_ea = 0;
++uint32_t g_ydkj_real_spurs_ea = 0;
++uint32_t g_ydkj_real_taskset_ea = 0;
++uint32_t g_ydkj_real_taskid = 0;
++void spurs_ef_set_from_spu(uint32_t ea, uint16_t bits) { (void)ea; (void)bits; }
++void ydkj_wake_all_event_flags(void)                   { }
++void spurs_pm_build_context(spu_context* c, uint32_t a, uint32_t b, uint32_t d)
++{
++    (void)c; (void)a; (void)b; (void)d;
++}
++
++uint32_t g_spu_image_src_ea, g_spu_image_ls_start, g_spu_image_span;
++void spu_thread_publish_ctx(uint32_t tid, void* ctx) { (void)tid; (void)ctx; }
+diff --git a/tools/test_spu_job_hotpath.py b/tools/test_spu_job_hotpath.py
+new file mode 100755
+index 0000000..60e816e
+--- /dev/null
++++ b/tools/test_spu_job_hotpath.py
+@@ -0,0 +1,51 @@
++#!/usr/bin/env python3
++"""SPURS job hot path: pooled job contexts and the job-image fingerprint memo.
++
++Builds runtime/spu/tests/test_spu_job_hotpath.c against the real spurs_job.c and
++spu_workload.c. A recycled job context must hand the next job an all-zero store, and the
++fingerprint memo must answer exactly what the byte hash would, also when the binary at one
++address changes (see the comments in those files).
++"""
++import os
++from pathlib import Path
++import shutil
++import subprocess
++import tempfile
++import unittest
++
++ROOT = Path(__file__).resolve().parents[1]
++SOURCES = ["runtime/spu/spu_drain.c", "runtime/spu/spu_lockstep.c", "runtime/spu/spu_coherency.c",
++           "runtime/spu/spu_workload.c", "runtime/spu/spurs_policy.c", "runtime/spu/spurs_job.c",
++           "runtime/spu/spu_tsp_weak.c", "runtime/spu/spu_vm_pagemap.c",
++           "runtime/spu/spurs_policy_blob_weak.c", "runtime/spu/spu_interp.c",
++           "runtime/platform/win32_compat.c"]
++
++
++class SpuJobHotPathTests(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        cc = shutil.which(os.environ.get("CC", "clang")) or shutil.which("cc")
++        if not cc:
++            raise unittest.SkipTest("C compiler required")
++        if os.name == "nt":
++            raise unittest.SkipTest("POSIX threads required")
++        cls.tmp = tempfile.TemporaryDirectory()
++        cls.addClassCleanup(cls.tmp.cleanup)
++        cls.exe = Path(cls.tmp.name) / "test-spu-job-hotpath"
++        cmd = [cc, "-pthread", "-std=gnu17", "-O1",
++               "-I", str(ROOT / "include"), "-I", str(ROOT / "runtime/spu"),
++               "-I", str(ROOT / "runtime/platform"),
++               str(ROOT / "runtime/spu/tests/test_spu_job_hotpath.c"),
++               *[str(ROOT / s) for s in SOURCES], "-lm", "-o", str(cls.exe)]
++        subprocess.run(cmd, check=True, capture_output=True, text=True)
++
++    def test_pool_and_memo(self):
++        env = {k: v for k, v in os.environ.items()
++               if not k.startswith(("SPU_", "YDKJ_", "LBP_", "SPURS_"))}
++        p = subprocess.run([str(self.exe)], capture_output=True, text=True, env=env, timeout=60)
++        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
++        self.assertRegex(p.stdout, r"spu job hot path: \d+ passed, 0 failed")
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.47.3
+

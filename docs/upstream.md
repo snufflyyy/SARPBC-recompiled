@@ -57,6 +57,9 @@ Status of every group: **drafted, not filed.**
 | `0040-spurs-taskset-attribute-args.patch` | T037 (Claude; pi integration tests): retain the taskset attribute's 64-bit argument and per-SPU priority bytes, and forward the argument into taskset creation. Collision tasks previously received a zero work-pool argument and blocked arena loading. Tests cover full-width arguments, priority byte order and existing layout/canary validation | to offer |
 | `0041-spurs-job-completion-events.patch` | T037 (pi): port the MIT fork's `SPURS_JC_DONE_EVENTS=0` gate without changing the runtime's legacy default. SARPBC disables fabricated job completions in its own config: a ShaderPatching job-index-0 broadcast otherwise shuts down the attached slab service. Tests cover opt-out, default/explicit enable, payloads and intact real SPU port bindings | to offer |
 | `0042-spurs-priority-array.patch` | T037 integration review: priorities are a guest byte-array pointer, not a packed integer. Copy the table with backing validation; retain Claude's full-width taskset argument repair. Tests use distinct priority bytes and ensure bad backing leaves the attribute intact | to offer |
+| `0085-spu-job-fingerprint-memo.patch` | T075: content-verified memo of the job-image FNV fingerprint (46 of 67 us per ShaderPatching job); exact when the binary at an address changes | to offer |
+| `0086-spu-job-context-pool.patch` | T075: pooled job contexts staged in place, store copied out only after a title polls for it (+ `tools/test_spu_job_hotpath.py`) | to offer |
+| `0087-spurs-job-chain-linger.patch` | T075: the walker waits 1 ms (`SPURS_JC_LINGER_US`) for the next Run instead of one host thread per Run; Join ends the wait | to offer |
 
 ## PR D: GCM command processing and interrupt delivery
 

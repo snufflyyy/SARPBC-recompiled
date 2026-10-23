@@ -187,6 +187,10 @@ numbers:
 | `0082-vulkan-fullscreen.patch` | Fullscreen toggle at run time (applied on the event-pump thread, logged) | generic, offer upstream |
 | `0083-vulkan-texture-filtering.patch` | Texture filtering at run time: force trilinear and anisotropy on mipmapped samplers, mip LOD bias | generic, offer upstream |
 | `0084-vulkan-live-render-scale.patch` | T063: change the render scale at run time (engine drops its targets under the FIFO lock, backend rebuilds the display image) | generic, offer upstream |
+| `0085-spu-job-fingerprint-memo.patch` | T075: content-verified memo of the SPURS job-image fingerprint (46 of 67 us per ShaderPatching job); exact when the image at an address changes | generic, offer upstream |
+| `0086-spu-job-context-pool.patch` | T075: pooled SPURS job contexts staged in place (spu_context_init memset was 19 of 25 us per job), kept store copied only after a poll; test_spu_job_hotpath | generic, offer upstream |
+| `0087-spurs-job-chain-linger.patch` | T075: job-chain walker waits 1 ms for the next Run (SPURS_JC_LINGER_US) instead of one host thread per Run (17,000 thread starts a second) | generic, offer upstream |
+| `0088-ppu-store-watch-fast-path.patch` | T075: PPU_WVAL / PPU_WWATCH debug watches out of line; an unarmed guest store costs two compares (was 21% of a render thread) | generic, offer upstream |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `tools/export_patch.sh <slug> "<description>" ["<upstream status>"]` (next free number, the README row,

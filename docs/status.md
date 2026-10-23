@@ -5,6 +5,13 @@ work session. Newest log entry first. Use absolute dates.
 
 ## Resume here (updated 2026-10-23)
 
+**Mini-Games fps dip fixed (user, 2026-10-23: "fix the fps slowdown when images appear in the main menu, specifically when selecting a
+minigame"; T075, patches 0085-0088).** Mini-Games was a steady 15 fps, now ~38; Single Player 35 -> ~59; arena 59 steady; menus 59.
+Cause: the ShaderPatching SPURS job chain (one job per draw, ~1000 a frame on that screen) was a one-core ceiling of 14,600 jobs/s
+at 67 us a job, and the render thread waits for it. Per job: 46 us image hash, 19 us context memset, copies, then a host thread per
+Run, then the PPU debug-store-watch hook. Method, numbers and the correction to T055: subsystems.md "ShaderPatching job chain".
+**What is left there is the FIFO drain** (~1000 draws a frame at ~6 us, frame clock 61% busy): dod3-reuse "Port next" 9.
+
 **Multiplayer is POSTPONED (user, 2026-10-23: "the server isn't open source like i assumed. just postpone the multiplayer plan"); T015 and T066-T074 are all `blocked`, nothing to do until the user provides a server.** Research below stays valid.
 
 **Multiplayer (user, 2026-10-23: "port the custom multiplayer to our 1.09 recomp", community server unmodified, hosted
@@ -108,7 +115,7 @@ Player menu. Root `analysis/boot_check/20261021-200728-2049532/`. The preceding
 300 s arena/results/return-menu verification is logged below. Frame-time
 breakdowns and historical measurements: subsystems.md "Menu frame rate".
 
-**Integrated patch stack:** 76 patch files on upstream `749182e`
+**Integrated patch stack:** 88 patch files on upstream `749182e`
 (v0.16.0, T043), including T052 and Claude's later audio/shadow/port work.
 Current full gate: 102 scripts, 98 passed / 4 explicit skips / 0 failures/timeouts;
 the nested SDL/Vulkan suites are included (T048).
@@ -177,6 +184,20 @@ match with input over time, arena audio and frame-rate measurement.
   POSIX boot scaffold gets this UE3 title to the menus on Linux.
 
 ## Log
+
+### 2026-10-23: Mini-Games fps dip (T075, claude)
+
+- Reproduced with `boot_check --scenario single` (+ `SARPBC_FRAME_STATS`): 59 fps main menu, ~35 Single Player, 15 on Mini-Games.
+  `FRAME_CLOCK_STATS` said the drain was idle (sleep 3.7 s of 5), so the guest was waiting: gdb/eu-stack on the render thread
+  put it in the `appSleep` poll `func_000E2660` (waits for the RHI's SPURS job chain, docs/unreal-engine-3.md). `PS3_POLLTOP=5`
+  names the poll sites; `PS3_USLEEP_SCALE=RenderingThread:0` and `FRAME_CLOCK_SLEEP_MS=0` changed nothing.
+- Timers around `jc_run_one_job` showed the ShaderPatching chain at 14,600 jobs/s x 67 us = one core; jobs per frame went
+  160 -> 420 -> 975 as fps went 59 -> 35 -> 15. Phase timers in `spu_run_spurs_job` and `spu_workload_dispatch_job` split the 67 us.
+- Four generic patches, each measured: 0085 fingerprint memo (46 us), 0086 pooled job contexts (19 + 3 + 4 + 5 us), 0087 walker
+  lingers 1 ms (17,000 thread starts a second), 0088 PPU debug-store-watch gate (21% of the render thread). Mini-Games 15 -> 18
+  (after 0085/0086) -> 28 (0087) -> 33/38 (0088), Single Player 35 -> 59. `tools/test_spu_job_hotpath.py`; lint --tests green.
+- Verified: single route 38 fps; 130 s arena 59 fps steady, no SIGSEGV/null alerts, final capture (Scavenger mini-game: HUD,
+  boost pickups, car, shadow) intact.
 
 ### 2026-10-23: multiplayer research and plan (T015, T066-T074, claude)
 

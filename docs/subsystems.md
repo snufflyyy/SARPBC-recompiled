@@ -1195,6 +1195,54 @@ switchable by `SPU_FP_MEMO=0/1`) gave memo on 49.0/48.2/48.1 fps, memo off 56.2/
 hash cost is spent on short-lived job threads that are not on the critical path; the guest
 frame rate is bound by the drain/render side (GCM/VK 18%, RSX thread 63%). Patch dropped, not
 merged. Lesson: a share of on-CPU stacks is not a share of the frame time.
+**Superseded on the Mini-Games screen (T075, below):** there the job chain is saturated and the same hash was 46 of 67 us per
+job; the memo went in as patch 0085.
+
+### ShaderPatching job chain: the Mini-Games screen's 15 fps (T075, 2026-10-23, patches 0085-0088)
+
+Symptom (user): fps falls when the menu shows images, worst on Mini-Games. `tools/boot_check.sh --scenario single`:
+main menu ~59 fps, Single Player ~35, Mini-Games a steady **15** (the cards plus a live blurred 3D backdrop).
+
+**How the game draws.** UE3 appends one **ShaderPatching** job (SPUJOBS.prx job 0, image `0x012B6F00` chain,
+48,512-byte binary) to a job chain per draw and calls `cellSpursRunJobChain`; the job patches the draw's fragment program into
+the FIFO and releases the park there, so the drain cannot pass the draw before its job ran. Jobs per frame follow draws per
+frame: ~160 in the main menu, ~420 on Single Player, **~1000 on Mini-Games** (all small images and text quads).
+
+**Measured, not guessed** (temporary timers, `[jobstats]` per 5 s around `jc_run_one_job`): the chain ran 14,600 jobs/s at
+67 us each, one core flat out. Frame rate was 14,600 / jobs per frame at every screen, so the chain was the limit, and
+the render thread waited on it (46% of its samples in the guest `appSleep` poll, `func_000E2660`; sleeping less, a faster
+frame-clock drain (`FRAME_CLOCK_SLEEP_MS=0`) and `PS3_USLEEP_SCALE` changed nothing). Where a job's 67 us went:
+
+| per job | before | after |
+|---|---|---|
+| FNV-1a of the 48,512-byte image (`spu_workload_fingerprint`) | 46 us | ~2 us (content-verified memo) |
+| `spu_context_init` memset of the 268,864-byte context | 19 us | ~3 us (pooled, cleaned only where the last job wrote) |
+| `calloc` of the 256 KB staging buffer + copy into the context | ~3 + ~4 us | 0 (staged in place) |
+| copy of the store out for `sys_spu_thread_read_LS` | 5 us | 0 (only after a title first polls for it) |
+| the job itself (lifted SPU code) | 4 us | 4 us |
+
+That left 7 us a job, but the frame rate did not follow (18 fps): the next limit was the **host thread started for every
+Run** (`jc_start` -> `CreateThread` with a 1 MB stack; 17,000 starts a second, 1.1 jobs per walk). The walker now waits
+1 ms for the next Run (`jc_linger`, `SPURS_JC_LINGER_US`, 0 = old behaviour) and signals completion before waiting;
+`cellSpursJoinJobChain` ends the wait at once. Then 21% of the render thread was `barrier_watch_hit`, the `PPU_WVAL` /
+`PPU_WWATCH` debug watches that every guest store ran inline: now out of line behind a two-compare gate (patch 0088, a
+speedup for all PPU code).
+
+| screen | before | after |
+|---|---|---|
+| Single Player | ~35 | ~59 |
+| Mini-Games | **15** | **~38** |
+| arena (130 s, driving) | 55-60 | 59 steady, no alerts |
+
+What is left on Mini-Games is the FIFO drain: ~1000 draws a frame at ~6 us (frame clock 61% busy, `gcm_rsx_process_fifo`,
+`rsx_process_method`, `vk_eng_draw`): the draw-engine list in dod3-reuse "Port next" 9 is where to look next.
+
+**This reverses T055's lesson** ("hash memo gave no fps"): that A/B ran on the main menu, where the chain was ~65% busy and
+not the limit. Mini-Games is the screen where it is. A stack-sample share is not a frame share, but a **jobs-per-second
+ceiling that equals fps times jobs per frame** is. Method kept for next time: count work per second at the suspect stage and
+divide by frames; the chain's `jc_thread`s are short-lived, so `eu-stack` on hot threads never sees them (use the per-job
+timers). Context pool contract: a job's writes outside its own regions and the top 4 KB are not cleaned for the next job;
+`tools/test_spu_job_hotpath.py` pins the recycled-store and memo behaviour (both mutants fail it).
 
 ### Unmapped SPU PUT lookup (T056, 2026-10-21)
 
