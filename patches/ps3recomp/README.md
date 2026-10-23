@@ -191,6 +191,7 @@ numbers:
 | `0086-spu-job-context-pool.patch` | T075: pooled SPURS job contexts staged in place (spu_context_init memset was 19 of 25 us per job), kept store copied only after a poll; test_spu_job_hotpath | generic, offer upstream |
 | `0087-spurs-job-chain-linger.patch` | T075: job-chain walker waits 1 ms for the next Run (SPURS_JC_LINGER_US) instead of one host thread per Run (17,000 thread starts a second) | generic, offer upstream |
 | `0088-ppu-store-watch-fast-path.patch` | T075: PPU_WVAL / PPU_WWATCH debug watches out of line; an unarmed guest store costs two compares (was 21% of a render thread) | generic, offer upstream |
+| `0089-vulkan-output-size.patch` | Render scale relative to the output: rsx_vulkan_backend_output_size (drawable size from the event pump), scale limit 4 to 8 | generic, offer upstream |
 
 Making a new one: commit inside `external/ps3recomp` on branch `sarpbc-patches`, then
 `tools/export_patch.sh <slug> "<description>" ["<upstream status>"]` (next free number, the README row,

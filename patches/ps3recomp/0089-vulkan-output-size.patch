@@ -1,0 +1,96 @@
+From 7f814991ca0dd4e02f330611edbd212672122cf4 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Fri, 23 Oct 2026 20:19:34 +0000
+Subject: [PATCH] vulkan: rsx_vulkan_backend_output_size, and a render scale up
+ to 8 (a host can make the scale relative to the window)
+
+The scale is relative to the guest's surfaces (1280x720); a host that wants 100% to mean the window's own
+resolution needs the window's size, which the event pump now publishes, and room above 4x for 4K.
+---
+ libs/video/rsx_vulkan_backend.c | 23 +++++++++++++++++++++--
+ libs/video/rsx_vulkan_backend.h |  7 ++++++-
+ 2 files changed, 27 insertions(+), 3 deletions(-)
+
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index cebf000..d59c4f5 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -2593,7 +2593,7 @@ static float s_rscale = 1.0f;
+ 
+ void rsx_vulkan_backend_set_render_scale(float scale)
+ {
+-    if (scale >= 0.25f && scale <= 4.0f) s_rscale = scale;
++    if (scale >= 0.25f && scale <= 8.0f) s_rscale = scale;
+ }
+ 
+ static u32 vk_sdim(u32 v, float sc)
+@@ -4885,7 +4885,7 @@ static void vk_apply_render_scale_locked(void* arg)
+ 
+ void rsx_vulkan_backend_apply_render_scale(float scale)
+ {
+-    if (!(scale >= 0.25f && scale <= 4.0f) || !s_vk.device) return;
++    if (!(scale >= 0.25f && scale <= 8.0f) || !s_vk.device) return;
+     cellGcm_rsx_run_exclusive(vk_apply_render_scale_locked, &scale);
+ }
+ 
+@@ -4901,6 +4901,17 @@ void rsx_vulkan_backend_set_window_size(int w, int h)
+     __atomic_store_n(&s_want_win_w, w, __ATOMIC_RELEASE);
+ }
+ 
++/* The window's drawable size as the last pump saw it (0x0 until a window has been pumped). */
++static int s_out_w, s_out_h;
++
++int rsx_vulkan_backend_output_size(int* w, int* h)
++{
++    const int ow = __atomic_load_n(&s_out_w, __ATOMIC_ACQUIRE), oh = __atomic_load_n(&s_out_h, __ATOMIC_RELAXED);
++    if (w) *w = ow;
++    if (h) *h = oh;
++    return ow > 0 && oh > 0;
++}
++
+ int rsx_vulkan_backend_pump_messages(void)
+ {
+     if (!s_vk.windowed) return 0;
+@@ -4928,6 +4939,14 @@ int rsx_vulkan_backend_pump_messages(void)
+             SDL_SetWindowPosition(s_vk.window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+         }
+     }
++    if (s_vk.window) {
++        int dw = 0, dh = 0;
++        SDL_Vulkan_GetDrawableSize(s_vk.window, &dw, &dh);
++        if (dw > 0 && dh > 0) {
++            __atomic_store_n(&s_out_h, dh, __ATOMIC_RELAXED);
++            __atomic_store_n(&s_out_w, dw, __ATOMIC_RELEASE);
++        }
++    }
+     int quit = 0;
+     SDL_Event e;
+     while (SDL_PollEvent(&e)) {
+diff --git a/libs/video/rsx_vulkan_backend.h b/libs/video/rsx_vulkan_backend.h
+index d70963a..8311571 100644
+--- a/libs/video/rsx_vulkan_backend.h
++++ b/libs/video/rsx_vulkan_backend.h
+@@ -111,7 +111,7 @@ void rsx_vulkan_backend_set_overlay_text(const char* text);
+ void rsx_vulkan_backend_set_present_unlocked(int unlocked);
+ 
+ /* Internal render scale (T063): call before rsx_vulkan_backend_init. Every colour and depth target
+- * of at least 320x180 guest pixels is made `scale` times larger (0.25-4); the draw engine keeps
++ * of at least 320x180 guest pixels is made `scale` times larger (0.25-8); the draw engine keeps
+  * speaking guest pixels, the display image and the window blit follow. 1 = off. */
+ void rsx_vulkan_backend_set_render_scale(float scale);
+ 
+@@ -120,6 +120,11 @@ void rsx_vulkan_backend_set_render_scale(float scale);
+  * contents is lost). Call from the thread that drives the frame clock, never from inside a draw. */
+ void rsx_vulkan_backend_apply_render_scale(float scale);
+ 
++/* The window's drawable size in pixels, as the last rsx_vulkan_backend_pump_messages saw it (it follows
++ * fullscreen and the Resolution row). Returns 0 until a window has been pumped (headless: always 0), so
++ * a host can make its render scale relative to the output instead of to the guest's 1280x720. */
++int rsx_vulkan_backend_output_size(int* w, int* h);
++
+ /* Desktop fullscreen on (1) / off (0), at run time or before _init (the window then opens that way);
+  * leaving it restores the last size given to _set_window_size. Applied by the event-pump thread. */
+ void rsx_vulkan_backend_set_fullscreen(int on);
+-- 
+2.47.3
+

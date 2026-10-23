@@ -115,7 +115,7 @@ Player menu. Root `analysis/boot_check/20261021-200728-2049532/`. The preceding
 300 s arena/results/return-menu verification is logged below. Frame-time
 breakdowns and historical measurements: subsystems.md "Menu frame rate".
 
-**Integrated patch stack:** 88 patch files on upstream `749182e`
+**Integrated patch stack:** 89 patch files on upstream `749182e`
 (v0.16.0, T043), including T052 and Claude's later audio/shadow/port work.
 Current full gate: 102 scripts, 98 passed / 4 explicit skips / 0 failures/timeouts;
 the nested SDL/Vulkan suites are included (T048).

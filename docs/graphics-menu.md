@@ -137,7 +137,16 @@ funcedit, asm, tree, pkgwrite, coalesced).
 
 ## Render scale (T063, done 2026-10-22)
 
-Options > Graphics > Render Scale (50/75/100/150/200/300 %, applies at the next start; `SARPBC_RENDER_SCALE=<percent>`).
+Options > Graphics > Render Scale (50/75/100/150/200/300 %, live; `SARPBC_RENDER_SCALE=<percent>`).
+**The percentage is of the output resolution, not of the guest's 1280x720** (user, 2026-10-23, patch 0089): 100% renders
+at the window's size (a 1080p window gives a 1920x1080 image, 50% gives 960x540, 200% gives 3840x2160), so
+raising the Resolution row no longer upsamples a 720p picture. `effective_render_scale()` in `src/main.cpp`
+multiplies the percentage by `min(out_w/1280, out_h/720)` (capped at 8192 px wide) and the frame clock thread re-applies it
+live when the setting or the output changes (the Resolution row, F11 fullscreen: the output is the window's drawable
+size, `rsx_vulkan_backend_output_size`, published by the event pump; before a window exists the Resolution row's size
+stands in). At the default 1280x720 window nothing changed. Checked with `boot_check --scenario single`
+(`SARPBC_WINDOW_SIZE`/`SARPBC_RENDER_SCALE`): 1280x720@100 = 1280x720, 1920x1080@100 = 1920x1080, @50 = 960x540,
+@200 = 3840x2160 (the frame dump size). The text below describes the backend, whose scale is still relative to the guest.
 The engine's own `ScreenPercentage` does nothing here (the PS3 build ignores it: surfaces stay 1280x720), so the
 scale is done in the Vulkan backend (patch 0081, `rsx_vulkan_backend_set_render_scale`):
 

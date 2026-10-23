@@ -60,6 +60,7 @@ Status of every group: **drafted, not filed.**
 | `0085-spu-job-fingerprint-memo.patch` | T075: content-verified memo of the job-image FNV fingerprint (46 of 67 us per ShaderPatching job); exact when the binary at an address changes | to offer |
 | `0086-spu-job-context-pool.patch` | T075: pooled job contexts staged in place, store copied out only after a title polls for it (+ `tools/test_spu_job_hotpath.py`) | to offer |
 | `0087-spurs-job-chain-linger.patch` | T075: the walker waits 1 ms (`SPURS_JC_LINGER_US`) for the next Run instead of one host thread per Run; Join ends the wait | to offer |
+| `0089-vulkan-output-size.patch` | `rsx_vulkan_backend_output_size` (the window's drawable size, from the event pump) so a host can make the render scale relative to the output; the scale limit 4 to 8 | to offer |
 
 ## PR D: GCM command processing and interrupt delivery
 

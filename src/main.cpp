@@ -87,6 +87,27 @@ extern "C" void rsx_vulkan_backend_set_present_unlocked(int unlocked);       /* 
 extern "C" void rsx_vulkan_backend_set_window_size(int w, int h);              /* T063 */
 extern "C" void rsx_vulkan_backend_set_render_scale(float scale);              /* T063: before init */
 extern "C" void rsx_vulkan_backend_apply_render_scale(float scale);            /* T063: live */
+extern "C" int  rsx_vulkan_backend_output_size(int* w, int* h);                 /* the window's drawable size, 0 until pumped */
+
+/* The Render Scale row is a percentage of the OUTPUT resolution (user, 2026-10-23: not of the guest's 1280x720):
+ * 100% renders at the window's size (1080p window: 1920x1080), 50% half of it, 200% supersamples. The backend's
+ * scale is relative to the guest's 1280x720, so multiply by how many guest-sized frames fit in the window.
+ * Before a window has been pumped (start, or fullscreen not yet known) the Resolution row's size stands in. */
+static float effective_render_scale(int idx)
+{
+    int ow = 0, oh = 0;
+    if (!rsx_vulkan_backend_output_size(&ow, &oh)) {
+        const sarpbc_gfx::Size& ws = sarpbc_gfx::kWindowSizes[sarpbc_gfx::settings().window_size.load()];
+        ow = ws.w; oh = ws.h;
+    }
+    const float gw = 1280.0f, gh = 720.0f;   /* the guest's surfaces */
+    float fit = (float)ow / gw;
+    if ((float)oh / gh < fit) fit = (float)oh / gh;   /* the 16:9 frame fits inside */
+    float s = sarpbc_gfx::kRenderScalePercent[idx] / 100.0f * fit;
+    if (s > 8192.0f / gw) s = 8192.0f / gw;   /* images stay within 8192 wide */
+    if (s < 0.25f) s = 0.25f;
+    return s;
+}
 extern "C" void rsx_vulkan_backend_set_fullscreen(int on);                      /* Graphics > Fullscreen */
 extern "C" void rsx_vulkan_backend_set_texture_filtering(int trilinear, int anisotropy, float lod_bias);   /* Graphics > Texture rows */
 #endif
@@ -286,7 +307,7 @@ static DWORD WINAPI frame_clock(LPVOID)
 
 #if defined(PS3RECOMP_RSX_VULKAN)
     /* T063: the Graphics page's render scale (internal resolution, applied at start) and the window's size */
-    rsx_vulkan_backend_set_render_scale(sarpbc_gfx::kRenderScalePercent[sarpbc_gfx::settings().render_scale.load()] / 100.0f);
+    rsx_vulkan_backend_set_render_scale(effective_render_scale(sarpbc_gfx::settings().render_scale.load()));
     rsx_vulkan_backend_set_window_size(sarpbc_gfx::kWindowSizes[sarpbc_gfx::settings().window_size.load()].w,
                                        sarpbc_gfx::kWindowSizes[sarpbc_gfx::settings().window_size.load()].h);
     rsx_vulkan_backend_set_fullscreen(sarpbc_gfx::settings().fullscreen.load());   /* the window opens that way */
@@ -340,7 +361,9 @@ static DWORD WINAPI frame_clock(LPVOID)
     int window_size_applied = -1;
     int fullscreen_applied = -1;
     int texture_applied = -1;
-    int render_scale_applied = sarpbc_gfx::settings().render_scale.load();   /* what the backend started with */
+#if defined(PS3RECOMP_RSX_VULKAN)
+    float render_scale_applied = effective_render_scale(sarpbc_gfx::settings().render_scale.load());   /* what the backend started with */
+#endif
     /* SARPBC_RENDER_SCALE_CYCLE=<seconds>: a stress test, steps the render scale through 100/150/50/200/75/300 %
      * every <seconds> so live changes can be exercised during real rendering. */
     const char* cycle_env = getenv("SARPBC_RENDER_SCALE_CYCLE");
@@ -409,13 +432,15 @@ static DWORD WINAPI frame_clock(LPVOID)
         }
         /* Render Scale row: live. The backend rebuilds its targets with the FIFO walker excluded (this thread
          * is the one that drives it, so this is between drains). */
-        const int rs = sarpbc_gfx::settings().render_scale.load(std::memory_order_relaxed);
-        if (rs != render_scale_applied) {
-            render_scale_applied = rs;
 #if defined(PS3RECOMP_RSX_VULKAN)
-            if (rsx_ok) rsx_vulkan_backend_apply_render_scale(sarpbc_gfx::kRenderScalePercent[rs] / 100.0f);
-#endif
+        {   /* also when the output changes (Resolution row, fullscreen): the scale follows the window */
+            const float rs = effective_render_scale(sarpbc_gfx::settings().render_scale.load(std::memory_order_relaxed));
+            if (rs > render_scale_applied * 1.002f || rs < render_scale_applied * 0.998f) {
+                render_scale_applied = rs;
+                if (rsx_ok) rsx_vulkan_backend_apply_render_scale(rs);
+            }
         }
+#endif
         const bool unlocked = sarpbc_gfx::settings().unlock_fps.load(std::memory_order_relaxed) != 0;
         if (unlocked != tick_unlocked) {
             tick_unlocked = unlocked;
