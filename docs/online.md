@@ -1,7 +1,8 @@
 # Offline behaviour and online menus (T014)
 
 Offline play comes first (the official servers are gone). Nothing here connects to any external
-server (that is T015, blocked on the user's permission). Measured 2026-10-21 on 01.09 with
+server. Online play against a server the user hosts locally is planned in [multiplayer.md](multiplayer.md)
+(T015, user's permission 2026-10-23); that doc also has the measured online request the 01.09 client sends. Measured 2026-10-21 on 01.09 with
 `tools/boot_check.sh --pad`, frames read from the captures.
 
 ## What the title calls at boot

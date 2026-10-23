@@ -113,7 +113,8 @@ that holds the work.
   docs/reference-ports.md. Port with attribution ("Ported from <repo> <sha/path>, MIT" in the
   commit message and file header, or `git format-patch` from the fork).
 - Never commit game data or anything derived from it (AGENTS.md rule 1). **Never download Sony
-  firmware.** Never connect to RPCN or any community server (multiplayer is blocked, T015).
+  firmware.** Never connect to RPCN or any community server on the internet; the one exception (user, 2026-10-23) is a
+  server the user hosts on this machine or their LAN, with `PS3_NET_SANDBOX=1` (T015 and docs/multiplayer.md).
 - Keep the toolkit title-agnostic. RPCS3 is a behavioural reference only (no GPL code). Add
   tests in the upstream style.
 - Verify before claiming success: show the command and its output.

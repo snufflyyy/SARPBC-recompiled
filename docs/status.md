@@ -3,7 +3,20 @@
 Living document. Update "Resume here", the phase table and the log at the end of each
 work session. Newest log entry first. Use absolute dates.
 
-## Resume here (updated 2026-10-22)
+## Resume here (updated 2026-10-23)
+
+**Multiplayer (user, 2026-10-23: "port the custom multiplayer to our 1.09 recomp", community server unmodified, hosted
+locally; permission given because the server is local):** research and plan are in [docs/multiplayer.md](docs/multiplayer.md),
+tasks T066-T074 on the board under the umbrella T015. Key finding (run on 2026-10-23, sandboxed): the 01.09 client's
+matchmaking is **a plain-HTTP stored-procedure web service**, `POST http://sarb.psyonix.com:80/v001/callproc.php`,
+body `DB=SARPBC_Prod&Proc[]=GetOnlineVariables()&VersionCheck=ValidateVersion('00.00.0006')`, sent at boot and on Play
+Online (the game then waits at "Logging in..."); the game imports no `sceNpMatching2`, so NP is only identity, friends,
+presence and signaling, and RPCN may or may not be needed (decision D1, T068). The mod's `.pkg` files and the server are
+not on this machine: T068 starts with asking the user. Start with **T066** (read the protocol out of the client, probe
+tool) and **T067** (config-driven local redirect, two instances); they need nothing from the user.
+
+### Earlier "Resume here" (2026-10-22)
+
 
 **Graphics menu and options (user, 2026-10-22; T062-T065 done):** the Options screen has native-looking **Graphics**
 (Resolution = window size, Render Scale 50-300 %, Fullscreen, VSync, Frame Rate, FPS Counter) and **Picture**
@@ -162,6 +175,18 @@ match with input over time, arena audio and frame-rate measurement.
   POSIX boot scaffold gets this UE3 title to the menus on Linux.
 
 ## Log
+
+### 2026-10-23: multiplayer research and plan (T015, T066-T074, claude)
+
+- Read the mod's public setup guide, RPCN's source (v1.12.1: TLS :31313, UDP :3657, protocol 34, no per-game code,
+  `CreateMissing=true`), and the 01.09 client: EBOOT strings (`https://sarb.psyonix.com/v001/callproc.php`, request
+  templates, native `PsyWebServer_X`), packages (`PsyNet`, `OnlineSubsystemPS3`, `ProjectX` online classes, version
+  strings `00.00.0006`/`00.01.0004`, so the mod's "1.04" is probably our 01.09), imports (no Matching2/cellHttp/cellSsl).
+- Two sandboxed boots with `PS3_NET_ONLINE=1 PS3_NET_SANDBOX=1 PS3_NET_TRACE=1` (listener on 127.0.0.1:80): the exact
+  request, plain HTTP on port 80, sent at boot and on Play Online; empty 200 leaves "Logging in...". Details and
+  commands: docs/multiplayer.md 4.3 and 11.
+- T015 became the umbrella (renamed, `blocked`, do not claim); docs/workflow.md's rule now allows servers the user hosts
+  locally. New docs: multiplayer.md, multiplayer-protocol.md, multiplayer-mod.md. No code changed.
 
 ### 2026-10-22: settings go live; project audit (claude)
 

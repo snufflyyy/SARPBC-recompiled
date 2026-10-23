@@ -133,6 +133,9 @@ Details and every flag: [docs/pipeline.md](docs/pipeline.md).
 | [docs/build-windows.md](docs/build-windows.md) | A future Windows build: needs, the POSIX-guard audit of `src/`, what is verified |
 | [docs/frame-pacing.md](docs/frame-pacing.md) | Frame clock, fps limits, what the game's own frame-rate settings are, ranked pacing changes |
 | [docs/online.md](docs/online.md) | Offline behaviour: what the title calls, the Play Online failure path, split screen |
+| [docs/multiplayer.md](docs/multiplayer.md) | Porting the community online mod (T015, T066-T074): findings on the 01.09 online stack, the plan, local test topology, decisions and risks |
+| [docs/multiplayer-protocol.md](docs/multiplayer-protocol.md) | The callproc web protocol the client speaks (`sarb.psyonix.com`): request format, what is sent when, open questions |
+| [docs/multiplayer-mod.md](docs/multiplayer-mod.md) | The community mod versus 01.09: what is known from public sources, the questions the diff must answer |
 | [docs/upstream.md](docs/upstream.md) | Offering our ps3recomp patches upstream: grouped PR drafts (nothing filed; ask the user first) |
 | [docs/workflow.md](docs/workflow.md) | Before any work: task board, claiming, worktrees, locks, merging, **pausing and resuming** |
 | [docs/graphics-menu.md](docs/graphics-menu.md) | The game's menus (PsyUI, UnrealScript states), UE3 package format v539, patching packages, the Graphics page (T065) |
