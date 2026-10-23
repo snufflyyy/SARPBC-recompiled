@@ -1,0 +1,448 @@
+From d75b7c18ab17f09db86139459de7560ae44706a1 Mon Sep 17 00:00:00 2001
+From: Braden <snufflyb14@gmail.com>
+Date: Fri, 23 Oct 2026 20:57:15 +0000
+Subject: [PATCH] ppu: lifted guest stores take an inline fast path
+ (vm_store_span, spu_coh_bitmap)
+
+Loads already inline; stores were still a call into the loader's vm_write*, which checks the null page,
+bounds, the debug watches and raw-SPU registers, then calls spu_coh_is_reserved out of line. On a render-bound
+UE3 screen those two were 33% of the render thread's CPU. The lifter's header now does the common case
+inline (address in [0x10000, vm_store_span), no SPU reservation on the line, byte-swap, write) and falls back
+to the out-of-line store otherwise. vm_store_span is armed by the first out-of-line store (ppu_vm_size is set
+by then) and stays 0 while PPU_WVAL/PPU_WWATCH/PS3_NULL_SWEEP are set. PPU_NO_INLINE_STORES opts out.
+---
+ runtime/ppu/ppu_loader.cpp                    |  23 ++-
+ runtime/ppu/tests/test_fs_aio.cpp             |   1 +
+ runtime/ppu/tests/test_fs_imports.cpp         |   1 +
+ runtime/ppu/tests/test_fs_large_file.cpp      |   1 +
+ runtime/ppu/tests/test_fs_open_flags.cpp      |   1 +
+ runtime/ppu/tests/test_hle_unresolved.cpp     |   1 +
+ runtime/ppu/tests/test_ppu_directory.cpp      |   1 +
+ .../ppu/tests/test_ppu_entry_arguments.cpp    |   1 +
+ .../ppu/tests/test_ppu_guest_call_stacks.cpp  |   1 +
+ runtime/spu/spu_coherency.c                   |  16 +-
+ tools/ppu_lifter.py                           |  49 +++++
+ tools/test_ppu_inline_stores.py               | 169 ++++++++++++++++++
+ 12 files changed, 255 insertions(+), 10 deletions(-)
+ create mode 100755 tools/test_ppu_inline_stores.py
+
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index ceed7da..bc7ebe5 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -1560,6 +1560,22 @@ static struct VmInlineInit {
+     }
+ } s_vm_inline_init;
+ 
++/* ppu_recomp.h's inline stores (vm_write*_inl) take addresses below vm_store_span; it stays 0 until the
++ * first out-of-line store arms it (ppu_vm_size is set by then), and stays 0 while any store diagnostic
++ * is armed, so those keep seeing every store. */
++extern "C" uint32_t vm_store_span = 0;
++static int s_store_span_armed = 0;
++static void vm_store_span_arm(void)
++{
++    s_store_span_armed = 1;
++    static const char* const vars[] = { "PPU_WVAL", "PPU_WWATCH", "PS3_NULL_SWEEP", "PPU_SLOW_STORES", 0 };   /* the last: A/B the inline path */
++    for (int i = 0; vars[i]; i++) if (getenv(vars[i])) return;
++    uint32_t limit = ppu_vm_size ? ppu_vm_size : 0xE0000000u;   /* below the raw-SPU register windows */
++    if (limit > 0xE0000000u) limit = 0xE0000000u;
++    __atomic_store_n(&vm_store_span, limit - 0x10000u - 8u, __ATOMIC_RELEASE);   /* 8: the widest store */
++}
++#define VM_STORE_ARM() do { if (__builtin_expect(!s_store_span_armed, 0)) vm_store_span_arm(); } while (0)
++
+ uint8_t  vm_read8 (uint64_t a) { if (vm_oob((uint32_t)a,1)) return 0; vm_hotmap((uint32_t)a,1);
+     if ((uint32_t)a < 0x10000u) ppu_null_read_report((uint32_t)a, 1, __builtin_return_address(0));
+ #ifdef VM_SAMPLE_READS
+@@ -1923,7 +1939,7 @@ extern "C" void ppu_ww_note_atomic(uint32_t ea, uint32_t val, int width, void* r
+ {
+     barrier_watch_hit(ea, val, width, ra);
+ }
+-void vm_write8 (uint64_t a, uint8_t  v) { barrier_watch_hit((uint32_t)a, v, 1, __builtin_return_address(0)); if (vm_oob((uint32_t)a,1) || vm_null_store((uint32_t)a, v, 1, __builtin_return_address(0))) return;
++void vm_write8 (uint64_t a, uint8_t  v) { VM_STORE_ARM(); barrier_watch_hit((uint32_t)a, v, 1, __builtin_return_address(0)); if (vm_oob((uint32_t)a,1) || vm_null_store((uint32_t)a, v, 1, __builtin_return_address(0))) return;
+ #ifdef _WIN32
+     /* PT detector: does this byte-write turn its word into the hunted truncated value? */
+     { if(g_pt_val==-2){const char*e=getenv("PT"); g_pt_val=e?(int64_t)strtoul(e,0,16):-1;}
+@@ -1933,9 +1949,9 @@ void vm_write8 (uint64_t a, uint8_t  v) { barrier_watch_hit((uint32_t)a, v, 1, _
+         else if(((uint32_t)a&3)==0 && v!=0) pt_restore(wa); /* MSB byte set non-zero = restored */ } }
+ #endif
+     VM_WRITE_COH(a, &v, 1); }
+-void vm_write16(uint64_t a, uint16_t v) { barrier_watch_hit((uint32_t)a, v, 2, __builtin_return_address(0)); if (vm_oob((uint32_t)a,2) || vm_null_store((uint32_t)a, v, 2, __builtin_return_address(0))) return;
++void vm_write16(uint64_t a, uint16_t v) { VM_STORE_ARM(); barrier_watch_hit((uint32_t)a, v, 2, __builtin_return_address(0)); if (vm_oob((uint32_t)a,2) || vm_null_store((uint32_t)a, v, 2, __builtin_return_address(0))) return;
+     v = __builtin_bswap16(v); VM_WRITE_COH(a, &v, 2); }
+-void vm_write32(uint64_t a, uint32_t v) { barrier_watch_hit((uint32_t)a, v, 4, __builtin_return_address(0)); if (vm_oob((uint32_t)a,4) || vm_null_store((uint32_t)a, v, 4, __builtin_return_address(0))) return;
++void vm_write32(uint64_t a, uint32_t v) { VM_STORE_ARM(); barrier_watch_hit((uint32_t)a, v, 4, __builtin_return_address(0)); if (vm_oob((uint32_t)a,4) || vm_null_store((uint32_t)a, v, 4, __builtin_return_address(0))) return;
+ #ifdef _WIN32
+     /* PT restore: a full-word store of a valid pointer (high byte set) to a
+      * previously-truncated slot clears the record (that truncation was transient). */
+@@ -1948,6 +1964,7 @@ void vm_write32(uint64_t a, uint32_t v) { barrier_watch_hit((uint32_t)a, v, 4, _
+        * are guest memory and the PPU reads most of them straight back. */
+       if (spu_raw_is_reg((uint32_t)a)) spu_raw_reg_store((uint32_t)a, _v, 4); } }
+ void vm_write64(uint64_t a, uint64_t v) {
++    VM_STORE_ARM();
+     /* PPU_WWATCH covers the 64-bit store too. It did not, which made the watch
+      * blind to exactly the code that matters most for it: every bignum and
+      * every 64-bit struct field is written with std, so a watch on one would
+diff --git a/runtime/ppu/tests/test_fs_aio.cpp b/runtime/ppu/tests/test_fs_aio.cpp
+index 037db68..f11a93a 100644
+--- a/runtime/ppu/tests/test_fs_aio.cpp
++++ b/runtime/ppu/tests/test_fs_aio.cpp
+@@ -1,3 +1,4 @@
++#define PPU_NO_INLINE_STORES   /* this test defines vm_write* itself (ppu_recomp.h's inline stores would redefine them) */
+ /*
+  * ps3recomp - cellFsAioRead on a shared fd (ppu_fs.cpp).
+  *
+diff --git a/runtime/ppu/tests/test_fs_imports.cpp b/runtime/ppu/tests/test_fs_imports.cpp
+index 02a13b2..d8f0cda 100644
+--- a/runtime/ppu/tests/test_fs_imports.cpp
++++ b/runtime/ppu/tests/test_fs_imports.cpp
+@@ -1,3 +1,4 @@
++#define PPU_NO_INLINE_STORES   /* this test defines vm_write* itself (ppu_recomp.h's inline stores would redefine them) */
+ /*
+  * ps3recomp - cellFs imports registered by ppu_fs_register().
+  *
+diff --git a/runtime/ppu/tests/test_fs_large_file.cpp b/runtime/ppu/tests/test_fs_large_file.cpp
+index 2fe7a46..8ffa8f5 100644
+--- a/runtime/ppu/tests/test_fs_large_file.cpp
++++ b/runtime/ppu/tests/test_fs_large_file.cpp
+@@ -1,3 +1,4 @@
++#define PPU_NO_INLINE_STORES   /* this test defines vm_write* itself (ppu_recomp.h's inline stores would redefine them) */
+ /*
+  * ps3recomp - cellFs on a file larger than 4 GiB (ppu_fs.cpp).
+  *
+diff --git a/runtime/ppu/tests/test_fs_open_flags.cpp b/runtime/ppu/tests/test_fs_open_flags.cpp
+index 0bad118..d9d2d86 100644
+--- a/runtime/ppu/tests/test_fs_open_flags.cpp
++++ b/runtime/ppu/tests/test_fs_open_flags.cpp
+@@ -1,3 +1,4 @@
++#define PPU_NO_INLINE_STORES   /* this test defines vm_write* itself (ppu_recomp.h's inline stores would redefine them) */
+ /*
+  * ps3recomp - cellFsOpen's open flags (ppu_fs.cpp) and the lv2 header's.
+  *
+diff --git a/runtime/ppu/tests/test_hle_unresolved.cpp b/runtime/ppu/tests/test_hle_unresolved.cpp
+index 52fa634..21ecbeb 100644
+--- a/runtime/ppu/tests/test_hle_unresolved.cpp
++++ b/runtime/ppu/tests/test_hle_unresolved.cpp
+@@ -1,3 +1,4 @@
++#define PPU_NO_INLINE_STORES   /* this test defines vm_write* itself (ppu_recomp.h's inline stores would redefine them) */
+ /*
+  * An import nothing handles: ps3_hle_call fakes r3 and reports each NID once.
+  *
+diff --git a/runtime/ppu/tests/test_ppu_directory.cpp b/runtime/ppu/tests/test_ppu_directory.cpp
+index 42ed073..fb52648 100644
+--- a/runtime/ppu/tests/test_ppu_directory.cpp
++++ b/runtime/ppu/tests/test_ppu_directory.cpp
+@@ -1,3 +1,4 @@
++#define PPU_NO_INLINE_STORES   /* this test defines vm_write* itself (ppu_recomp.h's inline stores would redefine them) */
+ // Real directory stream and guest-memory ABI, without game data or a GPU.
+ #include "../ppu_fs.cpp"
+ #include <cassert>
+diff --git a/runtime/ppu/tests/test_ppu_entry_arguments.cpp b/runtime/ppu/tests/test_ppu_entry_arguments.cpp
+index 011bc26..029204c 100644
+--- a/runtime/ppu/tests/test_ppu_entry_arguments.cpp
++++ b/runtime/ppu/tests/test_ppu_entry_arguments.cpp
+@@ -1,3 +1,4 @@
++#define PPU_NO_INLINE_STORES   /* this test defines vm_write* itself (ppu_recomp.h's inline stores would redefine them) */
+ #include "ppu_recomp.h"
+ #include <cstdio>
+ #include <cstdlib>
+diff --git a/runtime/ppu/tests/test_ppu_guest_call_stacks.cpp b/runtime/ppu/tests/test_ppu_guest_call_stacks.cpp
+index beaa388..3a5be08 100644
+--- a/runtime/ppu/tests/test_ppu_guest_call_stacks.cpp
++++ b/runtime/ppu/tests/test_ppu_guest_call_stacks.cpp
+@@ -1,3 +1,4 @@
++#define PPU_NO_INLINE_STORES   /* this test defines vm_write* itself (ppu_recomp.h's inline stores would redefine them) */
+ // ppu_guest_call runs every callback on a stack of its own.
+ //
+ // The runtime delivers guest callbacks (cellSysutil events, GCM vblank/flip/
+diff --git a/runtime/spu/spu_coherency.c b/runtime/spu/spu_coherency.c
+index 0121e13..b4ef63b 100644
+--- a/runtime/spu/spu_coherency.c
++++ b/runtime/spu/spu_coherency.c
+@@ -98,7 +98,9 @@ void spu_lockline_unlock(void) { atomic_store_explicit(&g_lockline, 0, memory_or
+ #define SPU_COH_LINES       (1u << (32 - SPU_COH_LINE_SHIFT))   /* 2^25 lines */
+ #define SPU_COH_BITMAP_SZ   (SPU_COH_LINES / 8)                 /* 4 MiB */
+ 
+-static unsigned char s_coh_bitmap[SPU_COH_BITMAP_SZ];
++/* Not static: the lifted code's inline guest stores (ppu_lifter.py, vm_st_ok) test one bit of it
++ * instead of calling spu_coh_is_reserved. Zero until the first GETLLAR, so no separate armed test. */
++unsigned char spu_coh_bitmap[SPU_COH_BITMAP_SZ];
+ 
+ /* Zero until the first GETLLAR anywhere. Keeps the PPU fast path off the
+  * bitmap entirely for a title that runs no SPU code, and keeps every existing
+@@ -148,7 +150,7 @@ unsigned long g_spu_lr_raise = 0;
+ void spu_coh_reserve(spu_context* ctx, uint32_t ea)
+ {
+     uint32_t line = ea >> SPU_COH_LINE_SHIFT;
+-    s_coh_bitmap[line >> 3] |= (unsigned char)(1u << (line & 7));
++    spu_coh_bitmap[line >> 3] |= (unsigned char)(1u << (line & 7));
+     s_coh_armed = 1;
+ 
+     if (!ctx) return;
+@@ -229,7 +231,7 @@ int spu_coh_is_reserved(uint32_t addr)
+ {
+     if (!s_coh_armed) return 0;
+     uint32_t line = addr >> SPU_COH_LINE_SHIFT;
+-    return (s_coh_bitmap[line >> 3] >> (line & 7)) & 1u;
++    return (spu_coh_bitmap[line >> 3] >> (line & 7)) & 1u;
+ }
+ 
+ int spu_coh_span_reserved(uint32_t ea, uint32_t size)
+@@ -241,11 +243,11 @@ int spu_coh_span_reserved(uint32_t ea, uint32_t size)
+     /* Bits l0..l1 inclusive: a partial mask on the first and last byte. */
+     unsigned lo_mask = 0xFFu << (l0 & 7);
+     unsigned hi_mask = 0xFFu >> (7 - (l1 & 7));
+-    if (b0 == b1) return (s_coh_bitmap[b0] & lo_mask & hi_mask) != 0;
+-    if (s_coh_bitmap[b0] & lo_mask) return 1;
++    if (b0 == b1) return (spu_coh_bitmap[b0] & lo_mask & hi_mask) != 0;
++    if (spu_coh_bitmap[b0] & lo_mask) return 1;
+     for (uint32_t b = b0 + 1; b < b1; b++)
+-        if (s_coh_bitmap[b]) return 1;
+-    return (s_coh_bitmap[b1] & hi_mask) != 0;
++        if (spu_coh_bitmap[b]) return 1;
++    return (spu_coh_bitmap[b1] & hi_mask) != 0;
+ }
+ 
+ /* A DMA PUT is issued BY an SPU, and hardware does not take that SPU's own
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index 6e28f3b..34ffc92 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -208,11 +208,60 @@ static inline uint64_t vm_read64_inl(uint64_t a)
+         return __builtin_bswap64(v); }
+     return vm_read64(a);
+ }
++/* Inline guest-store fast path: the same idea for stores, which were still a call into the loader's
++ * vm_write* (null-page, bounds, watch and raw-SPU-register checks, then an out-of-line
++ * spu_coh_is_reserved call): a third of a render-bound title's PPU time. The inline path takes a store
++ * to an address in [0x10000, vm_store_span) that no SPU has reserved a line of, and does exactly what
++ * the out-of-line one would: byte-swap and write. vm_store_span is 0 until the first slow store arms it
++ * (the loader reads the environment and ppu_vm_size then) and stays 0 while a store diagnostic is on. */
++#ifdef __cplusplus
++extern "C" {
++#endif
++extern uint32_t      vm_store_span;
++extern unsigned char spu_coh_bitmap[];   /* one bit per 128-byte line an SPU has reserved (runtime/spu/spu_coherency.c) */
++#ifdef __cplusplus
++}
++#endif
++static inline __attribute__((always_inline)) int vm_st_ok(uint32_t ea)
++{
++    return __builtin_expect(ea - 0x10000u < vm_store_span, 1) &&
++           __builtin_expect(!((__atomic_load_n(&spu_coh_bitmap[ea >> 10], __ATOMIC_RELAXED) >> ((ea >> 7) & 7)) & 1u), 1);
++}
++static inline __attribute__((always_inline)) void vm_write8_inl(uint64_t a, uint8_t v)
++{
++    const uint32_t ea = (uint32_t)a;
++    if (vm_st_ok(ea)) { vm_base[ea] = v; return; }
++    vm_write8(a, v);
++}
++static inline __attribute__((always_inline)) void vm_write16_inl(uint64_t a, uint16_t v)
++{
++    const uint32_t ea = (uint32_t)a;
++    if (vm_st_ok(ea)) { const uint16_t r = __builtin_bswap16(v); memcpy(vm_base + ea, &r, 2); return; }
++    vm_write16(a, v);
++}
++static inline __attribute__((always_inline)) void vm_write32_inl(uint64_t a, uint32_t v)
++{
++    const uint32_t ea = (uint32_t)a;
++    if (vm_st_ok(ea)) { const uint32_t r = __builtin_bswap32(v); memcpy(vm_base + ea, &r, 4); return; }
++    vm_write32(a, v);
++}
++static inline __attribute__((always_inline)) void vm_write64_inl(uint64_t a, uint64_t v)
++{
++    const uint32_t ea = (uint32_t)a;
++    if (vm_st_ok(ea)) { const uint64_t r = __builtin_bswap64(v); memcpy(vm_base + ea, &r, 8); return; }
++    vm_write64(a, v);
++}
+ #ifndef PPU_NO_INLINE_LOADS
+ #define vm_read8(a)  vm_read8_inl(a)
+ #define vm_read16(a) vm_read16_inl(a)
+ #define vm_read32(a) vm_read32_inl(a)
+ #define vm_read64(a) vm_read64_inl(a)
++#ifndef PPU_NO_INLINE_STORES
++#define vm_write8(a, v)  vm_write8_inl(a, v)
++#define vm_write16(a, v) vm_write16_inl(a, v)
++#define vm_write32(a, v) vm_write32_inl(a, v)
++#define vm_write64(a, v) vm_write64_inl(a, v)
++#endif
+ #endif
+ 
+ /* Syscall handler */
+diff --git a/tools/test_ppu_inline_stores.py b/tools/test_ppu_inline_stores.py
+new file mode 100755
+index 0000000..c15f5bd
+--- /dev/null
++++ b/tools/test_ppu_inline_stores.py
+@@ -0,0 +1,169 @@
++#!/usr/bin/env python3
++"""The lifted code's inline guest stores (ppu_lifter.py HEADER_PREAMBLE: vm_st_ok, vm_write*_inl).
++
++Compiles the generated header's preamble against a stub runtime and checks that a store
++takes the inline path only when it may: the address is in [0x10000, vm_store_span) and no SPU
++holds a reservation on its 128-byte line. Everything else must reach the out-of-line
++vm_write*, and the inline path must write exactly what that one would (big-endian, any
++alignment, any width). PPU_NO_INLINE_STORES must leave the plain call.
++"""
++import importlib.util
++import os
++from pathlib import Path
++import shutil
++import subprocess
++import sys
++import tempfile
++import unittest
++
++TOOLS = Path(__file__).resolve().parent
++
++C_RT = r'''
++#define PPU_NO_INLINE_LOADS   /* this file defines the out-of-line accessors, like ppu_loader.cpp */
++#include "ppu_recomp.h"
++
++uint8_t* vm_base;
++int vm_inline_ok = 1;
++uint32_t ppu_vm_size = 0, ppu_hle_inject_base = 0;
++uint32_t vm_store_span;
++unsigned char spu_coh_bitmap[1u << 22];
++int slow_calls, slow_last_width;
++uint64_t slow_last_addr, slow_last_val;
++uint8_t vm_read8(uint64_t a) { return 0; } uint16_t vm_read16(uint64_t a) { return 0; }
++uint32_t vm_read32(uint64_t a) { return 0; } uint64_t vm_read64(uint64_t a) { return 0; }
++void vm_write8(uint64_t a, uint8_t v)   { slow_calls++; slow_last_addr = a; slow_last_val = v; slow_last_width = 1; }
++void vm_write16(uint64_t a, uint16_t v) { slow_calls++; slow_last_addr = a; slow_last_val = v; slow_last_width = 2; }
++void vm_write32(uint64_t a, uint32_t v) { slow_calls++; slow_last_addr = a; slow_last_val = v; slow_last_width = 4; }
++void vm_write64(uint64_t a, uint64_t v) { slow_calls++; slow_last_addr = a; slow_last_val = v; slow_last_width = 8; }
++int ppu_stwcx32(uint64_t a, uint32_t e, uint32_t v) { return 0; }
++int ppu_stdcx64(uint64_t a, uint64_t e, uint64_t v) { return 0; }
++void lv2_syscall(ppu_context* c) {}
++const func_entry function_table[] = {{0, 0, 0}};
++const uint64_t function_table_count = 0;
++'''
++
++C_TEST = r'''
++#include "ppu_recomp.h"
++#include <stdio.h>
++#include <stdlib.h>
++
++extern int slow_calls, slow_last_width;
++extern uint64_t slow_last_addr, slow_last_val;
++extern unsigned char spu_coh_bitmap[];
++
++static int fails;
++#define CHECK(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
++
++int main(void)
++{
++    vm_base = calloc(1, 0x400000);
++    const uint32_t span = 0x200000 - 0x10000 - 8;
++
++    /* Not armed yet (span 0): every store is the out-of-line one. */
++    vm_store_span = 0;
++    vm_write32(0x20000, 0x11223344u);
++    CHECK(slow_calls == 1 && slow_last_addr == 0x20000 && slow_last_val == 0x11223344u);
++    CHECK(vm_base[0x20000] == 0);
++
++    vm_store_span = span;
++    slow_calls = 0;
++    /* Inline: big-endian bytes, no call. */
++    vm_write32(0x20000, 0x11223344u);
++    CHECK(slow_calls == 0);
++    CHECK(vm_base[0x20000] == 0x11 && vm_base[0x20001] == 0x22 && vm_base[0x20002] == 0x33 && vm_base[0x20003] == 0x44);
++    vm_write64(0x20008, 0x0102030405060708ull);
++    CHECK(slow_calls == 0 && vm_base[0x20008] == 1 && vm_base[0x2000F] == 8);
++    vm_write16(0x20011, 0xAABB);   /* unaligned */
++    CHECK(slow_calls == 0 && vm_base[0x20011] == 0xAA && vm_base[0x20012] == 0xBB);
++    vm_write8(0x20020, 0x5A);
++    CHECK(slow_calls == 0 && vm_base[0x20020] == 0x5A);
++    vm_write32(0x20041, 0xDEADBEEFu);   /* unaligned word */
++    CHECK(slow_calls == 0 && vm_base[0x20041] == 0xDE && vm_base[0x20044] == 0xEF);
++
++    /* Range: below 0x10000 and at/above the span's end go out of line, untouched. */
++    vm_write32(0xFFFC, 1);
++    CHECK(slow_calls == 1 && slow_last_addr == 0xFFFC && slow_last_width == 4);
++    vm_write64(0x10000 + span, 2);   /* first address past the span */
++    CHECK(slow_calls == 2 && slow_last_width == 8);
++    vm_write8(0x10000 + span - 1, 7);        /* last address inside it */
++    CHECK(slow_calls == 2 && vm_base[0x10000 + span - 1] == 7);
++    vm_write32(0xE0000000u, 3);              /* the raw-SPU register windows */
++    CHECK(slow_calls == 3);
++    vm_write32(0x1000000000ull + 0x20000, 4);   /* only the low 32 bits count */
++    CHECK(slow_calls == 3 && vm_base[0x20003] == 4);
++
++    /* An SPU reservation on a 128-byte line sends stores to that line out of line, only that line. */
++    const uint32_t line = 0x30080;
++    spu_coh_bitmap[line >> 10] |= (unsigned char)(1u << ((line >> 7) & 7));
++    slow_calls = 0;
++    vm_write32(line + 4, 5);
++    vm_write8(line + 127, 6);
++    CHECK(slow_calls == 2);
++    vm_write32(line - 4, 7);     /* the line before */
++    vm_write32(line + 128, 8);   /* the line after */
++    CHECK(slow_calls == 2 && vm_base[line - 1] == 7 && vm_base[line + 131] == 8);
++    CHECK(vm_base[line + 7] == 0);
++    spu_coh_bitmap[line >> 10] = 0;
++    vm_write32(line + 4, 9);
++    CHECK(slow_calls == 2 && vm_base[line + 7] == 9);
++
++    printf(fails ? "FAILED\n" : "OK\n");
++    return fails != 0;
++}
++'''
++
++C_OPT_OUT = r'''
++#define PPU_NO_INLINE_STORES
++#include "ppu_recomp.h"
++#include <stdio.h>
++
++extern int slow_calls;
++
++int main(void)
++{
++    vm_store_span = 0xFFFFFFF0u;   /* would take the inline path, if it were there */
++    vm_write32(0x20000, 1);
++    vm_write64(0x20000, 1);
++    printf(slow_calls == 2 ? "OK\n" : "FAILED\n");
++    return slow_calls != 2;
++}
++'''
++
++
++class InlineStoreTests(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        cc = shutil.which(os.environ.get("CC", "clang")) or shutil.which("cc")
++        if not cc:
++            raise unittest.SkipTest("C compiler required")
++        spec = importlib.util.spec_from_file_location("ppu_lifter", TOOLS / "ppu_lifter.py")
++        lifter = importlib.util.module_from_spec(spec)
++        spec.loader.exec_module(lifter)
++        cls.tmp = tempfile.TemporaryDirectory()
++        cls.addClassCleanup(cls.tmp.cleanup)
++        cls.dir = Path(cls.tmp.name)
++        (cls.dir / "ppu_recomp.h").write_text(lifter.HEADER_PREAMBLE)
++        cls.cc = cc
++
++    def build_run(self, name, source, opt):
++        src, rt = self.dir / f"{name}.c", self.dir / "rt.c"
++        src.write_text(source)
++        rt.write_text(C_RT)
++        exe = self.dir / name
++        subprocess.run([self.cc, opt, "-std=gnu17", "-I", str(self.dir), str(src), str(rt), "-o", str(exe)],
++                       check=True, capture_output=True, text=True)
++        out = subprocess.run([str(exe)], capture_output=True, text=True)
++        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
++        self.assertIn("OK", out.stdout)
++
++    def test_routes_and_bytes(self):
++        for opt in ("-O0", "-O1", "-O2"):
++            with self.subTest(opt=opt):
++                self.build_run("inline" + opt[1:], C_TEST, opt)
++
++    def test_opt_out_keeps_the_call(self):
++        self.build_run("optout", C_OPT_OUT, "-O1")
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.47.3
+

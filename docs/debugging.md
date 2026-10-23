@@ -335,6 +335,18 @@ thread's registers through the TLS `g_active_ctx`, e.g.
 `break cellGcmMapMainMemory`, then `watch -l *(unsigned int*)(vm_base+EA)` with `bt` as
 the command. That is how the flip handler `func_000DC144` was caught releasing the park.
 
+## CPU profile without perf (T076)
+
+`tools/cpu_profile.sh [--start S] [--secs N] [--top K] [-- boot_check args]` preloads `tools/cpu_profile/prof.c` into the
+game: at S seconds it arms a per-thread CPU-time timer (1 kHz) on every thread for N seconds, histograms the instruction
+pointers and prints each thread's top functions (`tools/cpu_profile/sym.py`, names from `nm`; lifted guest functions are
+`func_XXXXXXXX`). A thread's samples divided by `1000 * N` is its share of a core, so it says which threads are saturated and
+what a hot one runs. It cannot say who a thread waits for: `PS3_FTRACE` (the frame timeline,
+`external/ps3recomp/tools/ftrace_report.py`) does, and the two together found the Mini-Games limiter. Needs no
+`CAP_PERFMON`, no gdb, costs ~5% while sampling. Example, Mini-Games: `tools/cpu_profile.sh --start 68 --secs 12 -- 90
+--version 0109 --scenario single --quiet`. For an A/B use one binary and an env switch, interleaved (A B A B): this screen's fps
+differs 30-48 between identical runs.
+
 ## Profiling
 
 `tools/spu_profile.sh <secs> [--warmup N] [--version 0109] [--build-dir DIR] [--scenario NAME] [--pad SPEC] [--sampler auto|perf|stacks|none] [--interval S] [-- VAR=val ...]` (T029) runs

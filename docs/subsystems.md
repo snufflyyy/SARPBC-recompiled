@@ -1244,6 +1244,48 @@ divide by frames; the chain's `jc_thread`s are short-lived, so `eu-stack` on hot
 timers). Context pool contract: a job's writes outside its own regions and the top 4 KB are not cleaned for the next job;
 `tools/test_spu_job_hotpath.py` pins the recycled-store and memo behaviour (both mutants fail it).
 
+### Mini-Games, second round: the render thread's stores, not the drain (T076, 2026-10-23, patch 0090)
+
+T075 left Mini-Games at 31-38 fps and blamed the FIFO drain (~1000 draws a frame). **The drain was only part of it**:
+
+- **A/B 1: skip every draw** (a temporary `return` at the top of `sink_end`, so the drain does nothing but decode):
+  Mini-Games 35 to ~41 fps. A free drain buys 6 fps, so the guest side is the limiter.
+- **`tools/cpu_profile.sh`** (new; per-thread CPU-time sampler, see debugging.md) on Mini-Games: the **RenderingThread was
+  ~84% busy** (20 ms of a 24 ms frame) and the drain thread ~42-70%; neither saturated, but the render thread's wall time
+  was the frame. `PS3_FTRACE` agrees (439 frames, median 21 ms: render thread running 18 ms, `usleep@001002EC` 3 ms; the
+  main thread blocked 17 ms in `event_queue_receive` waiting for it; the drain 16.5 ms of the frame).
+- Inside the render thread: 48% lifted guest code, **`vm_write64` 14% + `vm_write32` 13% + `spu_coh_is_reserved` 7% = 33%**,
+  `ps3_indirect_call_impl` 8%, `ps3_hle_call` 4%. Loads were already inline in the lifted code (`vm_read*_inl`, gated by
+  `vm_inline_ok`); **stores were still a call into the loader's `vm_write*`**: null-page test, bounds, the debug watches
+  (`PPU_WVAL`/`PPU_WWATCH`), raw-SPU-register test, then `VM_WRITE_COH` calling `spu_coh_is_reserved` out of line. The
+  recompiled code has 712,627 store sites.
+- **Fix (patch 0090, needs a re-lift): inline stores in the lifted header** (`tools/ppu_lifter.py`, `vm_st_ok`,
+  `vm_write{8,16,32,64}_inl`, always_inline). The inline path takes an address in `[0x10000, vm_store_span)` whose 128-byte
+  line no SPU has reserved (one bit of `spu_coh_bitmap`, now exported from `spu_coherency.c`; zero until the first GETLLAR,
+  so no armed test) and does exactly the byte-swap and write the out-of-line store did; everything else still calls it.
+  `vm_store_span` is 0 until the first out-of-line store arms it (`ppu_vm_size` is known by then), is `0xE0000000 - 0x10000 - 8`
+  here (below the raw-SPU windows, room for the widest store), and stays 0 while `PPU_WVAL`, `PPU_WWATCH`,
+  `PS3_NULL_SWEEP` or **`PPU_SLOW_STORES=1`** is set (that last one is the A/B switch: same binary, old behaviour).
+  `PPU_NO_INLINE_STORES` (compile time, before the include) keeps the plain call. `tools/test_ppu_inline_stores.py` pins the
+  routes and bytes (range edges, 4 GB wrap, reserved line and its neighbours, unaligned, `-O0/-O1/-O2`; three mutants fail it).
+- **A/B 2, interleaved runs of the same binary** (`PPU_SLOW_STORES=1` vs not, Mini-Games mean fps over t=66-87 s, three
+  pairs): **31.1 / 31.4 / 30.9 against 43.8 / 44.1 / 43.7**. Arena (130 s, driving) 59.8 fps, no alerts, picture intact.
+  Single runs of this screen vary 30-48 fps with the machine's mood: only an interleaved A/B in one binary says anything.
+- Render thread afterwards (CPU samples per 12 s, 1000 = one core): 8215 against 10043, and the store helpers are gone from
+  its profile; the drain thread, the SPU mixer and the render thread are each ~70% busy now.
+
+**Re-lift.** A lifter change reaches the game only through `tools/relift.sh` (`GAME_DIR=versions/0109/game OUT_DIR=versions/0109
+tools/relift.sh`, ~3 min) and a full rebuild (~9 min). The 01.02 tree at the repo root was **not** re-lifted: it keeps the old
+header and still works (the out-of-line stores are still there); re-lift it before building 01.02 for a speed test.
+
+**What the ring does** (`GCM_RECDBG=1`): the title's command ring is 3 MB (`0x40000000`..`0x402FF000`), wrapping ~5 times a
+second on Mini-Games; each wrap waits `Sleep(1)` x ~11 for the drain to finish the tail (`cellGcm_fifo_recycle`), the drain
+being ~1 MB (2-3 frames) behind `put` at that moment. That is the render thread's 17% `nanosleep` in the FTRACE samples; a
+smarter wake-up (a kick of the clock thread at the wrap, Port next 3) is the next measurable thing. Not done.
+
+**Next, measured not tried**: `ps3_indirect_call_impl` (~9% of the render thread: ~15 env-flag branches and two cache
+misses in the two parallel `g_fn`/`g_addr` hash arrays per call) and `ps3_hle_call` (~5%); the PPU TUs build at `-O1`.
+
 ### Unmapped SPU PUT lookup (T056, 2026-10-21)
 
 `gcm_note_spu_put` must remain enabled: it discovers SPU-built RSX command blocks.

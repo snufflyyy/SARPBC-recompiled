@@ -10,7 +10,12 @@ minigame"; T075, patches 0085-0088).** Mini-Games was a steady 15 fps, now ~38; 
 Cause: the ShaderPatching SPURS job chain (one job per draw, ~1000 a frame on that screen) was a one-core ceiling of 14,600 jobs/s
 at 67 us a job, and the render thread waits for it. Per job: 46 us image hash, 19 us context memset, copies, then a host thread per
 Run, then the PPU debug-store-watch hook. Method, numbers and the correction to T055: subsystems.md "ShaderPatching job chain".
-**What is left there is the FIFO drain** (~1000 draws a frame at ~6 us, frame clock 61% busy): dod3-reuse "Port next" 9.
+**Second round (user: "fix the remaining Mini-Games fps from the FIFO drain"; T076, patch 0090): the drain was not the main limit.**
+Skipping every draw bought only 6 fps; the RenderingThread was ~84% busy and a third of that was the guest's stores, still a call
+into the loader's `vm_write*` (+ an out-of-line reservation check) while loads were already inline. Stores inline in the lifted header
+now: **Mini-Games 31 -> 44 fps** (interleaved A/B, same binary, `PPU_SLOW_STORES=1` for the old path), arena 59.8. Needs a re-lift
+(done for 01.09; the 01.02 tree at the repo root is not). New tool `tools/cpu_profile.sh`. Method, numbers, what is next (the 3 MB ring
+wrap wait, `ps3_indirect_call_impl`): subsystems.md "Mini-Games, second round".
 
 **Multiplayer is POSTPONED (user, 2026-10-23: "the server isn't open source like i assumed. just postpone the multiplayer plan"); T015 and T066-T074 are all `blocked`, nothing to do until the user provides a server.** Research below stays valid.
 
@@ -115,7 +120,7 @@ Player menu. Root `analysis/boot_check/20261021-200728-2049532/`. The preceding
 300 s arena/results/return-menu verification is logged below. Frame-time
 breakdowns and historical measurements: subsystems.md "Menu frame rate".
 
-**Integrated patch stack:** 89 patch files on upstream `749182e`
+**Integrated patch stack:** 90 patch files on upstream `749182e`
 (v0.16.0, T043), including T052 and Claude's later audio/shadow/port work.
 Current full gate: 102 scripts, 98 passed / 4 explicit skips / 0 failures/timeouts;
 the nested SDL/Vulkan suites are included (T048).
@@ -184,6 +189,14 @@ match with input over time, arena audio and frame-rate measurement.
   POSIX boot scaffold gets this UE3 title to the menus on Linux.
 
 ## Log
+
+### 2026-10-23: Mini-Games, the render thread (T076, claude)
+
+- Skip-all-draws A/B: 35 -> ~41 fps, so the drain is ~15% of the frame. `tools/cpu_profile.sh` (new, no perf needed) and `PS3_FTRACE`:
+  RenderingThread 84% busy, main blocked on it, drain 16.5 ms of a 21 ms frame. 33% of the render thread was `vm_write32/64` +
+  `spu_coh_is_reserved`. Patch 0090: inline stores in the lifter's header (`vm_store_span`, `spu_coh_bitmap`), relift + rebuild.
+- Interleaved A/B x3: 31.1/31.4/30.9 (`PPU_SLOW_STORES=1`) vs 43.8/44.1/43.7 fps. Arena 130 s: 59.8 fps, no alerts, picture intact.
+  `tools/test_ppu_inline_stores.py` (3 mutants fail it). Left: ring-wrap `Sleep(1)` x11, `ps3_indirect_call_impl`, `-O1`.
 
 ### 2026-10-23: Mini-Games fps dip (T075, claude)
 
