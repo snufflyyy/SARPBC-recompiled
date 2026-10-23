@@ -2,7 +2,7 @@
 
 Status: open
 Owner: -
-Priority: 14
+Priority: blocked
 Touches: src/overrides/online_*.cpp (new), tools/mp_overlay.py (new, package/config overlay for the mod's changes), tools/test_mp_overlay.py (new), docs/multiplayer.md, docs/multiplayer-protocol.md, docs/multiplayer-mod.md
 Reads: docs/multiplayer.md, docs/multiplayer-protocol.md, docs/multiplayer-mod.md, docs/graphics-menu.md (overlay and package patching), tasks T066-T069
 
@@ -30,3 +30,4 @@ Failure paths verified (server down, wrong version, empty/garbled reply) return 
 
 ## Log
 - 2026-10-23 claude: created from the multiplayer research.
+- 2026-10-23 user: "the server isn't open source like i assumed. just postpone the multiplayer plan." Set to blocked; resume when the user supplies the server (or decides on a different approach).

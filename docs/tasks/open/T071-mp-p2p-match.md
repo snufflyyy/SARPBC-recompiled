@@ -2,7 +2,7 @@
 
 Status: open
 Owner: -
-Priority: 15
+Priority: blocked
 Touches: patches/ps3recomp/NNNN-np-signaling-p2p.patch (libs/network/sceNpSignaling.c, sysNet.c, np_*), src/overrides/net_p2p.cpp (new), docs/multiplayer.md, docs/subsystems.md
 Reads: docs/multiplayer.md (sections 4, 6, 8, 9), external/ps3recomp/docs/ONLINE.md (two players on one machine, P2P sockets), tasks T067-T070
 
@@ -33,3 +33,4 @@ instances in the task log (thumbnails, not PPMs: disk is tight). `tools/verify.s
 ## Log
 - 2026-10-23 claude: created from the multiplayer research. External prior art: ps3recomp's psnr two-instance
   Simpsons run (set `PS3_VERBOSE=0`, otherwise two instances crawl).
+- 2026-10-23 user: "the server isn't open source like i assumed. just postpone the multiplayer plan." Set to blocked; resume when the user supplies the server (or decides on a different approach).

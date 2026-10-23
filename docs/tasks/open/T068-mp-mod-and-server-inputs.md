@@ -2,7 +2,7 @@
 
 Status: open
 Owner: -
-Priority: 12
+Priority: blocked
 Touches: docs/multiplayer-mod.md (new), docs/multiplayer.md, docs/multiplayer-protocol.md, tools/mod_diff.py (new), tools/test_mod_diff.py (new)
 Reads: docs/multiplayer.md (sections 2, 3, 5, 9, 10), docs/game-profile.md "Versions and updates", docs/pipeline.md (tools/extract.sh), docs/graphics-menu.md (package tools)
 
@@ -35,3 +35,4 @@ string and key handling the server expects are known; nothing from the mod is tr
 
 ## Log
 - 2026-10-23 claude: created from the multiplayer research. Blocked on the user's files, not on any agent.
+- 2026-10-23 user: "the server isn't open source like i assumed. just postpone the multiplayer plan." Set to blocked; resume when the user supplies the server (or decides on a different approach).

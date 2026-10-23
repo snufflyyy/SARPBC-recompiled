@@ -2,7 +2,7 @@
 
 Status: open
 Owner: -
-Priority: 13
+Priority: blocked
 Touches: patches/ps3recomp/NNNN-np-online-identity.patch (libs/network/sceNp.c, sceNpBasic.c, sceNpLookup.c, np_*), src/overrides/np_online.cpp (new), docs/multiplayer.md, docs/hle-coverage.md
 Reads: docs/multiplayer.md (sections 4.2, 5), docs/hle-coverage.md (sceNp rows), docs/online.md, external/ps3recomp/docs/ONLINE.md, tasks T066, T068
 
@@ -32,3 +32,4 @@ Unit tests in the upstream style for the new HLE paths (`libs/network/tests/`). 
 
 ## Log
 - 2026-10-23 claude: created from the multiplayer research. Needs T066 (what the login gate checks) and T068 (D1).
+- 2026-10-23 user: "the server isn't open source like i assumed. just postpone the multiplayer plan." Set to blocked; resume when the user supplies the server (or decides on a different approach).

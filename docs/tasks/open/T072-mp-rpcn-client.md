@@ -33,3 +33,4 @@ psnr and offline paths unaffected; patch exported (`tools/export_patch.sh`) with
 ## Log
 - 2026-10-23 claude: created as conditional work from the multiplayer research (public RPCN stays off-limits:
   local server only).
+- 2026-10-23 user: "the server isn't open source like i assumed. just postpone the multiplayer plan." Set to blocked; resume when the user supplies the server (or decides on a different approach).

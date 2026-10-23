@@ -39,3 +39,4 @@ passes (T074), docs and credits are in place. Close this task with a summary whe
 - 2026-10-23 claude: researched; findings in docs/multiplayer.md (the client's matchmaking is an HTTP stored-
   procedure web service at `sarb.psyonix.com/v001/callproc.php`, plain HTTP on port 80, verified in a sandboxed
   run; NP is only identity/friends/presence/signaling; RPCN may or may not be needed). Created T066-T074.
+- 2026-10-23 user: "it seems like the server isn't open source like i assumed. just postpone the multipayer plan." All sub-tasks T066-T074 are now `Priority: blocked`. Un-block them when the user has a server (or the server software/protocol) to test against; T066 (protocol from the client) and T067 (local rig) could also be done server-less, but the user chose to postpone everything.

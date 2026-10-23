@@ -2,7 +2,7 @@
 
 Status: open
 Owner: -
-Priority: 11
+Priority: blocked
 Touches: config.toml, src/main.cpp, src/overrides/net_*.cpp (new), patches/ps3recomp/NNNN-net-portmap.patch (libs/network/sysNet.c), tools/mp_local.sh (new), docs/multiplayer.md, docs/build-linux.md
 Reads: docs/multiplayer.md (sections 1, 6, 8), docs/online.md, patches/ps3recomp/0073-net-hostmap-sandbox.patch, tools/run.sh, tools/boot_check.sh
 
@@ -35,3 +35,4 @@ unchanged (`tools/verify.sh --no-boot` and a normal boot_check). Lint clean.
 ## Log
 - 2026-10-23 claude: created from the multiplayer research. Port 80 is privileged; the box runs as root today
   but the port map keeps it working for other users and agents.
+- 2026-10-23 user: "the server isn't open source like i assumed. just postpone the multiplayer plan." Set to blocked; resume when the user supplies the server (or decides on a different approach).

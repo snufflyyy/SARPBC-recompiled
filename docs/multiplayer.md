@@ -1,5 +1,7 @@
 # Multiplayer: porting the community online mod to the 01.09 recomp
 
+**Status: POSTPONED (user, 2026-10-23: the community server is not open source, so there is nothing to test against; T015 and T066-T074 are `blocked`).** Resume when the user provides a server or its protocol.
+
 Research and plan, written 2026-10-23 (T015 and its sub-tasks T066-T074). Goal (user, 2026-10-23): "port
 the custom multiplayer to our 1.09 recomp", **using the community server unmodified**, hosted **locally**
 for testing. Nothing here is implemented yet; the only code run so far is a throwaway loopback listener

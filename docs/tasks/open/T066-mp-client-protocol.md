@@ -2,7 +2,7 @@
 
 Status: open
 Owner: -
-Priority: 10
+Priority: blocked
 Touches: docs/multiplayer-protocol.md (new), tools/callproc_probe.py (new), tools/test_callproc_probe.py (new), docs/multiplayer.md
 Reads: docs/multiplayer.md (sections 4 and 7), docs/unreal-engine-3.md, docs/graphics-menu.md (tools/ue3), docs/subsystems.md (network)
 
@@ -46,3 +46,4 @@ mod file used. `tools/lint.py --tests` is clean. Sandbox on for every run (`PS3_
 - 2026-10-23 claude: created from the multiplayer research (docs/multiplayer.md). First probe already run: boot
   request at ~6 s and on Play Online, `GetOnlineVariables()` + `ValidateVersion('00.00.0006')`; an empty 200 leaves
   the game on "Logging in...".
+- 2026-10-23 user: "the server isn't open source like i assumed. just postpone the multiplayer plan." Set to blocked; resume when the user supplies the server (or decides on a different approach).

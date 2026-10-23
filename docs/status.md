@@ -5,6 +5,8 @@ work session. Newest log entry first. Use absolute dates.
 
 ## Resume here (updated 2026-10-23)
 
+**Multiplayer is POSTPONED (user, 2026-10-23: "the server isn't open source like i assumed. just postpone the multiplayer plan"); T015 and T066-T074 are all `blocked`, nothing to do until the user provides a server.** Research below stays valid.
+
 **Multiplayer (user, 2026-10-23: "port the custom multiplayer to our 1.09 recomp", community server unmodified, hosted
 locally; permission given because the server is local):** research and plan are in [docs/multiplayer.md](docs/multiplayer.md),
 tasks T066-T074 on the board under the umbrella T015. Key finding (run on 2026-10-23, sandboxed): the 01.09 client's

@@ -2,7 +2,7 @@
 
 Status: open
 Owner: -
-Priority: 18
+Priority: blocked
 Touches: tools/mp_check.sh (new), tools/verify.sh, tools/boot_check.sh, tools/test_mp_check.py (new), docs/multiplayer.md, docs/online.md, docs/status.md, AGENTS.md, README.md
 Reads: docs/multiplayer.md, docs/workflow.md, tools/verify.sh, tools/boot_check.sh (--scenario)
 
@@ -28,3 +28,4 @@ arena and return to the menu; the docs let a new agent reproduce it in minutes; 
 
 ## Log
 - 2026-10-23 claude: created from the multiplayer research.
+- 2026-10-23 user: "the server isn't open source like i assumed. just postpone the multiplayer plan." Set to blocked; resume when the user supplies the server (or decides on a different approach).

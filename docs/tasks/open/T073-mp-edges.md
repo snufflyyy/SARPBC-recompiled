@@ -2,7 +2,7 @@
 
 Status: open
 Owner: -
-Priority: 17
+Priority: blocked
 Touches: src/overrides/online_*.cpp, patches/ps3recomp/NNNN-voice-*.patch (libs/audio or libs/misc cellVoice), docs/multiplayer.md, docs/online.md
 Reads: docs/multiplayer.md (sections 4, 9), docs/multiplayer-protocol.md, tasks T070, T071
 
@@ -29,3 +29,4 @@ or alert in a 10-minute two-instance session.
 
 ## Log
 - 2026-10-23 claude: created from the multiplayer research.
+- 2026-10-23 user: "the server isn't open source like i assumed. just postpone the multiplayer plan." Set to blocked; resume when the user supplies the server (or decides on a different approach).
